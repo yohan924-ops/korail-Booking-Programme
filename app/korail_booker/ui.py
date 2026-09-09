@@ -130,6 +130,10 @@ HOLD_LAYOUT = (
     ("남은 시간", 120, "center"),
 )
 HOLD_COLUMNS = tuple(name for name, _width, _anchor in HOLD_LAYOUT)
+#: 로그인 상태 글자색. 가장 자주 확인하는 것이라 색으로 먼저 말합니다.
+LOGIN_OK_COLOUR = "#1a7f37"
+LOGIN_BAD_COLOUR = "#b3261e"
+LOGIN_OFF_COLOUR = "#666666"
 #: 자동완성이 무시하는 키. 방향키와 기능키로는 목록을 다시 좁히지 않습니다.
 _NAVIGATION_KEYS = frozenset(
     {
@@ -490,15 +494,22 @@ class BookerApp:
             row=0, column=3
         )
         self.login_button = ttk.Button(frame, text="로그인", command=self.on_login)
-        self.login_button.grid(row=0, column=4, padx=8)
-        ttk.Label(frame, textvariable=self.login_state).grid(
-            row=0, column=5, padx=8, sticky="w"
+        self.login_button.grid(row=0, column=4, padx=(8, 2))
+        self.logout_button = ttk.Button(
+            frame, text="로그아웃", command=self.on_logout, state="disabled"
         )
+        self.logout_button.grid(row=0, column=5, padx=2)
+        # 로그인했는지 아닌지는 이 프로그램에서 가장 자주 확인하는 것입니다.
+        # 색으로 말하면 읽지 않아도 압니다.
+        self.login_label = ttk.Label(
+            frame, textvariable=self.login_state, foreground=LOGIN_OFF_COLOUR
+        )
+        self.login_label.grid(row=0, column=6, padx=8, sticky="w")
         ttk.Label(
             frame,
             text="비밀번호는 저장하지 않습니다. 비회원 예매는 지원하지 않습니다.",
             foreground="#666666",
-        ).grid(row=1, column=0, columnspan=6, sticky="w", padx=4, pady=(0, 6))
+        ).grid(row=1, column=0, columnspan=7, sticky="w", padx=4, pady=(0, 6))
 
     def _build_query(self, parent: tk.PanedWindow) -> None:
         frame = ttk.LabelFrame(parent, text="2. 열차 조회")
@@ -790,6 +801,12 @@ class BookerApp:
             bar, text="조회", style="Search.TButton", command=self.on_search
         )
         self.search_button.pack(side="left")
+        # 조회는 하루치를 훑느라 몇 초 걸립니다. 아무 표시가 없으면 눌렸는지
+        # 아닌지 알 수 없어 다시 누르게 되고, 그러면 요청이 두 배로 나갑니다.
+        # 얼마나 남았는지는 알 수 없으므로 진행률이 아니라 움직이는 막대입니다.
+        self.search_progress = ttk.Progressbar(bar, mode="indeterminate", length=140)
+        self.search_progress.pack(side="left", padx=10)
+        self.search_progress.pack_forget()
         ttk.Label(
             bar,
             text="조건을 바꾼 뒤에는 다시 눌러야 합니다 (Enter 로도 됩니다).",
@@ -1024,6 +1041,15 @@ class BookerApp:
         self.reserve_now_button.configure(state="normal")
         self._write_log(f"바로 예약 실패: {message}", "bad")
         messagebox.showerror("바로 예약 실패", message)
+
+    def _searching(self, busy: bool) -> None:
+        """조회 중임을 막대로 보입니다. 끝나면 자리까지 거둡니다."""
+        if busy:
+            self.search_progress.pack(side="left", padx=10)
+            self.search_progress.start(12)
+        else:
+            self.search_progress.stop()
+            self.search_progress.pack_forget()
 
     def _build_holds(self, parent: tk.PanedWindow) -> None:
         """잡아 둔 예약과 결제 기한. 남은 시간이 1초마다 줄어듭니다.
@@ -1523,6 +1549,7 @@ class BookerApp:
     def _reset_buttons(self) -> None:
         self.login_button.configure(state="normal")
         self.search_button.configure(state="normal")
+        self._searching(False)
         self.transfer_load_button.configure(
             state="normal" if self.include_transfer.get() else "disabled"
         )
@@ -1549,7 +1576,7 @@ class BookerApp:
             messagebox.showwarning("로그인", "아이디와 비밀번호를 입력하세요")
             return
         self.login_button.configure(state="disabled")
-        self.login_state.set("로그인 중…")
+        self._set_login_state("로그인 중…", LOGIN_OFF_COLOUR)
 
         def work() -> None:
             try:
@@ -1566,20 +1593,49 @@ class BookerApp:
 
         self._in_thread(work, "korail-login")
 
+    def _set_login_state(self, text: str, colour: str) -> None:
+        self.login_state.set(text)
+        self.login_label.configure(foreground=colour)
+
     def _login_succeeded(self) -> None:
         self.logged_in = True
-        self.login_state.set("로그인됨")
+        self._set_login_state("로그인됨", LOGIN_OK_COLOUR)
         self.login_button.configure(state="normal")
+        self.logout_button.configure(state="normal")
         self._write_log("로그인했습니다.", "good")
         self.settings = replace(self.settings, login_id=self.login_id.get().strip())
         settings_module.save(self.settings)
 
     def _login_failed(self, message: str) -> None:
         self.logged_in = False
-        self.login_state.set("로그인 실패")
+        self._set_login_state("로그인 실패", LOGIN_BAD_COLOUR)
         self.login_button.configure(state="normal")
+        self.logout_button.configure(state="disabled")
         self._write_log(f"로그인 실패: {message}", "bad")
         messagebox.showerror("로그인 실패", message)
+
+    def on_logout(self) -> None:
+        """세션을 버립니다. 자동예매가 도는 중이면 먼저 막습니다.
+
+        서버에 로그아웃을 보내지 않습니다 — 이 프로그램은 읽기와 예약 말고는
+        아무것도 부르지 않고, 세션을 버리면 이 프로그램은 더 못 씁니다.
+        코레일 앱의 로그인까지 끊는다고 약속하지 않습니다.
+        """
+        if self.session is not None and self.session.running:
+            messagebox.showwarning(
+                "로그아웃", "자동예매가 돌고 있습니다. [중지] 를 먼저 누르세요"
+            )
+            return
+        self.client = None
+        self.logged_in = False
+        self._credentials = None
+        self.login_pw.set("")
+        self._set_login_state("로그아웃했습니다 — 조회만 됩니다", LOGIN_OFF_COLOUR)
+        self.logout_button.configure(state="disabled")
+        self._write_log(
+            "로그아웃했습니다. 이 프로그램의 세션만 버립니다 — 코레일 앱은 "
+            "그대로입니다."
+        )
 
     def relogin(self) -> None:
         """자동예매 도중 세션이 끊겼을 때. 자격증명은 메모리에만 있습니다."""
@@ -1686,6 +1742,7 @@ class BookerApp:
             return
         self._remember(request)
         self.search_button.configure(state="disabled")
+        self._searching(True)
         self.results_status.set("조회 중…")
         self.results_label.configure(foreground="#1f6feb")
         self.log(f"조회: {request.departure}→{request.arrival} {request.date}")
@@ -1700,6 +1757,7 @@ class BookerApp:
             except ValueError as exc:
                 messagebox.showwarning("조회 조건", str(exc))
                 self.search_button.configure(state="normal")
+                self._searching(False)
                 return
 
         def work() -> None:
@@ -1764,6 +1822,7 @@ class BookerApp:
 
     def _search_failed(self, message: str) -> None:
         self.search_button.configure(state="normal")
+        self._searching(False)
         self.results_status.set("조회에 실패했습니다. 기록을 확인하세요.")
         self.results_label.configure(foreground="#b42318")
         self._write_log(f"조회 실패: {message}", "bad")
@@ -1771,6 +1830,7 @@ class BookerApp:
 
     def _show_journeys(self, results: list[Target]) -> None:
         self.search_button.configure(state="normal")
+        self._searching(False)
         self.results = results
         self.journeys = [target.journey for target in results]
         self.sync_round_trip_panes()

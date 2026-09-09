@@ -1529,6 +1529,53 @@ def test_the_booker_waits_for_both_legs_instead_of_grabbing_one():
     assert recorder.count(RESERVE) == 0
 
 
+# --- 로그인 표시와 조회 진행 막대 --------------------------------------------
+
+
+def test_the_login_state_speaks_in_colour():
+    """가장 자주 확인하는 것입니다. 색으로 말하면 읽지 않아도 압니다."""
+    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+
+    assert '_set_login_state("로그인됨", LOGIN_OK_COLOUR)' in source
+    assert '_set_login_state("로그인 실패", LOGIN_BAD_COLOUR)' in source
+    # 초록/빨강이 실제로 초록/빨강이어야 합니다.
+    assert 'LOGIN_OK_COLOUR = "#1a7f37"' in source
+    assert 'LOGIN_BAD_COLOUR = "#b3261e"' in source
+
+
+def test_logging_out_drops_the_session_and_the_password():
+    """세션과 비밀번호를 다 버립니다. 자동예매 중에는 막습니다."""
+    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    body = next(
+        ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "on_logout"
+    )
+
+    assert "self.client = None" in body
+    assert "self.logged_in = False" in body
+    assert "self._credentials = None" in body
+    assert "self.login_pw.set('')" in body
+    # 돌고 있는데 세션을 버리면 자동예매가 도중에 죽습니다.
+    assert "self.session.running" in body
+
+
+def test_every_way_a_search_ends_stops_the_progress_bar():
+    """하나라도 빠뜨리면 영원히 돌아가는 막대가 남습니다."""
+    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    functions = {
+        node.name: ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+    }
+
+    assert "self._searching(True)" in functions["on_search"]
+    for name in ("_show_journeys", "_search_failed", "_reset_buttons"):
+        assert "self._searching(False)" in functions[name], name
+
+
 # --- 잡은 예약과 결제 기한 ------------------------------------------------------
 
 
