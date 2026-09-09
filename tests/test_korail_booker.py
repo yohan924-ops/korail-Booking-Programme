@@ -89,6 +89,7 @@ def _row(
     departure_time: Any = "080000",
     arrival_time: str = "104200",
     general: str = "13",
+    standing: str | None = None,
     name: str = "KTX",
     **extra: Any,
 ) -> dict[str, Any]:
@@ -112,6 +113,9 @@ def _row(
         "h_arv_stn_cons_ordr": "2",
         "h_seat_att_cd": "015",
         "h_gen_rsv_cd": general,
+        # 주지 않으면 extra 로 들어온 값을 덮어쓰지 않습니다 — 예전 픽스처가
+        # h_stnd_rsv_cd 를 그쪽으로 넣습니다.
+        **({"h_stnd_rsv_cd": standing} if standing is not None else {}),
     }
 
 
@@ -1532,6 +1536,56 @@ def test_the_booker_waits_for_both_legs_instead_of_grabbing_one():
     assert recorder.count(RESERVE) == 0
 
 
+# --- 좌석 등급과 입석 ------------------------------------------------------------
+
+
+def test_there_is_no_standing_only_seat_class_to_offer():
+    """입석만 잡는 길이 라이브러리에 없습니다. 없는 것을 화면에 두지 않습니다.
+
+    ``KorailSeatClass`` 는 일반실("1")과 특실("2") 뿐입니다. ``txtStndFlg`` 는
+    고르는 값이 아니라 **계산되는 값**이고(일반실이면서 좌석 매진 + 입석 재고
+    열림), 즉시예약(1101)은 좌석 코드가 ``"11"`` 일 때만 통과하므로 그 조합이
+    성립하지 않습니다. 남은 길은 입석+좌석 병합(1202)뿐인데, 이 저장소는 그것을
+    실서버로 보낸 적이 없습니다.
+    """
+    assert [member.name for member in KorailSeatClass] == ["GENERAL", "SPECIAL"]
+    assert ui_seat_labels() == {"무관", "일반실", "특실"}
+
+
+def test_the_screen_says_why_standing_is_not_a_choice():
+    source = _ui_source()
+    assert "입석은 따로 고를 수 없습니다" in source
+
+
+def test_standing_shows_up_in_the_results_when_the_server_offers_it():
+    """고를 수는 없어도 **있는지는** 보여야 합니다."""
+    open_standing = _journey(_summary(general="13", standing="11"))
+    assert "입석" in open_standing.extras()
+
+    closed = _journey(_summary(general="11", standing="13"))
+    assert "입석" not in closed.extras()
+
+    # 환승은 모든 구간에 열려 있을 때만 셉니다.
+    half = _journey(
+        _summary(train_no="00009", general="13", standing="11"),
+        _summary(train_no="00503", general="13", standing="13"),
+        source=J.JourneySource.SERVER_TRANSFER,
+    )
+    assert "입석" not in half.extras()
+
+
+def test_the_target_table_carries_the_seat_columns_too():
+    """담고 나서 좌석이 어땠는지 다시 위 표를 뒤지게 하면 안 됩니다."""
+    source = _ui_source()
+    for name in ("일반실", "특실", "입석·자유석·대기"):
+        assert f'("{name}"' in source, name
+
+    body = _ui_function("sync_target_list")
+    assert "target.journey.seat_text(KorailSeatClass.GENERAL)" in body
+    assert "target.journey.seat_text(KorailSeatClass.SPECIAL)" in body
+    assert "target.journey.extras()" in body
+
+
 # --- 바로 예약 ------------------------------------------------------------------
 
 
@@ -1732,6 +1786,23 @@ def test_clearing_the_results_leaves_the_targets_alone():
 
 
 # --- 감시 여럿 따로 돌리기 ------------------------------------------------------
+
+
+def ui_seat_labels() -> set[str]:
+    """화면이 내놓는 좌석 선택지의 이름. 원문에서 읽습니다(tkinter 없이)."""
+    tree = ast.parse((APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if "SEAT_CHOICES" not in names:
+            continue
+        return {
+            pair.elts[0].value
+            for pair in node.value.elts  # type: ignore[attr-defined]
+            if isinstance(pair, ast.Tuple) and isinstance(pair.elts[0], ast.Constant)
+        }
+    raise AssertionError("SEAT_CHOICES 를 찾지 못했습니다")
 
 
 def _ui_source() -> str:

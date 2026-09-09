@@ -106,7 +106,7 @@ TREE_COLUMNS = {
     # 옵니다. 좁으면 글자가 잘립니다.
     "general": ("일반실", 175),
     "special": ("특실", 175),
-    "extras": ("그 밖", 100),
+    "extras": ("입석·자유석·대기", 150),
 }
 
 WEEKDAY_NAMES = ("월", "화", "수", "목", "금", "토", "일")
@@ -133,7 +133,12 @@ HOLD_COLUMNS = tuple(name for name, _width, _anchor in HOLD_LAYOUT)
 #: 예매 대상 표의 칸.
 TARGET_LAYOUT = (
     ("상태", 115, "center"),
-    ("여정", 460, "w"),
+    ("여정", 430, "w"),
+    # 조회 결과에서 보던 것이 여기서 사라지면, 담고 나서 좌석이 어땠는지
+    # 다시 위 표를 뒤져야 합니다.
+    ("일반실", 165, "w"),
+    ("특실", 165, "w"),
+    ("입석·자유석·대기", 150, "w"),
     ("조회 주기", 80, "center"),
     ("남은 감시", 110, "center"),
 )
@@ -785,6 +790,13 @@ class BookerApp:
             variable=self.include_transfer,
             command=self._transfer_toggled,
         ).pack(side="left", padx=(6, 0))
+        # 입석은 고를 수 있는 등급이 아닙니다. 왜인지는 화면이 말해야 합니다 —
+        # 안 그러면 "왜 입석이 없지" 로 남습니다.
+        ttk.Label(
+            seats,
+            text="입석은 따로 고를 수 없습니다 (아래 '입석·자유석·대기' 칸 참고)",
+            foreground="#666666",
+        ).pack(side="left", padx=(14, 0))
 
         # 환승 조건은 환승을 켰을 때만 만질 수 있습니다. 꺼져 있으면 아무 효과도
         # 없는 칸이라 켜 두면 헷갈리기만 합니다.
@@ -2445,6 +2457,9 @@ class BookerApp:
                 values=(
                     f"▶ 감시 중 [{watch.tag}]" if watch else "○ 대기",
                     target.describe(),
+                    target.journey.seat_text(KorailSeatClass.GENERAL),
+                    target.journey.seat_text(KorailSeatClass.SPECIAL),
+                    " · ".join(target.journey.extras()) or "-",
                     f"{watch.options.poll_interval_s:g}초" if watch else "-",
                     watch.remaining(now) if watch else "-",
                 ),
