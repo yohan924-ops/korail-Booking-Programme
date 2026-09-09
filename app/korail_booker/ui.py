@@ -85,6 +85,21 @@ CLOCK_CHOICES = (
 DEFAULT_MIN_TRANSFER_MINUTES = 0
 DEFAULT_MAX_TRANSFER_MINUTES = 30
 POLL_HINT = f"{MIN_POLL_INTERVAL_S:g}초 이상"
+#: 표의 칸과 폭. 좌우로 나뉘면 좁아지므로 가로 스크롤이 함께 붙습니다.
+TREE_COLUMNS = {
+    "kind": ("구분", 110),
+    "train": ("열차", 140),
+    "departure": ("출발", 65),
+    "arrival": ("도착", 65),
+    "duration": ("소요", 85),
+    "transfer": ("환승", 120),
+    # 좌석 문구에는 "매진" 만 오는 것이 아니라 운임과 적립 안내까지 담겨
+    # 옵니다. 좁으면 글자가 잘립니다.
+    "general": ("일반실", 175),
+    "special": ("특실", 175),
+    "extras": ("그 밖", 100),
+}
+
 WEEKDAY_NAMES = ("월", "화", "수", "목", "금", "토", "일")
 #: 자동완성이 무시하는 키. 방향키와 기능키로는 목록을 다시 좁히지 않습니다.
 _NAVIGATION_KEYS = frozenset(
@@ -250,7 +265,8 @@ class BookerApp:
         self.identity = ""
         self.logged_in = False
         self.journeys: list[Journey] = []
-        self.item_journeys: dict[str, int] = {}
+        #: (표, 항목) → 결과 번호. 표마다 항목 id 가 따로 매겨집니다.
+        self.item_journeys: dict[tuple[str, str], int] = {}
         self.session: BookingSession | None = None
         self.events: queue.Queue[Callable[[], None]] = queue.Queue()
         self._credentials: tuple[str, str] | None = None
@@ -592,58 +608,85 @@ class BookerApp:
         variable.set(picked.isoformat())
 
     def _round_trip_toggled(self) -> None:
+        self.sync_round_trip_panes()
         state = "normal" if self.round_trip.get() else "disabled"
         self.return_entry.configure(state=state)
         self.return_calendar_button.configure(state=state)
         self.mark_stale()
 
-    def _build_results(self) -> None:
-        frame = ttk.LabelFrame(self.root, text="3. 열차 (여러 개 고르면 먼저 열리는 것을 잡습니다)")
-        frame.grid(row=2, column=0, sticky="nsew", padx=8, pady=4)
-        frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(0, weight=1)
-        columns = ("kind", "train", "departure", "arrival", "duration", "transfer",
-                   "general", "special", "extras")
-        self.tree = ttk.Treeview(
-            frame,
-            columns=columns,
+    def _make_tree(self, parent: ttk.Frame) -> ttk.Treeview:
+        """열차 표 하나. 왕복이면 이것이 둘, 편도면 하나입니다."""
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
+        tree = ttk.Treeview(
+            parent,
+            columns=tuple(TREE_COLUMNS),
             show="tree headings",
             selectmode="extended",
             # 최소 높이입니다. 없으면 위쪽 조건이 커질 때 표가 0줄로 눌립니다.
             height=9,
         )
-        headings = {
-            "kind": ("구분", 120),
-            "train": ("열차", 150),
-            "departure": ("출발", 70),
-            "arrival": ("도착", 70),
-            "duration": ("소요", 90),
-            "transfer": ("환승", 130),
-            # 좌석 문구에는 "매진" 만 오는 것이 아니라 운임과 적립 안내까지
-            # 담겨 옵니다. 좁으면 글자가 잘립니다.
-            "general": ("일반실", 180),
-            "special": ("특실", 180),
-            "extras": ("그 밖", 110),
-        }
-        self.tree.column("#0", width=30, stretch=False)
-        for name, (title, width) in headings.items():
-            self.tree.heading(name, text=title)
-            self.tree.column(name, width=width, anchor="center")
-        self.tree.tag_configure("custom", foreground="#a15c00")
-        self.tree.tag_configure("leg", foreground="#555555")
+        tree.column("#0", width=28, stretch=False)
+        for name, (title, width) in TREE_COLUMNS.items():
+            tree.heading(name, text=title)
+            tree.column(name, width=width, anchor="center", stretch=False)
+        tree.tag_configure("custom", foreground="#a15c00")
+        tree.tag_configure("leg", foreground="#555555")
         # 자동예매가 노리는 것은 매진입니다. 한눈에 갈리게 색을 답니다.
-        self.tree.tag_configure("open", foreground="#1a7f37")
-        self.tree.tag_configure("soldout", foreground="#b42318")
-        self.tree.tag_configure("unbookable", foreground="#8a8a8a")
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        scroll = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
-        scroll.grid(row=0, column=1, sticky="ns")
+        tree.tag_configure("open", foreground="#1a7f37")
+        tree.tag_configure("soldout", foreground="#b42318")
+        tree.tag_configure("unbookable", foreground="#8a8a8a")
+        tree.grid(row=0, column=0, sticky="nsew")
+        vertical = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
+        vertical.grid(row=0, column=1, sticky="ns")
+        # 좌우로 나뉘면 칸이 화면보다 넓어집니다. 가로 스크롤이 없으면 '그 밖'
+        # 칸이 보이지 않습니다.
+        horizontal = ttk.Scrollbar(parent, orient="horizontal", command=tree.xview)
+        horizontal.grid(row=1, column=0, sticky="ew")
+        tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        return tree
+
+    def _build_results(self) -> None:
+        frame = ttk.LabelFrame(self.root, text="3. 열차 (고른 것을 [담기] 로 예매 대상에 넣습니다)")
+        self.results_frame = frame
+        frame.grid(row=2, column=0, sticky="nsew", padx=8, pady=4)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
+        self.outbound_title = ttk.Label(frame, text="가는 편", foreground="#1f6feb")
+        self.outbound_title.grid(row=0, column=0, sticky="w", padx=6)
+        self.outbound_title.grid_remove()
+        self.inbound_title = ttk.Label(frame, text="오는 편", foreground="#1f6feb")
+        self.inbound_title.grid(row=0, column=1, sticky="w", padx=6)
+        self.inbound_title.grid_remove()
+
+        outbound_pane = ttk.Frame(frame)
+        outbound_pane.grid(row=1, column=0, sticky="nsew")
+        self.tree = self._make_tree(outbound_pane)
+        # 오는 편 표는 왕복일 때만 폅니다. 편도면 가는 편이 폭을 다 씁니다.
+        self.inbound_pane = ttk.Frame(frame)
+        self.inbound_pane.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
+        self.return_tree = self._make_tree(self.inbound_pane)
+        self.inbound_pane.grid_remove()
+
         # 조건을 바꿔도 표는 그대로 남습니다. 그 표가 지금 조건의 결과인지
         # 아닌지를 말해 주지 않으면 "바꿨는데 아무 일도 안 일어난다" 가 됩니다.
         self.results_status = tk.StringVar(value="조건을 정하고 [조회] 를 누르세요.")
         self.results_label = ttk.Label(frame, textvariable=self.results_status)
-        self.results_label.grid(row=1, column=0, columnspan=2, sticky="w", padx=4)
+        self.results_label.grid(row=2, column=0, columnspan=2, sticky="w", padx=4)
+
+    def sync_round_trip_panes(self) -> None:
+        """왕복이면 표를 좌우로 나눕니다. 편도면 왼쪽 하나만 씁니다."""
+        frame = self.results_frame
+        if self.round_trip.get():
+            self.outbound_title.grid()
+            self.inbound_title.grid()
+            self.inbound_pane.grid()
+            frame.columnconfigure(1, weight=1)
+        else:
+            self.outbound_title.grid_remove()
+            self.inbound_title.grid_remove()
+            self.inbound_pane.grid_remove()
+            frame.columnconfigure(1, weight=0)
 
     def _build_targets(self) -> None:
         frame = ttk.LabelFrame(self.root, text="4. 예매 대상 (여기 담긴 것만 노립니다)")
@@ -1246,41 +1289,25 @@ class BookerApp:
         self.search_button.configure(state="normal")
         self.results = results
         self.journeys = [target.journey for target in results]
+        self.sync_round_trip_panes()
         self.item_journeys.clear()
-        self.tree.delete(*self.tree.get_children())
+        for tree in (self.tree, self.return_tree):
+            tree.delete(*tree.get_children())
         for index, target in enumerate(results):
-            journey = target.journey
-            item = self.tree.insert(
-                "",
-                "end",
-                values=self._row_values(target),
-                tags=self._row_tags(journey),
-            )
-            self.item_journeys[item] = index
-            if journey.is_transfer:
-                for leg_index, leg in enumerate(journey.legs):
-                    self.tree.insert(
-                        item,
-                        "end",
-                        values=(
-                            f"{leg_index + 1}구간",
-                            f"{(leg.train_class_name or '').strip()} {leg.train_no}",
-                            format_clock(leg.departure_time),
-                            format_clock(leg.arrival_time),
-                            format_duration(journey.leg_minutes(leg_index)),
-                            f"{leg.departure_station_name}→{leg.arrival_station_name}",
-                            "",
-                            "",
-                            "",
-                        ),
-                        tags=("leg",),
-                    )
-                self.tree.item(item, open=True)
+            tree = self.return_tree if target.label == "오는 편" else self.tree
+            self._insert_row(tree, index, target)
         journeys = self.journeys
         direct = sum(1 for journey in journeys if not journey.is_transfer)
         transfer = len(journeys) - direct
+        going = sum(1 for target in results if target.label != "오는 편")
+        split = (
+            f" — 가는 편 {going} · 오는 편 {len(results) - going}"
+            if self.round_trip.get()
+            else ""
+        )
         self.results_status.set(
-            f"지금 조건의 결과: 열차 {len(journeys)}편 (직통 {direct} · 환승 {transfer})"
+            f"지금 조건의 결과: 열차 {len(journeys)}편 "
+            f"(직통 {direct} · 환승 {transfer}){split}"
         )
         self.results_label.configure(foreground="#1a7f37" if journeys else "#b42318")
         self._write_log(f"열차 {len(journeys)}편을 찾았습니다.")
@@ -1293,6 +1320,38 @@ class BookerApp:
                 "자주 걸리는 것: 오늘 날짜로 조회하면 이미 떠난 열차는 서버가 "
                 "주지 않습니다. 시간대를 넓히거나 열차 종류 선택을 지워 보세요.",
             )
+
+    def _insert_row(self, tree: ttk.Treeview, index: int, target: Target) -> None:
+        journey = target.journey
+        item = tree.insert(
+            "",
+            "end",
+            values=self._row_values(target),
+            tags=self._row_tags(journey),
+        )
+        # 항목 id 는 표마다 따로 매겨집니다. 어느 표의 것인지 함께 적어야
+        # 두 표가 같은 id 로 부딪치지 않습니다.
+        self.item_journeys[(str(tree), item)] = index
+        if not journey.is_transfer:
+            return
+        for leg_index, leg in enumerate(journey.legs):
+            tree.insert(
+                item,
+                "end",
+                values=(
+                    f"{leg_index + 1}구간",
+                    f"{(leg.train_class_name or '').strip()} {leg.train_no}",
+                    format_clock(leg.departure_time),
+                    format_clock(leg.arrival_time),
+                    format_duration(journey.leg_minutes(leg_index)),
+                    f"{leg.departure_station_name}→{leg.arrival_station_name}",
+                    "",
+                    "",
+                    "",
+                ),
+                tags=("leg",),
+            )
+        tree.item(item, open=True)
 
     def _row_values(self, target: Target) -> tuple[str, ...]:
         journey = target.journey
@@ -1335,14 +1394,15 @@ class BookerApp:
     # -- 동작: 자동예매 ------------------------------------------------------
 
     def selected_results(self) -> list[Target]:
-        """표에서 고른 것들. 구간 행을 골랐으면 그 여정을 씁니다."""
+        """두 표에서 고른 것들. 구간 행을 골랐으면 그 여정을 씁니다."""
         chosen: list[Target] = []
-        for item in self.tree.selection():
-            index = self.item_journeys.get(item)
-            if index is None:
-                index = self.item_journeys.get(self.tree.parent(item))
-            if index is not None and self.results[index] not in chosen:
-                chosen.append(self.results[index])
+        for tree in (self.tree, self.return_tree):
+            for item in tree.selection():
+                index = self.item_journeys.get((str(tree), item))
+                if index is None:
+                    index = self.item_journeys.get((str(tree), tree.parent(item)))
+                if index is not None and self.results[index] not in chosen:
+                    chosen.append(self.results[index])
         return chosen
 
     def add_targets(self) -> None:
