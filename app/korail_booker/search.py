@@ -25,7 +25,10 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 
 from korail_mobile_api import (
+    KorailApiError,
+    KorailAuthError,
     KorailClient,
+    KorailDynaPathError,
     KorailNoResultsError,
     KorailPassengerCounts,
     TrainSearchQuery,
@@ -330,7 +333,12 @@ def search_custom_transfer(
         name = station.strip()
         if not name or name in (request.departure, request.arrival):
             continue
-        first_legs = _first_leg_candidates(client, request, name)
+        try:
+            first_legs = _first_leg_candidates(client, request, name)
+        except KorailApiError as exc:
+            if log:
+                log(f"{name} 경유 조회 실패({type(exc).__name__}): {exc}")
+            continue
         if not first_legs:
             if log:
                 log(f"{name} 경유: 첫 구간이 없습니다")
@@ -392,6 +400,34 @@ def deduplicate(journeys: Iterable[Journey]) -> list[Journey]:
     return unique
 
 
+def _isolated(
+    label: str,
+    produce: Callable[[], list[Journey]],
+    log: Logger | None,
+) -> list[Journey]:
+    """한 갈래가 실패해도 다른 갈래의 결과를 버리지 않습니다.
+
+    직통과 환승은 별개의 조회입니다. 예전에는 둘이 한 덩어리라 환승 쪽에서
+    예외가 나면(짝이 어긋난 환승 응답, 서버 오류, 알 수 없는 환승역) 이미 받아
+    둔 직통 목록까지 통째로 사라졌습니다 — 화면에서는 "환승 조건을 건드리니
+    직통이 안 나온다"로 보입니다.
+    """
+    try:
+        return produce()
+    except (KorailAuthError, KorailDynaPathError):
+        # 이 둘은 삼키면 안 됩니다. 세션이 끊긴 것은 위에서 다시 로그인해야 하고
+        # (자동예매가 그렇게 이어 갑니다), DynaPath 거절은 자동화로 표시됐다는
+        # 뜻이라 되풀이할수록 나빠집니다.
+        raise
+    except (KorailApiError, ValueError) as exc:
+        if log:
+            log(
+                f"{label} 조회가 실패했습니다({type(exc).__name__}): {exc} "
+                "— 나머지 결과는 그대로 보여 줍니다."
+            )
+        return []
+
+
 def search_journeys(
     client: KorailClient,
     request: SearchRequest,
@@ -405,19 +441,28 @@ def search_journeys(
     """
     journeys: list[Journey] = []
     if request.include_direct:
-        journeys.extend(search_direct(client, request, log=log))
+        found = _isolated("직통", lambda: search_direct(client, request, log=log), log)
+        journeys.extend(found)
         if log:
-            log(f"직통 {len(journeys)}편")
+            log(f"직통 {len(found)}편")
     if request.include_transfer:
-        before = len(journeys)
         if request.transfer_mode == TRANSFER_CUSTOM:
-            journeys.extend(
-                search_custom_transfer(client, request, log=log)[:MAX_CUSTOM_JOURNEYS]
+            found = _isolated(
+                "환승(직접 지정)",
+                lambda: search_custom_transfer(client, request, log=log)[
+                    :MAX_CUSTOM_JOURNEYS
+                ],
+                log,
             )
         else:
-            journeys.extend(search_server_transfer(client, request, log=log))
+            found = _isolated(
+                "환승",
+                lambda: search_server_transfer(client, request, log=log),
+                log,
+            )
+        journeys.extend(found)
         if log:
-            log(f"환승 {len(journeys) - before}편")
+            log(f"환승 {len(found)}편")
     unique = deduplicate(journeys)
     kept = [journey for journey in unique if accepts(journey, request)]
     if log and unique and not kept:

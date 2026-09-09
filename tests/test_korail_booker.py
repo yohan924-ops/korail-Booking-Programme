@@ -50,6 +50,7 @@ from korail_mobile_api import (
     KorailPassengerCounts,
     KorailSeatClass,
     KorailSession,
+    KorailSessionExpiredError,
     TrainSummary,
 )
 
@@ -405,6 +406,59 @@ def test_a_server_itinerary_wins_over_the_same_custom_combination():
     unique = S.deduplicate([server, custom])
     assert len(unique) == 1
     assert unique[0].source is J.JourneySource.SERVER_TRANSFER
+
+
+def test_transfer_conditions_never_touch_a_direct_train():
+    """환승시간·환승역은 환승 결과에만 걸립니다. 직통은 그 조건과 무관합니다."""
+    direct = _journey(_summary(departure_time="080000"))
+    strict = _request(
+        include_transfer=True,
+        min_transfer_minutes=25,
+        max_transfer_minutes=30,
+        transfer_stations=("동대구",),
+    )
+    assert S.accepts(direct, strict)
+
+
+def test_a_failing_transfer_search_keeps_the_direct_results():
+    """환승 조회가 깨져도 이미 받은 직통은 살아남습니다.
+
+    예전에는 둘이 한 덩어리라, 환승 응답 하나가 예외를 내면 직통 목록까지
+    통째로 사라졌습니다 — 화면에서는 "환승을 켜니 직통이 안 나온다" 로
+    보입니다.
+    """
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = httpx.QueryParams(request.content.decode())
+        # radJobId 2 가 환승 조회입니다(앱이 되돌릴 때 쓰는 값).
+        transfer = body.get("radJobId") == "2"
+        calls.append("transfer" if transfer else "direct")
+        if transfer:
+            return httpx.Response(500, text="synthetic server failure")
+        return httpx.Response(
+            200, json=_search_reply([_row("00101", general="11")])
+        )
+
+    client = KorailClient(transport=httpx.MockTransport(handler))
+    client.session.current = KorailSession(jsessionid="synthetic-session")
+    lines: list[str] = []
+    found = S.search_journeys(
+        client,
+        _request(include_direct=True, include_transfer=True),
+        log=lines.append,
+    )
+    assert "transfer" in calls           # 환승도 실제로 시도했고
+    assert len(found) == 1               # 직통은 남았습니다
+    assert found[0].train_numbers() == ("00101",)
+    assert any("환승 조회가 실패" in line for line in lines)
+
+
+def test_a_session_expiry_is_never_swallowed_by_that_isolation():
+    """갈래를 떼어 놓느라 세션 만료까지 삼키면 자동예매가 되살아나지 못합니다."""
+    recorder = _Recorder({SEARCH: _fail("P058", "세션이 만료되었습니다")})
+    with pytest.raises(KorailSessionExpiredError):
+        S.search_journeys(_client(recorder), _request(), log=lambda line: None)
 
 
 # --- 환승역 후보 ---------------------------------------------------------------

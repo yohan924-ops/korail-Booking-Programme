@@ -186,6 +186,7 @@ class BookerApp:
         self.include_direct = tk.BooleanVar(value=True)
         self.include_transfer = tk.BooleanVar(value=False)
         self.transfer_mode = tk.StringVar(value=TRANSFER_SERVER)
+        self.transfer_role = tk.StringVar()
         self.min_transfer = tk.StringVar(value=str(DEFAULT_MIN_TRANSFER_MINUTES))
         self.max_transfer = tk.StringVar(value=str(DEFAULT_MAX_TRANSFER_MINUTES))
         self.passenger_vars = {
@@ -273,7 +274,9 @@ class BookerApp:
 
         # 환승 조건은 환승을 켰을 때만 만질 수 있습니다. 꺼져 있으면 아무 효과도
         # 없는 칸이라 켜 두면 헷갈리기만 합니다.
-        self.transfer_frame = ttk.LabelFrame(frame, text="환승 조건")
+        self.transfer_frame = ttk.LabelFrame(
+            frame, text="환승 조건 (직통 열차에는 영향을 주지 않습니다)"
+        )
         self.transfer_frame.grid(row=2, column=0, sticky="ew", padx=4, pady=(2, 6))
         left = ttk.Frame(self.transfer_frame)
         left.grid(row=0, column=0, sticky="nw", padx=4, pady=4)
@@ -282,6 +285,7 @@ class BookerApp:
             text="서버 추천 환승 (검증됨)",
             variable=self.transfer_mode,
             value=TRANSFER_SERVER,
+            command=self.sync_transfer_state,
         )
         self.server_radio.pack(anchor="w")
         self.custom_radio = ttk.Radiobutton(
@@ -289,6 +293,7 @@ class BookerApp:
             text="환승역 직접 지정 (서버 수용 미검증)",
             variable=self.transfer_mode,
             value=TRANSFER_CUSTOM,
+            command=self.sync_transfer_state,
         )
         self.custom_radio.pack(anchor="w")
         self.transfer_time_row = ttk.Frame(left)
@@ -310,6 +315,12 @@ class BookerApp:
         right = ttk.Frame(self.transfer_frame)
         right.grid(row=0, column=1, sticky="nw", padx=12, pady=4)
         ttk.Label(right, text="환승역 (Ctrl+클릭으로 여러 개)").pack(anchor="w")
+        # 이 목록이 무엇이고 지금 무슨 구실을 하는지는 모드마다 다릅니다.
+        # 화면이 그것을 말하지 않으면 고른 역이 필터인지 조회 대상인지 알 수
+        # 없습니다.
+        ttk.Label(right, textvariable=self.transfer_role, foreground="#1f6feb").pack(
+            anchor="w"
+        )
         picker = ttk.Frame(right)
         picker.pack(anchor="w")
         self.transfer_list = tk.Listbox(
@@ -329,8 +340,11 @@ class BookerApp:
         self.transfer_load_button.pack(anchor="w", pady=(4, 0))
         ttk.Label(
             right,
-            text="고르지 않으면 서버가 주는 환승역을 모두 봅니다.",
+            text="목록은 코레일이 이 구간에 대해 답한 환승역입니다"
+            "(qry.chtnStn.do). 전국 역 목록이 아닙니다.",
             foreground="#666666",
+            wraplength=320,
+            justify="left",
         ).pack(anchor="w")
 
     def _build_results(self) -> None:
@@ -455,7 +469,21 @@ class BookerApp:
     # -- 환승 조건 -----------------------------------------------------------
 
     def sync_transfer_state(self) -> None:
-        """환승 조건은 환승을 켰을 때만 만질 수 있습니다."""
+        """환승 조건은 환승을 켰을 때만 만질 수 있습니다.
+
+        고른 환승역의 구실도 여기서 갱신합니다 — 모드에 따라 뜻이 다릅니다.
+        """
+        if not self.include_transfer.get():
+            self.transfer_role.set("‘환승’을 켜야 환승 조건을 쓸 수 있습니다.")
+        elif self.transfer_mode.get() == TRANSFER_CUSTOM:
+            self.transfer_role.set(
+                "고른 역을 경유하도록 직접 조회합니다 (하나 이상 필수)."
+            )
+        else:
+            self.transfer_role.set(
+                "서버가 준 환승 여정 중 고른 역을 지나는 것만 봅니다"
+                " (고르지 않으면 전부)."
+            )
         state = "normal" if self.include_transfer.get() else "disabled"
         for widget in (
             self.server_radio,
