@@ -283,8 +283,30 @@ def test_the_time_window_filters_on_the_first_leg():
     assert not S.accepts(_journey(_summary(departure_time="120100")), request)
 
 
+def test_several_train_kinds_can_be_picked_at_once():
+    """여러 개를 고르면 그중 하나라도 맞으면 통과입니다."""
+    request = _request(train_names=("KTX", "무궁화"))
+    assert S.accepts(_journey(_summary(name="KTX-산천")), request)
+    assert S.accepts(_journey(_summary(name="무궁화호")), request)
+    assert not S.accepts(_journey(_summary(name="ITX-마음")), request)
+    assert S.accepts(_journey(_summary(name="ITX-마음")), _request())  # 안 고르면 전부
+
+
+def test_a_seat_label_that_arrives_on_two_lines_is_folded_into_one():
+    """서버 문구는 운임 아래에 적립 안내가 줄바꿈으로 붙어 옵니다.
+
+    표의 행은 한 줄 높이라, 접지 않으면 둘째 줄이 잘려 글자가 반토막으로
+    보입니다 — 실제로 그렇게 보였습니다.
+    """
+    journey = _journey(_summary(h_rsv_psb_nm="37,200원\n5%적립 1,860원"))
+    label = journey.seat_state(KorailSeatClass.GENERAL).label
+    assert "\n" not in label
+    assert label == "37,200원 5%적립 1,860원"
+    assert J.one_line("  두   줄\n하나로  ") == "두 줄 하나로"
+
+
 def test_the_train_kind_filter_applies_to_every_leg():
-    request = _request(train_name="KTX")
+    request = _request(train_names=("KTX",))
     assert S.accepts(_journey(_summary(name="KTX-이음")), request)
     assert not S.accepts(_journey(_summary(name="무궁화호")), request)
     mixed = _journey(

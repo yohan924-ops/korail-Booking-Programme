@@ -124,10 +124,20 @@ def _reservation_code(train: TrainSummary, seat_class: KorailSeatClass) -> str |
     return train.general_reservation_code
 
 
+def one_line(text: str) -> str:
+    """줄바꿈과 잇단 공백을 공백 하나로. 표의 한 줄에 들어가게 만듭니다.
+
+    서버의 좌석 문구는 한 줄이 아닙니다 — 운임 아래에 적립 안내가 줄바꿈으로
+    붙어 옵니다(``"37,200원\n5%적립 …"``). 표의 행은 한 줄 높이라 둘째 줄이
+    잘려서, 화면에는 글자가 반쯤 잘린 것처럼 보입니다.
+    """
+    return " ".join(text.split())
+
+
 def _availability_name(train: TrainSummary, seat_class: KorailSeatClass) -> str:
     if seat_class is KorailSeatClass.SPECIAL:
-        return (train.special_availability_name or "").strip()
-    return (train.general_availability_name or "").strip()
+        return one_line(train.special_availability_name or "")
+    return one_line(train.general_availability_name or "")
 
 
 @dataclass(frozen=True)

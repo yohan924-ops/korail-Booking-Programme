@@ -73,9 +73,10 @@ class SearchRequest:
     #: ``HHMMSS``. 빈 문자열이면 그쪽 끝을 제한하지 않습니다.
     depart_after: str = ""
     depart_before: str = ""
-    #: ``h_trn_clsf_nm`` 부분일치(예: ``"KTX"``). 환승이면 **모든 구간**에
-    #: 적용됩니다. 빈 문자열이면 전부.
-    train_name: str = ""
+    #: ``h_trn_clsf_nm`` 부분일치 목록(예: ``("KTX", "무궁화")``). 여러 개를
+    #: 고르면 그중 **하나라도** 맞으면 통과입니다. 환승이면 **모든 구간**이
+    #: 그 조건을 넘어야 합니다. 비어 있으면 전부.
+    train_names: tuple[str, ...] = ()
     seat_preference: SeatPreference = SeatPreference.ANY
     include_direct: bool = True
     include_transfer: bool = False
@@ -167,10 +168,15 @@ def _matches_window(journey: Journey, request: SearchRequest) -> bool:
 
 
 def _matches_train_name(journey: Journey, request: SearchRequest) -> bool:
-    wanted = request.train_name.strip().casefold()
+    wanted = tuple(
+        name.strip().casefold() for name in request.train_names if name.strip()
+    )
     if not wanted:
         return True
-    return all(wanted in name.casefold() for name in journey.train_names())
+    return all(
+        any(pattern in name.casefold() for pattern in wanted)
+        for name in journey.train_names()
+    )
 
 
 def _matches_transfer(journey: Journey, request: SearchRequest) -> bool:

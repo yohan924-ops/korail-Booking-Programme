@@ -57,10 +57,9 @@ from .session import login as do_login
 
 
 #: 열차 종별. 거르는 방식이 **부분일치**라 ``"KTX"`` 하나로 ``KTX-산천`` 과
-#: ``KTX-이음`` 까지 함께 잡힙니다. 산천만 보려면 그 이름을 직접 고르면 됩니다.
-#: 목록에 없는 종별은 칸에 직접 쳐 넣을 수 있습니다(콤보가 읽기 전용이 아님).
+#: ``KTX-이음`` 까지 함께 잡힙니다. 여러 개를 고르면 그중 하나라도 맞으면
+#: 통과입니다. 아무것도 고르지 않으면 전부 봅니다.
 TRAIN_KINDS = (
-    "전체",
     "KTX",
     "KTX-산천",
     "KTX-이음",
@@ -131,6 +130,8 @@ class BookerApp:
         self.session: BookingSession | None = None
         self.events: queue.Queue[Callable[[], None]] = queue.Queue()
         self._credentials: tuple[str, str] | None = None
+        #: 환승역 목록이 어느 구간 것인지. 같은 구간이면 다시 묻지 않습니다.
+        self._transfer_route: tuple[str, str] | None = None
         self._build()
         self._restore()
         self.root.after(120, self._drain)
@@ -142,8 +143,8 @@ class BookerApp:
         self.root.geometry("1180x800")
         self.root.minsize(980, 620)
         self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(2, weight=3)
-        self.root.rowconfigure(4, weight=2)
+        self.root.rowconfigure(2, weight=5)
+        self.root.rowconfigure(4, weight=1)
         self._build_login()
         self._build_query()
         self._build_results()
@@ -181,7 +182,8 @@ class BookerApp:
         self.date = tk.StringVar(value=time.strftime("%Y-%m-%d"))
         self.after_time = tk.StringVar()
         self.before_time = tk.StringVar()
-        self.train_kind = tk.StringVar(value="전체")
+        self.train_kind_vars = {kind: tk.BooleanVar(value=False) for kind in TRAIN_KINDS}
+        self.train_kind_label = tk.StringVar(value="전체")
         self.seat_choice = tk.StringVar(value="무관")
         self.include_direct = tk.BooleanVar(value=True)
         self.include_transfer = tk.BooleanVar(value=False)
@@ -232,14 +234,22 @@ class BookerApp:
         row2 = ttk.Frame(frame)
         row2.grid(row=1, column=0, sticky="w", padx=4, pady=4)
         ttk.Label(row2, text="열차 종류").pack(side="left")
-        # 읽기 전용이 아닙니다 — 목록에 없는 종별을 직접 칠 수 있어야 합니다.
+        # 여러 개를 고를 수 있어야 합니다. 콤보는 하나뿐이라 체크 메뉴로 바꿉니다.
         # 거르는 방식이 부분일치라 "KTX" 는 KTX-산천·KTX-이음까지 함께 잡습니다.
-        ttk.Combobox(
-            row2,
-            textvariable=self.train_kind,
-            values=TRAIN_KINDS,
-            width=12,
-        ).pack(side="left", padx=(2, 8))
+        self.train_kind_button = ttk.Menubutton(
+            row2, textvariable=self.train_kind_label, width=16
+        )
+        kind_menu = tk.Menu(self.train_kind_button, tearoff=False)
+        for kind in TRAIN_KINDS:
+            kind_menu.add_checkbutton(
+                label=kind,
+                variable=self.train_kind_vars[kind],
+                command=self.sync_train_kinds,
+            )
+        kind_menu.add_separator()
+        kind_menu.add_command(label="모두 지우기 (전체 보기)", command=self.clear_train_kinds)
+        self.train_kind_button.configure(menu=kind_menu)
+        self.train_kind_button.pack(side="left", padx=(2, 8))
         ttk.Label(row2, text="좌석").pack(side="left")
         ttk.Combobox(
             row2,
@@ -359,13 +369,15 @@ class BookerApp:
         )
         headings = {
             "kind": ("구분", 90),
-            "train": ("열차", 110),
+            "train": ("열차", 150),
             "departure": ("출발", 70),
             "arrival": ("도착", 70),
             "duration": ("소요", 90),
             "transfer": ("환승", 130),
-            "general": ("일반실", 110),
-            "special": ("특실", 110),
+            # 좌석 문구에는 "매진" 만 오는 것이 아니라 운임과 적립 안내까지
+            # 담겨 옵니다. 좁으면 글자가 잘립니다.
+            "general": ("일반실", 190),
+            "special": ("특실", 190),
         }
         self.tree.column("#0", width=30, stretch=False)
         for name, (title, width) in headings.items():
@@ -430,7 +442,7 @@ class BookerApp:
         frame.grid(row=4, column=0, sticky="nsew", padx=8, pady=(4, 8))
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
-        self.log_text = tk.Text(frame, height=10, wrap="word", state="disabled")
+        self.log_text = tk.Text(frame, height=7, wrap="word", state="disabled")
         self.log_text.grid(row=0, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(frame, orient="vertical", command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=scroll.set)
@@ -447,7 +459,9 @@ class BookerApp:
         self.before_time.set(
             format_clock(stored.depart_before) if stored.depart_before else ""
         )
-        self.train_kind.set(stored.train_name or "전체")
+        for kind, var in self.train_kind_vars.items():
+            var.set(kind in stored.train_names)
+        self.sync_train_kinds()
         for label, preference in SEAT_CHOICES:
             if preference.value == stored.seat_preference:
                 self.seat_choice.set(label)
@@ -465,6 +479,25 @@ class BookerApp:
         for key, var in self.passenger_vars.items():
             var.set(str(getattr(stored, key)))
         self.sync_transfer_state()
+
+    # -- 열차 종별 -----------------------------------------------------------
+
+    def selected_train_kinds(self) -> tuple[str, ...]:
+        return tuple(kind for kind, var in self.train_kind_vars.items() if var.get())
+
+    def sync_train_kinds(self) -> None:
+        picked = self.selected_train_kinds()
+        if not picked:
+            self.train_kind_label.set("전체")
+        elif len(picked) <= 2:
+            self.train_kind_label.set(", ".join(picked))
+        else:
+            self.train_kind_label.set(f"{picked[0]} 외 {len(picked) - 1}종")
+
+    def clear_train_kinds(self) -> None:
+        for var in self.train_kind_vars.values():
+            var.set(False)
+        self.sync_train_kinds()
 
     # -- 환승 조건 -----------------------------------------------------------
 
@@ -529,6 +562,7 @@ class BookerApp:
         def work() -> None:
             client = self._ensure_client()
             names = transfer_station_candidates(client, departure, arrival)
+            self._transfer_route = (departure, arrival)
             self.events.put(lambda: self._transfer_stations_loaded(names))
 
         self._in_thread(work, "korail-transfer-stations")
@@ -551,7 +585,7 @@ class BookerApp:
             arrival=request.arrival,
             depart_after=request.depart_after,
             depart_before=request.depart_before,
-            train_name=self.train_kind.get(),
+            train_names=list(request.train_names),
             seat_preference=request.seat_preference.value,
             include_direct=request.include_direct,
             include_transfer=request.include_transfer,
@@ -717,7 +751,6 @@ class BookerApp:
             raise ValueError("시작 시각이 끝 시각보다 늦습니다")
         if not self.include_direct.get() and not self.include_transfer.get():
             raise ValueError("직통이나 환승 중 하나는 켜야 합니다")
-        kind = self.train_kind.get().strip()
         preference = dict(SEAT_CHOICES).get(self.seat_choice.get(), SeatPreference.ANY)
         stations = self.selected_transfer_stations()
         if (
@@ -741,7 +774,7 @@ class BookerApp:
             date=parse_date_field(self.date.get()),
             depart_after=after,
             depart_before=before,
-            train_name="" if kind in ("", "전체") else kind,
+            train_names=self.selected_train_kinds(),
             seat_preference=preference,
             include_direct=self.include_direct.get(),
             include_transfer=self.include_transfer.get(),
@@ -769,6 +802,7 @@ class BookerApp:
         def work() -> None:
             try:
                 client = self._ensure_client()
+                self._refresh_transfer_stations(client, request)
                 journeys = search_journeys(client, request, log=self.log)
             except (KorailApiError, ValueError) as exc:
                 message = str(exc)
@@ -777,6 +811,28 @@ class BookerApp:
             self.events.put(lambda: self._show_journeys(journeys))
 
         self._in_thread(work, "korail-search")
+
+    def _refresh_transfer_stations(
+        self,
+        client: KorailClient,
+        request: SearchRequest,
+    ) -> None:
+        """조회할 때 환승역 목록도 그 구간 것으로 맞춰 둡니다.
+
+        구간이 그대로면 다시 묻지 않습니다 — 같은 답을 받으려고 요청을 하나 더
+        내보내는 것이라, 페이싱이 걸린 이 프로그램에서는 그냥 느려집니다.
+        실패해도 조회는 그대로 진행합니다. 환승역 목록은 곁가지입니다.
+        """
+        route = (request.departure, request.arrival)
+        if route == self._transfer_route:
+            return
+        try:
+            names = transfer_station_candidates(client, *route)
+        except (KorailApiError, ValueError) as exc:
+            self.log(f"환승역 목록을 갱신하지 못했습니다: {exc}")
+            return
+        self._transfer_route = route
+        self.events.put(lambda: self._transfer_stations_loaded(names))
 
     def _search_failed(self, message: str) -> None:
         self.search_button.configure(state="normal")

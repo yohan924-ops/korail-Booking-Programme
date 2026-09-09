@@ -52,7 +52,7 @@ class Settings:
     arrival: str = "부산"
     depart_after: str = ""
     depart_before: str = ""
-    train_name: str = ""
+    train_names: list[str] = field(default_factory=list)
     seat_preference: str = "any"
     include_direct: bool = True
     include_transfer: bool = False
