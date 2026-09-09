@@ -753,6 +753,7 @@ class BookerApp:
         self.allow_standby = tk.BooleanVar(value=False)
         self.add_to_cart = tk.BooleanVar(value=False)
         self.live_mode = tk.BooleanVar(value=False)
+        self.mode_text = tk.StringVar(value="")
         self.notify_enabled = tk.BooleanVar(value=True)
         row = ttk.Frame(frame)
         row.grid(row=0, column=0, sticky="w", padx=4, pady=6)
@@ -776,6 +777,7 @@ class BookerApp:
             row2,
             text="실제 예약(홀드) 만들기 — 끄면 미리보기만",
             variable=self.live_mode,
+            command=self._live_mode_changed,
         ).pack(side="left")
         ttk.Button(row2, text="텔레그램 설정", command=self.on_telegram_settings).pack(
             side="left", padx=12
@@ -786,11 +788,17 @@ class BookerApp:
             row2, text="중지", command=self.on_stop, state="disabled"
         )
         self.stop_button.pack(side="left")
+        # 체크 하나로 "진짜 잡는다" 와 "아무것도 안 보낸다" 가 갈립니다. 체크박스
+        # 하나만 두면 그것을 못 보고 미리보기를 진짜라고 믿게 됩니다 — 실제로
+        # 그랬습니다. 그래서 지금 어느 쪽인지 단추 옆에 계속 띄웁니다.
+        self.mode_label = ttk.Label(row2, textvariable=self.mode_text)
+        self.mode_label.pack(side="left", padx=12)
+        self._live_mode_changed()
         ttk.Label(
-            row2,
+            frame,
             text="결제는 하지 않습니다. 잡은 뒤 코레일 앱에서 기한 안에 결제하세요.",
             foreground="#666666",
-        ).pack(side="left", padx=12)
+        ).grid(row=2, column=0, sticky="w", padx=4, pady=(0, 6))
 
     def _build_log(self) -> None:
         frame = ttk.LabelFrame(self.root, text="기록")
@@ -1578,6 +1586,15 @@ class BookerApp:
             lambda: self._booking_done(result)
         ))
 
+    def _live_mode_changed(self) -> None:
+        """지금이 실제인지 미리보기인지를 단추 옆에 적습니다."""
+        if self.live_mode.get():
+            self.mode_text.set("실제 예약을 만듭니다 (결제는 하지 않음)")
+            self.mode_label.configure(foreground="#a11")
+        else:
+            self.mode_text.set("지금은 미리보기 — 아무 요청도 보내지 않습니다")
+            self.mode_label.configure(foreground="#a15c00")
+
     def _confirm_live(self, targets: list[Target]) -> bool:
         lines = "\n".join(f"· {target.describe()}" for target in targets[:5])
         return messagebox.askyesno(
@@ -1620,6 +1637,17 @@ class BookerApp:
             messagebox.showinfo("예약됨", result.message)
         elif result.outcome is Outcome.FAILED:
             messagebox.showerror("자동예매 실패", result.message)
+        elif result.outcome is Outcome.PREVIEW:
+            # 미리보기는 "잡을 수 있었다" 로 끝납니다. 기록 한 줄로만 알리면
+            # 잡힌 줄 알고 코레일 장바구니를 열어 보게 됩니다.
+            messagebox.showinfo(
+                "미리보기 — 아무것도 보내지 않았습니다",
+                f"{result.message}\n\n"
+                "이번 실행은 미리보기였습니다. 예약도 장바구니도 만들어지지 "
+                "않았고, 코레일에는 아무 요청도 나가지 않았습니다.\n\n"
+                "실제로 잡으려면 [실제 예약(홀드) 만들기] 를 켜고 다시 "
+                "[자동예매 시작] 을 누르세요.",
+            )
 
     # -- 동작: 텔레그램 ------------------------------------------------------
 

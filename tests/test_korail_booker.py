@@ -1208,6 +1208,31 @@ def test_startup_applies_the_round_trip_state_to_the_return_fields():
     assert "self._round_trip_toggled" in called, sorted(called)
 
 
+def test_a_preview_run_says_out_loud_that_nothing_was_sent():
+    """미리보기로 끝난 실행은 창을 띄워 알려야 합니다.
+
+    기록 한 줄만 남기면 잡힌 줄 알고 코레일 장바구니를 열어 보게 됩니다 —
+    실제로 그랬습니다. Tkinter 를 띄우지 않고 원문에서 확인합니다.
+    """
+    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    done = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_booking_done"
+    ]
+    assert len(done) == 1
+    body = ast.unparse(done[0])
+    assert "Outcome.PREVIEW" in body
+    assert "showinfo" in body
+
+
+def test_the_live_switch_is_never_written_to_the_settings_file():
+    """실제 예약은 켤 때마다 사람이 켜야 합니다. 저장해 두면 다음에 몰래 켜집니다."""
+    stored = dataclasses.asdict(ST.Settings())
+    assert not [name for name in stored if "live" in name]
+
+
 # --- 텔레그램 -----------------------------------------------------------------
 
 FAKE_TOKEN = "123456789:SYNTHETIC-TOKEN-NOT-REAL"
