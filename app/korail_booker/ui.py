@@ -2141,21 +2141,50 @@ class BookerApp:
         window.transient(self.root)
         token = tk.StringVar(value=self.settings.telegram_token)
         chat_id = tk.StringVar(value=self.settings.telegram_chat_id)
-        ttk.Label(window, text="봇 토큰 (@BotFather 에서 발급)").grid(
-            row=0, column=0, sticky="w", padx=8, pady=(8, 2)
+        # 무엇을 어디서 가져와 어디에 넣는지 그림 없이 알기 어렵습니다.
+        # 처음 쓰는 사람이 헷갈린 곳이 정확히 여기였습니다.
+        ttk.Label(
+            window,
+            text="텔레그램에서 @BotFather 를 찾아 /newbot 을 보내면 봇이 만들어지고,\n"
+            "그 답장에 토큰이 옵니다. 아래 두 칸이 그 답장에서 오는 값입니다.",
+            justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(8, 6))
+
+        ttk.Label(window, text="봇 토큰 (@BotFather 답장의 긴 문자열)").grid(
+            row=1, column=0, sticky="w", padx=8, pady=(4, 2)
         )
         ttk.Entry(window, textvariable=token, width=48, show="*").grid(
-            row=1, column=0, columnspan=2, padx=8
+            row=2, column=0, columnspan=2, sticky="w", padx=8
         )
-        ttk.Label(window, text="대화 ID (봇에게 아무 메시지나 보낸 뒤 찾기)").grid(
-            row=2, column=0, sticky="w", padx=8, pady=(8, 2)
+        # 예시는 **모양만** 보여 줍니다. 진짜 토큰을 예시로 적어 두면 그것을
+        # 그대로 붙여 넣는 사람이 생기고, 남의 봇 토큰은 적어 둘 것이 아닙니다.
+        ttk.Label(
+            window,
+            text='예: "8667115971:AAE…" 처럼 숫자 10자리 + ":" + 긴 문자열.\n'
+            'BotFather 답장의 "Use this token to access the HTTP API:" 아래 줄을\n'
+            "통째로 복사해 넣으세요. 이 토큰은 봇을 조종할 수 있으니 남에게 "
+            "보이지 마세요.",
+            foreground="#666666",
+            justify="left",
+        ).grid(row=3, column=0, columnspan=2, sticky="w", padx=8, pady=(2, 6))
+
+        ttk.Label(window, text="대화 ID (내 계정 번호 — 봇이 나에게 보낼 곳)").grid(
+            row=4, column=0, sticky="w", padx=8, pady=(4, 2)
         )
         ttk.Entry(window, textvariable=chat_id, width=24).grid(
-            row=3, column=0, sticky="w", padx=8
+            row=5, column=0, sticky="w", padx=8
         )
+        ttk.Label(
+            window,
+            text='예: "123456789" (숫자만). 모르면 비워 두고,\n'
+            "먼저 텔레그램에서 **그 봇에게 아무 말이나 한 번 보낸 뒤**\n"
+            "아래 [내 대화 ID 찾기] 를 누르면 채워집니다.",
+            foreground="#666666",
+            justify="left",
+        ).grid(row=6, column=0, columnspan=2, sticky="w", padx=8, pady=(2, 6))
         status = tk.StringVar(value="")
         ttk.Label(window, textvariable=status, foreground="#666666").grid(
-            row=4, column=0, columnspan=2, sticky="w", padx=8, pady=6
+            row=7, column=0, columnspan=2, sticky="w", padx=8, pady=6
         )
 
         def find_chat_id() -> None:
@@ -2202,7 +2231,7 @@ class BookerApp:
             window.destroy()
 
         buttons = ttk.Frame(window)
-        buttons.grid(row=5, column=0, columnspan=2, sticky="w", padx=8, pady=8)
+        buttons.grid(row=8, column=0, columnspan=2, sticky="w", padx=8, pady=8)
         ttk.Button(buttons, text="내 대화 ID 찾기", command=find_chat_id).pack(side="left")
         ttk.Button(buttons, text="테스트 전송", command=send_test).pack(side="left", padx=6)
         ttk.Button(buttons, text="저장", command=store).pack(side="left")
@@ -2210,7 +2239,7 @@ class BookerApp:
             window,
             text="토큰은 이 컴퓨터의 설정 파일에만 저장되며 화면과 기록에는 남지 않습니다.",
             foreground="#666666",
-        ).grid(row=6, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 8))
+        ).grid(row=9, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 8))
 
     # -- 종료 ----------------------------------------------------------------
 

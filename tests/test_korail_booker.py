@@ -1529,6 +1529,77 @@ def test_the_booker_waits_for_both_legs_instead_of_grabbing_one():
     assert recorder.count(RESERVE) == 0
 
 
+# --- 텔레그램 알림 --------------------------------------------------------------
+
+
+def _announcing(recorder: _Recorder, targets, **options):
+    """알림 문구를 모으며 한 번 돌립니다."""
+    sent: list[str] = []
+    booker = AutoBooker(
+        _client(recorder),
+        [_target(journey, _request()) for journey in targets],
+        BookingOptions(poll_interval_s=10.0, watch_minutes=0, **options),
+        log=lambda message: None,
+        notify=sent.append,
+    )
+    return booker, sent
+
+
+def test_the_start_and_the_end_are_always_announced():
+    """잡았을 때만 알리면 조용한 것이 '아직' 인지 '안 돌고 있음' 인지 모릅니다."""
+    recorder = _Recorder(
+        {SEARCH: _search_reply([_row("00101", general="11")]), RESERVE: _reserve_reply()}
+    )
+    booker, sent = _announcing(recorder, [_journey(_summary(general="11"))], live=True)
+
+    result = booker.run(threading.Event())
+
+    assert result.outcome is Outcome.HELD
+    assert sent[0].startswith("▶️ 자동예매 시작")
+    assert sent[-1].startswith("✅ 자동예매 종료")
+
+
+def test_the_announcement_says_which_journeys_are_being_watched():
+    """무엇을 지켜보는지 적지 않으면 여러 개를 돌릴 때 알림이 쓸모없습니다."""
+    recorder = _Recorder({SEARCH: _search_reply([])})
+    booker, sent = _announcing(
+        recorder,
+        [_journey(_summary(train_no="00101")), _journey(_summary(train_no="00103"))],
+        live=True,
+    )
+
+    # 감시 시간 무제한이라 결과가 없으면 영영 돕니다. 시작 알림은 고리에
+    # 들어가기 전에 나가므로, 멈춤을 미리 걸어 두고 확인합니다.
+    stop = threading.Event()
+    stop.set()
+    booker.run(stop)
+
+    assert "00101" in sent[0] and "00103" in sent[0]
+    assert "2편 감시" in sent[0]
+
+
+def test_a_stopped_run_is_announced_too():
+    """중지도 끝입니다. 조용히 멈추면 멈춘 줄을 모릅니다."""
+    recorder = _Recorder({SEARCH: _search_reply([])})
+    booker, sent = _announcing(recorder, [_journey(_summary())], live=True)
+    stop = threading.Event()
+    stop.set()
+
+    booker.run(stop)
+
+    assert sent[-1].startswith("⏹️ 자동예매 종료")
+
+
+def test_the_token_dialog_shows_what_the_two_values_look_like():
+    """BotFather 답장만 보고는 어느 값을 어디에 넣는지 헷갈립니다."""
+    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+
+    assert "@BotFather" in source and "/newbot" in source
+    assert "Use this token to access the HTTP API" in source
+    assert '숫자 10자리 + ":" + 긴 문자열' in source
+    assert '"123456789" (숫자만)' in source
+
+
 # --- 로그인 표시와 조회 진행 막대 --------------------------------------------
 
 

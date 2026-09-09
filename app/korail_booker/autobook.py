@@ -131,6 +131,16 @@ class BookingResult:
         return self.hold.pnr_no if self.hold is not None else None
 
 
+#: 끝난 이유마다 한 글자. 알림 목록에서 눈으로 훑을 때 씁니다.
+END_MARKS = {
+    Outcome.HELD: "✅",
+    Outcome.PREVIEW: "👀",
+    Outcome.STOPPED: "⏹️",
+    Outcome.TIMEOUT: "⏰",
+    Outcome.FAILED: "❌",
+}
+
+
 def reserve_consent(*, live: bool) -> MutationConsent:
     """예약 하나만 여는 consent."""
     consent = MutationConsent(allow_reserve=True, dry_run=not live)
@@ -277,7 +287,40 @@ class AutoBooker:
 
     # -- 실행 ----------------------------------------------------------------
 
+    def watching_text(self) -> str:
+        """지금 무엇을 지켜보는지 한 덩어리로. 알림이 이것을 싣습니다."""
+        lines = [f"· {target.describe()}" for target in self.targets]
+        window = (
+            "무제한"
+            if self.options.watch_minutes == 0
+            else f"{self.options.watch_minutes}분"
+        )
+        return (
+            f"{len(self.targets)}편 감시 · {self.options.poll_interval_s:g}초마다 · "
+            f"{window}\n" + "\n".join(lines)
+        )
+
     def run(self, stop_event: threading.Event | None = None) -> BookingResult:
+        """한 번 돌고 결과를 돌려줍니다. **시작과 끝을 반드시 알립니다.**
+
+        잡았을 때만 알리면, 알림이 안 오는 것이 "아직 안 잡힘" 인지 "애초에
+        안 돌고 있음" 인지 구별되지 않습니다. 밤새 켜 두는 프로그램에서 그
+        둘은 아주 다릅니다.
+
+        끝나는 갈래가 여럿이라(잡음·중지·시간 끝·실패) 고리는 :meth:`_run`
+        에 두고 알림은 여기서 감쌉니다 — return 마다 적어 두면 언젠가 하나를
+        빠뜨립니다.
+        """
+        self.announce(f"▶️ 자동예매 시작\n{self.watching_text()}")
+        result = self._run(stop_event)
+        self.announce(
+            f"{END_MARKS.get(result.outcome, '■')} 자동예매 종료 "
+            f"({result.outcome.value})\n{result.message}\n"
+            f"— {self.watching_text()}"
+        )
+        return result
+
+    def _run(self, stop_event: threading.Event | None = None) -> BookingResult:
         stop = stop_event or threading.Event()
         deadline = (
             None
