@@ -46,13 +46,28 @@ echo.
 echo.
 echo   PyInstaller 를 준비합니다.
 echo.
-"%VPY%" -m pip install pyinstaller
+rem  pillow 는 아이콘 때문입니다. PyInstaller 는 .ico 가 아닌 그림을 받으면
+rem  pillow 로 바꿔 넣습니다. 아이콘을 안 쓰면 그냥 안 쓰이고 맙니다.
+"%VPY%" -m pip install pyinstaller pillow
 if errorlevel 1 (
   echo.
   echo   PyInstaller 를 받지 못했습니다. 인터넷 연결을 확인하세요.
   echo.
   pause
   exit /b 1
+)
+
+rem --- 아이콘 (있으면 씁니다) --------------------------------------------------
+rem  packaging\icon.png 또는 icon.ico 를 넣어 두면 그것이 exe 아이콘이 됩니다.
+rem  없으면 PyInstaller 기본 아이콘으로 나옵니다 — 없다고 빌드가 멈추지는
+rem  않습니다.
+set "ICON="
+if exist "packaging\icon.ico" set "ICON=--icon packaging\icon.ico"
+if not defined ICON if exist "packaging\icon.png" set "ICON=--icon packaging\icon.png"
+if defined ICON (
+  echo   아이콘을 넣습니다.
+) else (
+  echo   packaging\icon.png 이 없어 기본 아이콘으로 만듭니다.
 )
 
 echo.
@@ -65,6 +80,7 @@ rem  --paths     desktop_entry.py 가 sys.path 를 실행 중에 만지지 않�
 rem              PyInstaller 는 소스를 정적으로 훑으므로 여기서 알려 줍니다.
 "%VPY%" -m PyInstaller --onefile --windowed ^
   --name KorailBooker ^
+  %ICON% ^
   --paths src --paths app ^
   --distpath "%CD%\dist" --workpath "%CD%\build" --specpath "%CD%\build" ^
   "%CD%\packaging\desktop_entry.py"

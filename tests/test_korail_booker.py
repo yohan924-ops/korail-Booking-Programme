@@ -1645,6 +1645,29 @@ def test_the_local_exe_builder_matches_the_ci_build():
         assert fragment.replace("/", "\\") in script or fragment in script, fragment
 
 
+def test_the_icon_is_optional_on_both_build_paths():
+    """``packaging/icon.png`` 을 넣으면 exe 아이콘이 되고, 없어도 빌드는 됩니다.
+
+    아이콘이 없다고 멈추면 그림을 넣지 않은 사람은 exe 를 못 만듭니다.
+    """
+    script = (REPO_ROOT / "exe 만들기 (Windows).bat").read_text(encoding="utf-8")
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "desktop-build.yml"
+    ).read_text(encoding="utf-8")
+
+    for text in (script, workflow):
+        # .png 를 쓰려면 pillow 가 있어야 PyInstaller 가 .ico 로 바꿔 줍니다.
+        assert "pillow" in text
+        assert "packaging/icon.png" in text or "packaging\\icon.png" in text
+
+    # .ico 가 있으면 그것을 먼저 씁니다 — 변환 없이 그대로 들어갑니다.
+    # 그리고 둘 다 없을 때를 갈라 두어야 빌드가 멈추지 않습니다.
+    assert 'if exist "packaging\\icon.ico" set "ICON=' in script
+    assert 'if not defined ICON if exist "packaging\\icon.png"' in script
+    assert "if (Test-Path packaging/icon.ico)" in workflow
+    assert "elseif (Test-Path packaging/icon.png)" in workflow
+
+
 def test_the_local_exe_builder_stands_on_its_own():
     """더블클릭 하나로 끝나야 합니다 — 다른 것부터 누르라고 시키지 않습니다.
 
