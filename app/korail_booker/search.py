@@ -479,17 +479,43 @@ def search_server_transfer(
     return journeys
 
 
+def _wanted_kind(train: TrainSummary, request: SearchRequest) -> bool:
+    """이 열차 하나가 고른 종류에 드는지. 아무것도 안 골랐으면 전부 참."""
+    wanted = tuple(
+        name.strip().casefold() for name in request.train_names if name.strip()
+    )
+    if not wanted:
+        return True
+    name = (train.train_class_name or "").casefold()
+    return any(pattern in name for pattern in wanted)
+
+
+def _leg_candidates(
+    client: KorailClient,
+    request: SearchRequest,
+    query: TrainSearchQuery,
+) -> list[TrainSummary]:
+    """구간 한쪽의 후보 열차. **자르기 전에 종류를 거릅니다.**
+
+    거꾸로 하면 이런 일이 납니다 — 무궁화만 보겠다고 골랐는데 그 구간의 앞
+    열두 편이 전부 KTX 라, 자르고 나서 거르면 남는 것이 없습니다. 하루 뒤쪽에
+    무궁화가 있어도 못 봅니다.
+    """
+    trains: list[TrainSummary] = []
+    for result in _direct_pages(client, query, max_pages=CUSTOM_LEG_MAX_PAGES):
+        trains.extend(
+            train for train in result.trains if _wanted_kind(train, request)
+        )
+    return trains[:MAX_CUSTOM_LEGS_PER_SIDE]
+
+
 def _first_leg_candidates(
     client: KorailClient,
     request: SearchRequest,
     station: str,
 ) -> list[TrainSummary]:
-    trains: list[TrainSummary] = []
-    for result in _direct_pages(
-        client, request.query(arrival=station), max_pages=CUSTOM_LEG_MAX_PAGES
-    ):
-        trains.extend(result.trains)
-    return trains[:MAX_CUSTOM_LEGS_PER_SIDE]
+    """출발역 → 환승역 직통. 시간창 시작 이후를 서버가 준 순서대로."""
+    return _leg_candidates(client, request, request.query(arrival=station))
 
 
 def _second_leg_candidates(
@@ -498,14 +524,11 @@ def _second_leg_candidates(
     station: str,
     earliest_arrival: str,
 ) -> list[TrainSummary]:
-    trains: list[TrainSummary] = []
-    for result in _direct_pages(
+    return _leg_candidates(
         client,
+        request,
         request.query(departure=station, departure_time=earliest_arrival),
-        max_pages=CUSTOM_LEG_MAX_PAGES,
-    ):
-        trains.extend(result.trains)
-    return trains[:MAX_CUSTOM_LEGS_PER_SIDE]
+    )
 
 
 def search_custom_transfer(

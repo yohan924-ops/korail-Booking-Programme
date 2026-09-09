@@ -1629,9 +1629,53 @@ def test_every_booking_log_line_says_which_watch_it_came_from():
 
 def test_the_target_list_shows_what_is_running():
     body = _ui_function("sync_target_list")
-    assert "▶" in body and "대기" in body
+    assert "▶ 감시 중" in body and "대기" in body
+    # 도는 것과 안 도는 것을 색으로도 가릅니다.
+    assert "'watching' if watch else 'idle'" in body
     # 다시 그린 뒤에도 고른 줄은 그대로 있어야 합니다.
-    assert "chosen = set(self.target_list.curselection())" in body
+    assert "self.target_list.selection_add(item)" in body
+
+
+def test_each_target_row_shows_its_own_interval_and_countdown():
+    """여럿을 돌리면 묶음마다 주기와 남은 시간이 다릅니다."""
+    body = _ui_function("sync_target_list")
+    assert "watch.options.poll_interval_s" in body
+    assert "watch.remaining(now)" in body
+
+    source = _ui_source()
+    assert '("조회 주기", 80, "center")' in source
+    assert '("남은 감시", 110, "center")' in source
+    # 1초 시계가 그 칸을 다시 씁니다.
+    tick = _ui_function("_tick_holds")
+    assert "self._watch_of(self.targets[index])" in tick
+
+
+def test_conditions_are_read_at_start_and_a_restart_is_offered():
+    """도는 중에 조건을 고쳐도 그 묶음은 옛 조건으로 돕니다.
+
+    화면과 실제가 어긋나는데 화면이 말하지 않으면 사람이 속습니다.
+    """
+    source = _ui_source()
+    assert "options: BookingOptions" in source  # 시작할 때 읽은 것을 들고 있다
+    assert 'text="조건 바꿔 재시작"' in source
+
+    body = _ui_function("restart_selected")
+    assert "watch.session.stop()" in body
+    # 멈춤은 즉시 걸리지 않습니다. 멈춘 것을 확인하고 다시 겁니다.
+    # ast.unparse 는 제너레이터에 괄호를 하나 더 씌웁니다.
+    assert "any((watch.running for watch in stopping))" in body
+    assert "self.on_start(selected_only=True)" in body
+
+
+def test_a_transfer_station_can_be_taken_out_again():
+    """넣기만 되고 빼기가 없으면 목록을 통째로 다시 불러와야 합니다."""
+    source = _ui_source()
+    assert "def remove_transfer_station" in source
+    assert 'text="빼기", width=5, command=self.remove_transfer_station' in source
+
+    body = _ui_function("remove_transfer_station")
+    assert "self.transfer_list.delete(index)" in body
+    assert "self.mark_stale()" in body
 
 
 # --- 텔레그램 알림 --------------------------------------------------------------

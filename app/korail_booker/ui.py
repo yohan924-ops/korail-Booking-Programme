@@ -19,7 +19,7 @@ import time
 import tkinter as tk
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from tkinter import messagebox, ttk
 
 from korail_mobile_api import (
@@ -45,7 +45,7 @@ from .autobook import (
     payment_deadline_text,
     reserve_once,
 )
-from .holds import Held, parse_deadline
+from .holds import Held, parse_deadline, remaining_text
 from .journeys import (
     Journey,
     JourneySource,
@@ -130,6 +130,14 @@ HOLD_LAYOUT = (
     ("남은 시간", 120, "center"),
 )
 HOLD_COLUMNS = tuple(name for name, _width, _anchor in HOLD_LAYOUT)
+#: 예매 대상 표의 칸.
+TARGET_LAYOUT = (
+    ("상태", 115, "center"),
+    ("여정", 460, "w"),
+    ("조회 주기", 80, "center"),
+    ("남은 감시", 110, "center"),
+)
+TARGET_COLUMNS = tuple(name for name, _width, _anchor in TARGET_LAYOUT)
 #: 로그인 상태 글자색. 가장 자주 확인하는 것이라 색으로 먼저 말합니다.
 LOGIN_OK_COLOUR = "#1a7f37"
 LOGIN_BAD_COLOUR = "#b3261e"
@@ -321,10 +329,21 @@ class Watch:
     keys: frozenset[tuple[tuple[str, str, str, str], ...]]
     #: 사람이 읽는 이름. 알림과 기록에 씁니다.
     title: str
+    #: 시작할 때 읽은 조건. 도는 중에 화면을 고쳐도 이 묶음은 이것으로 돕니다.
+    options: BookingOptions
+    #: 감시가 끝나는 시각. ``watch_minutes`` 가 0(무제한)이면 ``None``.
+    deadline: datetime | None
 
     @property
     def running(self) -> bool:
         return self.session.running
+
+    def remaining(self, now: datetime) -> str:
+        if not self.running:
+            return "-"
+        if self.deadline is None:
+            return "무제한"
+        return remaining_text(self.deadline, now)
 
 
 class BookerApp:
@@ -352,6 +371,8 @@ class BookerApp:
         #: 잡아 둔 예약들. 결제 기한 카운트다운이 이것을 봅니다.
         self.holds: list[Held] = []
         self._hold_items: dict[int, str] = {}
+        #: 예매 대상 표의 줄 번호 → 항목 id.
+        self._target_items: dict[int, str] = {}
         #: 붙인 칸들 — (담은 PanedWindow, 묶음, 지정된 최소 높이 또는 None).
         self._panes: list[tuple[tk.PanedWindow, ttk.Widget, int | None]] = []
         #: 각 칸의 최소 높이. 본문 높이를 여기서 더해 냅니다.
@@ -748,6 +769,12 @@ class BookerApp:
             adder, text="추가", width=5, command=self.add_transfer_station
         )
         self.transfer_add_button.pack(side="left", padx=4)
+        # 넣기만 되고 빼기가 없으면, 잘못 넣은 역을 지우려고 목록을 통째로
+        # 다시 불러와야 합니다.
+        self.transfer_remove_button = ttk.Button(
+            adder, text="빼기", width=5, command=self.remove_transfer_station
+        )
+        self.transfer_remove_button.pack(side="left")
         self.transfer_load_button = ttk.Button(
             adder, text="구간 후보 갱신", command=self.on_load_transfer_stations
         )
@@ -969,13 +996,31 @@ class BookerApp:
         self._add_pane(parent, frame, stretch="always")
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
-        self.target_list = tk.Listbox(
-            frame, height=4, selectmode="extended", exportselection=False
+        # 목록이 아니라 표입니다. 줄마다 상태·주기·남은 시간을 따로 적어야
+        # 여럿을 돌릴 때 무엇이 언제까지 도는지 보입니다.
+        self.target_list = ttk.Treeview(
+            frame,
+            columns=TARGET_COLUMNS,
+            show="headings",
+            selectmode="extended",
+            height=4,
         )
+        for name, width, anchor in TARGET_LAYOUT:
+            self.target_list.heading(name, text=name)
+            self.target_list.column(
+                name,
+                width=width,
+                anchor="w" if anchor == "w" else "center",
+                stretch=(name == "여정"),
+            )
         self.target_list.grid(row=0, column=0, sticky="nsew", padx=(4, 0), pady=4)
         scroll = ttk.Scrollbar(frame, orient="vertical", command=self.target_list.yview)
         self.target_list.configure(yscrollcommand=scroll.set)
         scroll.grid(row=0, column=1, sticky="ns", pady=4)
+        # 도는 것과 안 도는 것을 색으로 가릅니다. 줄 앞의 글자만으로는
+        # 여러 줄이 섞였을 때 한눈에 안 들어옵니다.
+        self.target_list.tag_configure("watching", foreground="#1a7f37")
+        self.target_list.tag_configure("idle", foreground="#666666")
         buttons = ttk.Frame(frame)
         buttons.grid(row=0, column=2, sticky="n", padx=6, pady=4)
         ttk.Button(buttons, text="↑ 담기", width=10, command=self.add_targets).pack()
@@ -985,10 +1030,17 @@ class BookerApp:
         ttk.Button(buttons, text="비우기", width=10, command=self.clear_targets).pack(
             pady=(4, 0)
         )
+        # 조건은 시작할 때 한 번 읽습니다. 도는 중에 위 칸을 고쳐도 그 묶음은
+        # 옛 조건으로 계속 돕니다 — 이 단추가 멈추고 새 조건으로 다시 겁니다.
+        ttk.Button(
+            buttons, text="조건 바꿔 재시작", width=14, command=self.restart_selected
+        ).pack(pady=(10, 0))
         ttk.Label(
             frame,
             text="위 목록에서 고르고 [담기]. 왕복이면 가는 편·오는 편을 각각 "
-            "담으세요 — 방향마다 한 건씩 잡고 멈춥니다.",
+            "담으세요 — 방향마다 한 건씩 잡고 멈춥니다.\n"
+            "조회 주기·감시 시간은 **시작할 때** 읽습니다. 도는 중에 바꾸려면 "
+            "그 줄을 고르고 [조건 바꿔 재시작].",
             foreground="#666666",
         ).grid(row=1, column=0, columnspan=3, sticky="w", padx=4, pady=(0, 6))
 
@@ -1143,13 +1195,23 @@ class BookerApp:
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 6))
 
     def _tick_holds(self) -> None:
-        """남은 시간을 1초마다 다시 셉니다. 다른 일은 걸지 않습니다."""
+        """1초마다 줄어드는 것들을 다시 셉니다. 다른 일은 걸지 않습니다."""
         now = datetime.now()
         for index, held in enumerate(self.holds):
             item = self._hold_items.get(index)
             if item is None:
                 continue
             self.hold_tree.item(item, values=held.row(now), tags=(held.tag(now),))
+        # 예매 대상의 '남은 감시' 도 여기서 셉니다. 표를 통째로 다시 그리면
+        # 고른 줄이 깜빡이므로 그 칸 하나만 고쳐 씁니다.
+        for index, item in self._target_items.items():
+            if index >= len(self.targets):
+                continue
+            watch = self._watch_of(self.targets[index])
+            values = list(self.target_list.item(item, "values"))
+            if len(values) == len(TARGET_COLUMNS):
+                values[-1] = watch.remaining(now) if watch else "-"
+                self.target_list.item(item, values=values)
         self.root.after(1000, self._tick_holds)
 
     def _held_from(
@@ -1425,6 +1487,11 @@ class BookerApp:
         )
         self.transfer_entry.configure(state=adding)
         self.transfer_add_button.configure(state=adding)
+        # 빼기는 서버 추천 모드에서도 됩니다 — 그쪽에서 고른 역은 필터라,
+        # 목록에서 지우는 것이 곧 필터에서 빼는 것입니다.
+        self.transfer_remove_button.configure(
+            state="normal" if self.include_transfer.get() else "disabled"
+        )
         self.transfer_list.configure(state=state)
 
     def selected_transfer_stations(self) -> tuple[str, ...]:
@@ -1454,6 +1521,20 @@ class BookerApp:
             if select_all or name in keep:
                 self.transfer_list.selection_set(index)
         self.sync_transfer_state()
+
+    def remove_transfer_station(self) -> None:
+        """고른 환승역을 목록에서 뺍니다.
+
+        [이 구간 후보 다시 불러오기] 는 서버가 준 것으로 통째로 되돌립니다 —
+        손으로 넣은 역 하나를 지우려고 그것을 누르면 나머지도 다 날아갑니다.
+        """
+        chosen = self.transfer_list.curselection()
+        if not chosen:
+            messagebox.showinfo("환승역", "뺄 역을 목록에서 고르세요")
+            return
+        for index in sorted(chosen, reverse=True):
+            self.transfer_list.delete(index)
+        self.mark_stale()
 
     def add_transfer_station(self) -> None:
         """친 역을 목록에 넣고 고릅니다. 서버 후보에 없어도 됩니다."""
@@ -2068,7 +2149,7 @@ class BookerApp:
         잡히면 무슨 일인지 알 수 없습니다. 먼저 멈추라고 말합니다.
         """
         watching = self.watching_keys()
-        chosen = sorted(self.target_list.curselection(), reverse=True)
+        chosen = sorted(self.selected_indices(), reverse=True)
         if not chosen:
             messagebox.showinfo("예매 대상", "뺄 열차를 고르세요")
             return
@@ -2152,28 +2233,49 @@ class BookerApp:
         return write
 
     def selected_targets(self) -> list[Target]:
-        chosen = [self.targets[index] for index in self.target_list.curselection()]
+        """고른 줄. 아무것도 안 골랐으면 담긴 것 전부로 봅니다."""
+        chosen = [self.targets[index] for index in self.selected_indices()]
         return chosen or list(self.targets)
 
+    def _watch_of(self, target: Target) -> Watch | None:
+        """이 열차를 지금 보고 있는 묶음. 없으면 ``None``."""
+        key = target.journey.key()
+        for watch in self.watches:
+            if watch.running and key in watch.keys:
+                return watch
+        return None
+
     def sync_target_list(self) -> None:
-        """목록 줄 앞에 지금 상태를 적습니다 — 무엇이 돌고 있는지 한눈에."""
-        watching = self.watching_keys()
-        tags = {
-            key: watch.tag
-            for watch in self.watches
-            if watch.running
-            for key in watch.keys
-        }
-        chosen = set(self.target_list.curselection())
-        self.target_list.delete(0, "end")
-        for target in self.targets:
-            key = target.journey.key()
-            mark = f"▶ [{tags[key]}]" if key in watching else "○ 대기"
-            self.target_list.insert("end", f"{mark}  {target.describe()}")
-        for index in chosen:
-            if index < len(self.targets):
-                self.target_list.selection_set(index)
+        """표를 다시 그립니다 — 상태·주기·남은 감시 시간까지."""
+        chosen = {self._target_items.get(index) for index in self.selected_indices()}
+        self.target_list.delete(*self.target_list.get_children())
+        self._target_items = {}
+        now = datetime.now()
+        for index, target in enumerate(self.targets):
+            watch = self._watch_of(target)
+            item = self.target_list.insert(
+                "",
+                "end",
+                values=(
+                    f"▶ 감시 중 [{watch.tag}]" if watch else "○ 대기",
+                    target.describe(),
+                    f"{watch.options.poll_interval_s:g}초" if watch else "-",
+                    watch.remaining(now) if watch else "-",
+                ),
+                tags=("watching" if watch else "idle",),
+            )
+            self._target_items[index] = item
+        for item in chosen:
+            if item is not None and item in self.target_list.get_children():
+                self.target_list.selection_add(item)
         self.stop_button.configure(state="normal" if self.any_running() else "disabled")
+
+    def selected_indices(self) -> list[int]:
+        """표에서 고른 줄의 번호. Treeview 는 항목 id 로 말하므로 되짚습니다."""
+        by_item = {item: index for index, item in self._target_items.items()}
+        return sorted(
+            by_item[item] for item in self.target_list.selection() if item in by_item
+        )
 
     def on_start_selected(self) -> None:
         self.on_start(selected_only=True)
@@ -2230,6 +2332,12 @@ class BookerApp:
             session=BookingSession(booker),
             keys=frozenset(target.journey.key() for target in targets),
             title=title,
+            options=options,
+            deadline=(
+                None
+                if options.watch_minutes == 0
+                else datetime.now() + timedelta(minutes=options.watch_minutes)
+            ),
         )
         self.watches.append(watch)
         directions = len({target.direction for target in targets})
@@ -2288,6 +2396,33 @@ class BookerApp:
 
     def on_stop_selected(self) -> None:
         self.on_stop(selected_only=True)
+
+    def restart_selected(self) -> None:
+        """고른 줄을 멈추고 **지금 화면의 조건으로** 다시 겁니다.
+
+        조건은 시작할 때 한 번 읽습니다. 도는 중에 조회 주기나 감시 시간을
+        고쳐도 그 묶음은 옛 조건으로 계속 돕니다 — 화면과 실제가 어긋나는데
+        화면이 그것을 말해 주지 않으면 사람이 속습니다.
+
+        멈춤은 즉시 걸리지 않습니다(이번 조회가 끝나야 멈춥니다). 그래서
+        멈춘 것을 확인한 뒤에 다시 겁니다.
+        """
+        wanted = {target.journey.key() for target in self.selected_targets()}
+        stopping = [w for w in self.watches if w.running and (set(w.keys) & wanted)]
+        if not stopping:
+            messagebox.showinfo("자동예매", "다시 걸 감시가 없습니다")
+            return
+        for watch in stopping:
+            watch.session.stop()
+            self._write_booking(f"[{watch.tag}] 조건을 바꿔 다시 걸려고 멈춥니다.")
+
+        def when_stopped() -> None:
+            if any(watch.running for watch in stopping):
+                self.root.after(400, when_stopped)
+                return
+            self.on_start(selected_only=True)
+
+        self.root.after(400, when_stopped)
 
     def _booking_done(self, watch: Watch, result: BookingResult) -> None:
         levels = {
