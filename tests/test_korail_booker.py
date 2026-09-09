@@ -273,6 +273,61 @@ def test_the_availability_label_is_what_the_app_prints():
     assert journey.seat_state(KorailSeatClass.GENERAL).label == "매진"
 
 
+def test_remaining_seats_are_read_when_the_server_sends_them():
+    journey = _journey(_summary(h_std_rest_seat_cnt="12", h_fst_rest_seat_cnt="3"))
+    assert journey.remaining_seats(KorailSeatClass.GENERAL) == 12
+    assert journey.remaining_seats(KorailSeatClass.SPECIAL) == 3
+    # 안 보내 주는 것이 흔합니다. 없는 것을 0 으로 바꾸면 "자리 없음" 이 됩니다.
+    assert _journey(_summary()).remaining_seats(KorailSeatClass.GENERAL) is None
+
+
+def test_a_transfer_reports_the_scarcest_leg():
+    journey = _journey(
+        _summary(arrival="대전", arrival_code="0010", h_std_rest_seat_cnt="9"),
+        _summary(train_no="00503", departure="대전", departure_code="0010",
+                 h_std_rest_seat_cnt="2"),
+        source=J.JourneySource.SERVER_TRANSFER,
+    )
+    assert journey.remaining_seats(KorailSeatClass.GENERAL) == 2
+
+
+def test_standing_free_seats_and_standby_are_reported():
+    """좌석이 매진이어도 입석·자유석·예약대기는 따로 열려 있을 수 있습니다."""
+    journey = _journey(
+        _summary(general="13", h_stnd_rsv_cd="11", h_free_rsv_cd="11",
+                 h_wait_rsv_flg=" 9")
+    )
+    assert journey.extras() == ("입석", "자유석", "예약대기")
+    assert _journey(_summary()).extras() == ()
+
+
+def test_standby_is_not_offered_on_a_transfer_row():
+    journey = _journey(
+        _summary(arrival="대전", arrival_code="0010", h_wait_rsv_flg=" 9"),
+        _summary(train_no="00503", departure="대전", departure_code="0010",
+                 h_wait_rsv_flg=" 9"),
+        source=J.JourneySource.SERVER_TRANSFER,
+    )
+    assert "예약대기" not in journey.extras()
+
+
+def test_an_extra_needs_every_leg_to_offer_it():
+    journey = _journey(
+        _summary(arrival="대전", arrival_code="0010", h_stnd_rsv_cd="11"),
+        _summary(train_no="00503", departure="대전", departure_code="0010",
+                 h_stnd_rsv_cd="13"),
+        source=J.JourneySource.SERVER_TRANSFER,
+    )
+    assert "입석" not in journey.extras()
+
+
+def test_the_seat_cell_carries_the_count_when_there_is_one():
+    with_count = _journey(_summary(h_rsv_psb_nm="여유", h_std_rest_seat_cnt="12"))
+    assert with_count.seat_text(KorailSeatClass.GENERAL) == "여유 · 12석"
+    without = _journey(_summary(h_rsv_psb_nm="매진"))
+    assert without.seat_text(KorailSeatClass.GENERAL) == "매진"
+
+
 # --- 조회 조건 -----------------------------------------------------------------
 
 

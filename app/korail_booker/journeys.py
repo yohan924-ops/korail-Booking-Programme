@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from korail_mobile_api import KorailSeatClass, TrainSummary
+from korail_mobile_api.constants import KORAIL_STANDBY_WAIT_FLAG as STANDBY_WAIT_FLAG
 
 
 #: "이 객실에 예매 가능한 자리가 있다"는 유일한 값. 라이브러리의 예약 폼도 같은
@@ -224,6 +225,56 @@ class Journey:
         else:
             label = " · ".join(dict.fromkeys(shown))
         return SeatState(available=available, label=label, absent=absent)
+
+    def remaining_seats(self, seat_class: KorailSeatClass) -> int | None:
+        """남은 좌석 수. 환승이면 **가장 적은 구간**의 수입니다.
+
+        ``h_std_rest_seat_cnt``/``h_fst_rest_seat_cnt`` 를 그대로 읽습니다.
+        서버가 이 값을 늘 보내 주지는 않으므로 ``None`` 이 흔합니다 — 없는 것을
+        0 으로 바꾸지 않습니다(0 은 "자리가 없다"는 뜻이라 뜻이 달라집니다).
+        """
+        counts: list[int] = []
+        for train in self.legs:
+            raw = (
+                train.first_class_remaining_seat_count
+                if seat_class is KorailSeatClass.SPECIAL
+                else train.standard_remaining_seat_count
+            )
+            text = (raw or "").strip()
+            if not text.isdigit():
+                return None
+            counts.append(int(text))
+        return min(counts) if counts else None
+
+    def extras(self) -> tuple[str, ...]:
+        """좌석 말고 달리 탈 수 있는 길. 모든 구간에 열려 있을 때만 셉니다.
+
+        코드가 ``"11"`` 이면 열린 것으로 봅니다 — 객실 예약 코드와 같은 규칙이고
+        (``_standing_flag`` 가 입석을 그렇게 읽습니다), 예약대기만 플래그가
+        따로입니다(``h_wait_rsv_flg``).
+        """
+        tokens: list[str] = []
+        if all(
+            train.standing_reservation_code == AVAILABLE_SEAT_CODE
+            for train in self.legs
+        ):
+            tokens.append("입석")
+        if all(
+            train.free_reservation_code == AVAILABLE_SEAT_CODE for train in self.legs
+        ):
+            tokens.append("자유석")
+        # 예약대기는 직통에만 있습니다(환승은 라이브러리가 거절합니다).
+        if not self.is_transfer and self.first.wait_reservation_flag == STANDBY_WAIT_FLAG:
+            tokens.append("예약대기")
+        return tuple(tokens)
+
+    def seat_text(self, seat_class: KorailSeatClass) -> str:
+        """표의 한 칸에 들어갈 좌석 상태. 서버 문구 + 남은 좌석 수."""
+        state = self.seat_state(seat_class)
+        remaining = self.remaining_seats(seat_class)
+        if remaining is None:
+            return state.label
+        return f"{state.label} · {remaining}석"
 
     def bookable_seat_class(
         self,

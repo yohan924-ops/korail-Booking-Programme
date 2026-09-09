@@ -134,6 +134,17 @@ class BookerApp:
         self._transfer_route: tuple[str, str] | None = None
         self._build()
         self._restore()
+        self._watch_for_changes(
+            self.departure,
+            self.arrival,
+            self.date,
+            self.after_time,
+            self.before_time,
+            self.seat_choice,
+            self.min_transfer,
+            self.max_transfer,
+            *self.passenger_vars.values(),
+        )
         self.root.after(120, self._drain)
 
     # -- 화면 만들기 ---------------------------------------------------------
@@ -150,6 +161,8 @@ class BookerApp:
         self._build_results()
         self._build_booking()
         self._build_log()
+        # 조건을 고치고 Enter — 조회 단추를 찾아 누르지 않아도 됩니다.
+        self.root.bind("<Return>", lambda _event: self.on_search())
 
     def _build_login(self) -> None:
         frame = ttk.LabelFrame(self.root, text="1. 로그인 (아이디·휴대폰번호·회원번호)")
@@ -258,14 +271,14 @@ class BookerApp:
             width=6,
             state="readonly",
         ).pack(side="left", padx=(2, 12))
-        ttk.Checkbutton(row2, text="직통", variable=self.include_direct).pack(
-            side="left"
-        )
+        ttk.Checkbutton(
+            row2, text="직통", variable=self.include_direct, command=self.mark_stale
+        ).pack(side="left")
         ttk.Checkbutton(
             row2,
             text="환승",
             variable=self.include_transfer,
-            command=self.sync_transfer_state,
+            command=self._transfer_toggled,
         ).pack(side="left", padx=(4, 12))
         ttk.Label(row2, text="승객").pack(side="left")
         for label, key in (
@@ -281,6 +294,7 @@ class BookerApp:
             )
         self.search_button = ttk.Button(row2, text="조회", command=self.on_search)
         self.search_button.pack(side="left", padx=16)
+        ttk.Label(row2, text="(Enter)", foreground="#666666").pack(side="left")
 
         # 환승 조건은 환승을 켰을 때만 만질 수 있습니다. 꺼져 있으면 아무 효과도
         # 없는 칸이라 켜 두면 헷갈리기만 합니다.
@@ -295,7 +309,7 @@ class BookerApp:
             text="서버 추천 환승 (검증됨)",
             variable=self.transfer_mode,
             value=TRANSFER_SERVER,
-            command=self.sync_transfer_state,
+            command=self._transfer_toggled,
         )
         self.server_radio.pack(anchor="w")
         self.custom_radio = ttk.Radiobutton(
@@ -303,7 +317,7 @@ class BookerApp:
             text="환승역 직접 지정 (서버 수용 미검증)",
             variable=self.transfer_mode,
             value=TRANSFER_CUSTOM,
-            command=self.sync_transfer_state,
+            command=self._transfer_toggled,
         )
         self.custom_radio.pack(anchor="w")
         self.transfer_time_row = ttk.Frame(left)
@@ -336,6 +350,7 @@ class BookerApp:
         self.transfer_list = tk.Listbox(
             picker, selectmode="extended", height=4, width=24, exportselection=False
         )
+        self.transfer_list.bind("<<ListboxSelect>>", self.mark_stale)
         self.transfer_list.pack(side="left")
         list_scroll = ttk.Scrollbar(
             picker, orient="vertical", command=self.transfer_list.yview
@@ -363,7 +378,7 @@ class BookerApp:
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
         columns = ("kind", "train", "departure", "arrival", "duration", "transfer",
-                   "general", "special")
+                   "general", "special", "extras")
         self.tree = ttk.Treeview(
             frame, columns=columns, show="tree headings", selectmode="extended"
         )
@@ -376,8 +391,9 @@ class BookerApp:
             "transfer": ("환승", 130),
             # 좌석 문구에는 "매진" 만 오는 것이 아니라 운임과 적립 안내까지
             # 담겨 옵니다. 좁으면 글자가 잘립니다.
-            "general": ("일반실", 190),
-            "special": ("특실", 190),
+            "general": ("일반실", 180),
+            "special": ("특실", 180),
+            "extras": ("그 밖", 110),
         }
         self.tree.column("#0", width=30, stretch=False)
         for name, (title, width) in headings.items():
@@ -389,6 +405,11 @@ class BookerApp:
         scroll = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         scroll.grid(row=0, column=1, sticky="ns")
+        # 조건을 바꿔도 표는 그대로 남습니다. 그 표가 지금 조건의 결과인지
+        # 아닌지를 말해 주지 않으면 "바꿨는데 아무 일도 안 일어난다" 가 됩니다.
+        self.results_status = tk.StringVar(value="조건을 정하고 [조회] 를 누르세요.")
+        self.results_label = ttk.Label(frame, textvariable=self.results_status)
+        self.results_label.grid(row=1, column=0, columnspan=2, sticky="w", padx=4)
 
     def _build_booking(self) -> None:
         frame = ttk.LabelFrame(self.root, text="4. 자동예매 (만석이면 취소표를 계속 노립니다)")
@@ -480,12 +501,31 @@ class BookerApp:
             var.set(str(getattr(stored, key)))
         self.sync_transfer_state()
 
+    # -- 결과가 지금 조건의 것인지 -------------------------------------------
+
+    def mark_stale(self, *_event: object) -> None:
+        """조건이 바뀌었음을 표시합니다. 표는 그대로 두고 말만 바꿉니다.
+
+        조건을 바꿔도 표는 이전 결과 그대로라, 아무 말이 없으면 "바꿨는데
+        아무 일도 안 일어난다" 로 보입니다. 자동으로 다시 조회하지는 않습니다 —
+        체크 하나 누를 때마다 서버에 요청이 나가는 편이 더 나쁩니다.
+        """
+        if not self.journeys:
+            return
+        self.results_status.set("조건이 바뀌었습니다 — [조회] 를 다시 누르세요.")
+        self.results_label.configure(foreground="#a15c00")
+
+    def _watch_for_changes(self, *variables: tk.Variable) -> None:
+        for variable in variables:
+            variable.trace_add("write", lambda *_args: self.mark_stale())
+
     # -- 열차 종별 -----------------------------------------------------------
 
     def selected_train_kinds(self) -> tuple[str, ...]:
         return tuple(kind for kind, var in self.train_kind_vars.items() if var.get())
 
     def sync_train_kinds(self) -> None:
+        self.mark_stale()
         picked = self.selected_train_kinds()
         if not picked:
             self.train_kind_label.set("전체")
@@ -500,6 +540,11 @@ class BookerApp:
         self.sync_train_kinds()
 
     # -- 환승 조건 -----------------------------------------------------------
+
+    def _transfer_toggled(self) -> None:
+        """환승 체크나 모드가 바뀌었을 때. 상태를 맞추고 결과를 낡음으로."""
+        self.sync_transfer_state()
+        self.mark_stale()
 
     def sync_transfer_state(self) -> None:
         """환승 조건은 환승을 켰을 때만 만질 수 있습니다.
@@ -538,8 +583,14 @@ class BookerApp:
         self,
         names: list[str],
         *,
-        select_all: bool = False,
+        select_all: bool = True,
     ) -> None:
+        """목록을 채웁니다. **기본은 전부 선택** 입니다.
+
+        고른 것이 하나도 없는 상태는 두 모드에서 뜻이 갈립니다 — 서버 추천에서는
+        "전부 보기", 직접 지정에서는 "조회할 역이 없음". 전부 선택해 두면 화면에
+        보이는 것과 실제로 쓰이는 것이 같아집니다.
+        """
         keep = set(self.selected_transfer_stations())
         self.transfer_list.configure(state="normal")
         self.transfer_list.delete(0, "end")
@@ -797,6 +848,8 @@ class BookerApp:
             return
         self._remember(request)
         self.search_button.configure(state="disabled")
+        self.results_status.set("조회 중…")
+        self.results_label.configure(foreground="#1f6feb")
         self.log(f"조회: {request.departure}→{request.arrival} {request.date}")
 
         def work() -> None:
@@ -836,6 +889,8 @@ class BookerApp:
 
     def _search_failed(self, message: str) -> None:
         self.search_button.configure(state="normal")
+        self.results_status.set("조회에 실패했습니다. 기록을 확인하세요.")
+        self.results_label.configure(foreground="#b42318")
         self._write_log(f"조회 실패: {message}")
         messagebox.showerror("조회 실패", message)
 
@@ -862,10 +917,17 @@ class BookerApp:
                             f"{leg.departure_station_name}→{leg.arrival_station_name}",
                             "",
                             "",
+                            "",
                         ),
                         tags=("leg",),
                     )
                 self.tree.item(item, open=True)
+        direct = sum(1 for journey in journeys if not journey.is_transfer)
+        transfer = len(journeys) - direct
+        self.results_status.set(
+            f"지금 조건의 결과: 열차 {len(journeys)}편 (직통 {direct} · 환승 {transfer})"
+        )
+        self.results_label.configure(foreground="#1a7f37" if journeys else "#b42318")
         self._write_log(f"열차 {len(journeys)}편을 찾았습니다.")
         if not journeys:
             messagebox.showinfo(
@@ -889,8 +951,6 @@ class BookerApp:
             transfer = "-"
         names = " ".join(dict.fromkeys(name for name in journey.train_names() if name))
         trains = "+".join(journey.train_numbers())
-        general = journey.seat_state(KorailSeatClass.GENERAL)
-        special = journey.seat_state(KorailSeatClass.SPECIAL)
         return (
             kind,
             f"{names} {trains}".strip(),
@@ -898,8 +958,9 @@ class BookerApp:
             format_clock(journey.arrival_clock),
             format_duration(journey.total_minutes),
             transfer,
-            general.label,
-            special.label,
+            journey.seat_text(KorailSeatClass.GENERAL),
+            journey.seat_text(KorailSeatClass.SPECIAL),
+            " · ".join(journey.extras()) or "-",
         )
 
     def _row_tags(self, journey: Journey) -> tuple[str, ...]:
