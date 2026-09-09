@@ -720,7 +720,13 @@ def test_no_module_in_the_app_names_a_money_moving_call():
 
 
 def _row_without_class_code(**overrides: Any) -> dict[str, Any]:
-    """서버가 ``h_trn_clsf_cd`` 를 빼고 준 행. 수서 출발에서 실제로 그랬습니다."""
+    """``h_trn_clsf_cd`` 가 없는 행.
+
+    실제로 예약이 거절된 행이 있었고(수서→창원중앙 KTX-산천 387), 라이브러리가
+    낸 문구가 이 필드를 가리켰습니다. **그 행의 원문은 남기지 않아서, 값이
+    아예 없었는지 숫자가 아닌 값이었는지는 확인하지 못했습니다.** 여기서는
+    같은 거절을 내는 가장 단순한 모양으로 재현합니다.
+    """
     row = _row("00387", **overrides)
     del row["h_trn_clsf_cd"]
     return row
@@ -732,6 +738,22 @@ def test_a_row_without_the_reservation_fields_is_named_before_it_bites():
     reason = J.unbookable_reason(broken)
     assert reason is not None and "train_class_code" in reason
     assert J.unbookable_reason(_journey(_summary(general="11"))) is None
+
+
+def test_the_unbookable_detail_reports_the_value_instead_of_guessing_why():
+    """원인을 지어내지 않고, 서버가 그 자리에 보낸 값을 그대로 보여 줍니다.
+
+    예전 문구는 "수서 출발이라 SRT 라서" 라고 단정했는데, 그것은 확인한 적
+    없는 추측이었습니다. 화면에는 열차와 필드 이름과 받은 값만 남습니다.
+    """
+    broken = _journey(TrainSummary.from_raw(_row_without_class_code(general="11")))
+    detail = J.unbookable_detail(broken)
+    assert detail is not None
+    assert "train_class_code" in detail
+    assert "None" in detail  # 서버가 그 자리에 준 값
+    assert "387" in detail  # 어느 구간인지
+    assert "SRT" not in detail
+    assert J.unbookable_detail(_journey(_summary(general="11"))) is None
 
 
 def test_such_a_target_is_dropped_instead_of_killing_the_whole_run():

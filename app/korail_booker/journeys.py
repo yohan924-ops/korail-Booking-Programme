@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 
@@ -114,12 +115,22 @@ def format_duration(minutes: int | None) -> str:
     return f"{rest}분"
 
 
+#: 라이브러리의 거절 문구에서 어느 필드가 문제인지 뽑습니다. 그 이름은
+#: :class:`TrainSummary` 의 속성 이름과 같습니다(``_journey_fields`` 가 그렇게
+#: 씁니다). 문구가 바뀌어 못 뽑으면 그냥 원문을 보여 줍니다.
+_FIELD_IN_MESSAGE = re.compile(r"train field ([a-z_]+) ")
+
+
 def unbookable_reason(journey: Journey) -> str | None:
     """예약 폼을 **만들 수 있는지** 미리 봅니다. 못 만들면 그 이유.
 
-    좌석이 있느냐와는 다른 이야기입니다. 서버가 검색 행에 예약에 필요한 값을
-    채워 주지 않으면(``h_trn_clsf_cd`` 같은 것) 자리가 열려도 폼 자체가 만들어
-    지지 않습니다. 수서 출발처럼 KORAIL 예매 대상이 아닌 열차가 그렇게 옵니다.
+    좌석이 있느냐와는 다른 이야기입니다. 서버가 검색 행에 예약 폼이 요구하는
+    값을 채워 주지 않으면 자리가 열려도 폼 자체가 만들어지지 않습니다.
+
+    **왜 그런 행이 오는지는 확인된 바가 없습니다.** 여기서 알 수 있는 것은
+    "이 행으로는 폼을 만들 수 없다" 뿐이고, 그 이상을 이 함수가 지어내지
+    않습니다. 무엇이 어떻게 왔는지는 :func:`unbookable_detail` 이 보여
+    줍니다.
 
     규칙을 여기서 다시 쓰지 않고 라이브러리의 검사를 그대로 부릅니다 — 열여섯
     필드의 모양을 두 곳에서 관리하면 반드시 어긋납니다.
@@ -129,6 +140,36 @@ def unbookable_reason(journey: Journey) -> str | None:
             _journey_fields(train)
         except KorailProtocolError as exc:
             return str(exc)
+        except Exception:
+            return None
+    return None
+
+
+def unbookable_detail(journey: Journey) -> str | None:
+    """폼을 못 만드는 이유를 **서버가 보낸 값과 함께** 적습니다.
+
+    원인을 추측해서 적어 두면 그 추측이 그대로 사실처럼 읽힙니다. 대신 어느
+    구간의 어느 필드가 무슨 값으로 왔는지를 그대로 보여 줍니다 — 그것이
+    지어내지 않고 말할 수 있는 전부이고, 원인을 찾으려면 어차피 그 값이
+    필요합니다.
+    """
+    for train in journey.legs:
+        try:
+            _journey_fields(train)
+        except KorailProtocolError as exc:
+            message = str(exc)
+            found = _FIELD_IN_MESSAGE.search(message)
+            if found is None:
+                return message
+            name = found.group(1)
+            train_text = one_line(
+                f"{train.train_class_name or '?'} {train.train_no or '?'}"
+            )
+            return (
+                f"{train_text} 구간의 '{name}' 값이 {getattr(train, name, None)!r} "
+                f"로 왔습니다 — 예약 폼은 이 자리에 숫자를 요구합니다.\n"
+                f"({message})"
+            )
         except Exception:
             return None
     return None

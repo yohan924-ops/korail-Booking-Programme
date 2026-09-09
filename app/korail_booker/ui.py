@@ -46,6 +46,7 @@ from .journeys import (
     SeatPreference,
     format_clock,
     format_duration,
+    unbookable_detail,
     unbookable_reason,
 )
 from .notify import TelegramConfig, TelegramNotifier
@@ -1471,14 +1472,16 @@ class BookerApp:
             # 났을 때 알게 되는 것보다 지금 아는 편이 낫습니다.
             reason = unbookable_reason(target.journey)
             if reason is not None:
-                self._write_log(f"담지 못했습니다 — {target.describe()}: {reason}")
+                detail = unbookable_detail(target.journey) or reason
+                self._write_log(f"담지 못했습니다 — {target.describe()}: {detail}")
                 messagebox.showwarning(
                     "예매 대상",
                     f"{target.journey.summary()}\n\n"
-                    "이 열차는 서버가 예약에 필요한 값을 주지 않아 예매할 수 "
-                    "없습니다. 수서 출발처럼 KORAIL 예매 대상이 아닌 열차가 "
-                    "그렇게 옵니다(SRT 는 SRT 앱에서 예매해야 합니다).\n\n"
-                    f"({reason})",
+                    "이 열차는 조회 결과에 예약 폼이 요구하는 값이 빠져 있어 "
+                    "예매를 걸 수 없습니다. 왜 그렇게 오는지는 확인되지 "
+                    "않았습니다 — 이 프로그램이 아는 것은 받은 값이 이렇다는 "
+                    "것뿐입니다.\n\n"
+                    f"{detail}",
                 )
                 continue
             if any(
