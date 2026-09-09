@@ -58,7 +58,8 @@ from korail_mobile_api import (
 )
 
 
-APP_DIR = Path(__file__).parents[1] / "app"
+REPO_ROOT = Path(__file__).parents[1]
+APP_DIR = REPO_ROOT / "app"
 SEARCH = "/classes/com.korail.mobile.seatMovie.ScheduleView"
 RESERVE = "/classes/com.korail.mobile.certification.TicketReservation"
 STANDBY_ROUTE = "/classes/com.korail.mobile.reservationWait.ReservationWait"
@@ -1280,10 +1281,97 @@ def test_a_preview_run_says_out_loud_that_nothing_was_sent():
     assert "showinfo" in body
 
 
+def test_real_reservations_are_on_by_default_but_still_gated():
+    """기본이 켬입니다 — 이 프로그램을 켜는 이유가 진짜 예약이기 때문입니다.
+
+    대신 켜져 있어도 그냥 나가지는 않습니다. 시작하면 확인 창이 뜨고,
+    로그인하지 않았으면 시작 자체가 막힙니다. 셋 중 하나라도 사라지면
+    실수 한 번이 진짜 예약이 되므로 함께 고정합니다.
+    """
+    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+
+    assert "self.live_mode = tk.BooleanVar(value=True)" in source
+    assert "if options.live and not self._confirm_live(targets):" in source
+    assert "if options.live and not self.logged_in:" in source
+
+
 def test_the_live_switch_is_never_written_to_the_settings_file():
     """실제 예약은 켤 때마다 사람이 켜야 합니다. 저장해 두면 다음에 몰래 켜집니다."""
     stored = dataclasses.asdict(ST.Settings())
     assert not [name for name in stored if "live" in name]
+
+
+# --- 배포용 실행기 --------------------------------------------------------------
+
+
+WINDOWS_LAUNCHER = REPO_ROOT / "실행 (Windows).bat"
+UNIX_LAUNCHER = REPO_ROOT / "실행 (macOS_Linux).command"
+
+
+def test_both_launchers_exist_and_start_the_same_program():
+    """더블클릭 한 번으로 도는 길. 두 실행기가 같은 곳을 가리켜야 합니다."""
+    for launcher in (WINDOWS_LAUNCHER, UNIX_LAUNCHER):
+        text = launcher.read_text(encoding="utf-8")
+        assert "main.py" in text, launcher.name
+        # 시스템 파이썬을 건드리지 않고 전용 환경에 넣습니다.
+        assert ".venv" in text, launcher.name
+
+
+def test_the_launchers_install_exactly_what_the_program_asks_for():
+    """``main.py`` 가 세는 의존성과 실행기가 넣는 것이 어긋나면 안 됩니다.
+
+    어긋나면 실행기는 성공했다고 하고 프로그램은 "없습니다" 로 죽습니다.
+    """
+    spec = importlib.util.spec_from_file_location("_launcher_main", APP_DIR / "main.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    for launcher in (WINDOWS_LAUNCHER, UNIX_LAUNCHER):
+        text = launcher.read_text(encoding="utf-8")
+        expected = f"pip install {' '.join(module.DEPENDENCIES)}"
+        assert expected in text, launcher.name
+
+
+def test_a_failed_setup_never_leaves_a_half_built_environment():
+    """반쯤 만들어진 .venv 가 남으면 다음 실행이 '이미 있다' 로 착각합니다."""
+    assert 'rmdir /s /q "%VENV%"' in WINDOWS_LAUNCHER.read_text(encoding="utf-8")
+    assert 'rm -rf "$VENV"' in UNIX_LAUNCHER.read_text(encoding="utf-8")
+
+
+def test_the_launchers_keep_the_line_endings_they_need():
+    """.bat 은 CRLF, .command 는 LF 여야 각자의 셸이 읽습니다."""
+    rules = (REPO_ROOT / ".gitattributes").read_text(encoding="utf-8")
+    assert "*.bat text eol=crlf" in rules
+    assert "*.command text eol=lf" in rules
+
+
+def test_the_unix_launcher_is_executable():
+    """실행 비트가 없으면 더블클릭도 ./ 실행도 되지 않습니다."""
+    assert UNIX_LAUNCHER.stat().st_mode & stat.S_IXUSR
+
+
+def test_the_frozen_entry_point_does_not_lean_on_runtime_paths():
+    """PyInstaller 는 정적으로 훑습니다 — 실행 중에 붙인 sys.path 를 못 봅니다."""
+    entry = (REPO_ROOT / "packaging" / "desktop_entry.py").read_text(encoding="utf-8")
+    tree = ast.parse(entry)
+    imported = {
+        ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+    }
+    assert "from korail_booker.ui import run" in imported
+    # 설명 글에는 sys.path 가 나옵니다. 여기서 보는 것은 **코드**입니다.
+    assert not [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "path"
+    ]
+
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "desktop-build.yml"
+    ).read_text(encoding="utf-8")
+    assert "--paths src --paths app" in workflow
 
 
 # --- 텔레그램 -----------------------------------------------------------------

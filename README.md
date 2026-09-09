@@ -10,7 +10,7 @@
 [![문서](https://img.shields.io/badge/%EB%AC%B8%EC%84%9C-yaki.kr-1f6feb?style=flat-square)](https://yaki.kr/korail-mobile-api/)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab?style=flat-square&logo=python&logoColor=white)](pyproject.toml)
 [![타입](https://img.shields.io/badge/typed-py.typed-2f6f4e?style=flat-square)](src/korail_mobile_api/py.typed)
-[![오프라인 테스트](https://img.shields.io/badge/offline%20tests-2565-4c1?style=flat-square)](#문서)
+[![오프라인 테스트](https://img.shields.io/badge/offline%20tests-2572-4c1?style=flat-square)](#문서)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square)](LICENSE)
 
 [문서](https://yaki.kr/korail-mobile-api/) ·
@@ -45,6 +45,14 @@ python3 -m pip install "korail-mobile-api @ git+https://github.com/yakisoba0728/
 | 파이썬 | 3.11 이상 |
 | 의존성 | `httpx`, `cryptography` |
 | 타입 | `py.typed` 동봉 |
+
+### 코드를 쓰지 않고 예매만 하고 싶다면
+
+이 저장소에는 라이브러리를 쓰는 **예매 프로그램**이 함께 있습니다(`app/`).
+저장소를 내려받고 맨 위의 실행기를 더블클릭하면 됩니다 — Windows 는
+`실행 (Windows).bat`, macOS·Linux 는 `실행 (macOS_Linux).command`. 처음 한 번만
+전용 환경을 만드느라 1~2분 걸리고, 그 다음부터는 바로 창이 뜹니다. 자세한
+설명은 [`app/README.md`](app/README.md).
 
 ## 빠른 시작
 
@@ -304,7 +312,7 @@ KORAIL 앱에서 취소할 준비가 되어 있지 않으면 보내면 안 됩�
 | [CHANGELOG.md](CHANGELOG.md) | 무엇이 바뀌었나 |
 
 게이트는 `python3 -m pytest -q -m "not live"` 이고 네트워크를 쓰지 않습니다 —
-`2565 passed, 1 deselected`. 빠진 하나는 `KORAIL_MOBILE_API_LIVE=1` 이 있을 때만 도는
+`2572 passed, 1 deselected`. 빠진 하나는 `KORAIL_MOBILE_API_LIVE=1` 이 있을 때만 도는
 실서버 테스트입니다. 기여는 [CONTRIBUTING.md](CONTRIBUTING.md), 규범은
 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) 참고.
 

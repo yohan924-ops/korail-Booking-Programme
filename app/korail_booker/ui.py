@@ -759,7 +759,12 @@ class BookerApp:
         self.watch_minutes = tk.StringVar(value="60")
         self.allow_standby = tk.BooleanVar(value=False)
         self.add_to_cart = tk.BooleanVar(value=False)
-        self.live_mode = tk.BooleanVar(value=False)
+        # 기본이 켬입니다. 이 프로그램을 켜는 이유가 진짜 예약이기 때문입니다 —
+        # 매번 켜야 하면 켜는 것을 잊고 미리보기를 진짜라고 믿게 됩니다(실제로
+        # 그랬습니다). 대신 [자동예매 시작] 을 누르면 확인 창이 한 번 뜨고,
+        # 로그인하지 않았으면 시작 자체가 막히며, 지금 어느 쪽인지는 단추 옆에
+        # 계속 적혀 있습니다. 이 값은 설정 파일에 저장하지 않습니다.
+        self.live_mode = tk.BooleanVar(value=True)
         self.mode_text = tk.StringVar(value="")
         self.notify_enabled = tk.BooleanVar(value=True)
         row = ttk.Frame(frame)
