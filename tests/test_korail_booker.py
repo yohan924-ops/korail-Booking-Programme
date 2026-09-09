@@ -29,11 +29,13 @@ import threading
 import tomllib
 import urllib.parse
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+from korail_booker import holds as H
 from korail_booker import journeys as J
 from korail_booker import logfmt as LF
 from korail_booker import notify as N
@@ -47,6 +49,7 @@ from korail_booker.autobook import (
     is_standby_available,
     payment_deadline_text,
     reserve_consent,
+    reserve_once,
 )
 
 from korail_mobile_api import (
@@ -796,7 +799,9 @@ def test_when_every_target_is_unusable_the_run_says_why():
     broken = _journey(TrainSummary.from_raw(_row_without_class_code(general="11")))
     result = _booker(recorder, [broken], live=True).run(threading.Event())
     assert result.outcome is Outcome.FAILED
-    assert "예약에 필요한 값" in result.message
+    assert "예약 폼이 요구하는 값" in result.message
+    # 원인을 지어내지 않습니다 — 예전 문구는 SRT 라고 단정했습니다.
+    assert "SRT" not in result.message and "수서" not in result.message
 
 
 # --- 런처 ---------------------------------------------------------------------
@@ -1522,6 +1527,101 @@ def test_the_booker_waits_for_both_legs_instead_of_grabbing_one():
     booker._act_on(1, [(booker.targets[0], _half_sold_out())])
 
     assert recorder.count(RESERVE) == 0
+
+
+# --- 잡은 예약과 결제 기한 ------------------------------------------------------
+
+
+def test_the_deadline_is_read_the_way_the_app_reads_it():
+    """``h_ntisu_lmt_dt`` + ``h_ntisu_lmt_tm`` 을 이어 붙여 읽습니다."""
+    assert H.parse_deadline("20260909", "174500") == datetime(2026, 9, 9, 17, 45)
+    # 초가 없는 네 자리도 옵니다.
+    assert H.parse_deadline("20260909", "1745") == datetime(2026, 9, 9, 17, 45)
+
+
+@pytest.mark.parametrize(
+    "date_text,time_text",
+    [(None, "174500"), ("20260909", None), ("2026-09-09", "174500"),
+     ("20260909", "17:45"), ("20261399", "174500"), ("", "")],
+)
+def test_a_deadline_that_does_not_parse_is_unknown_not_guessed(date_text, time_text):
+    """반쯤 읽어 엉뚱한 시각을 만드느니 모른다고 합니다 — 틀리면 표를 잃습니다."""
+    assert H.parse_deadline(date_text, time_text) is None
+
+
+def test_the_countdown_says_what_is_left():
+    deadline = datetime(2026, 9, 9, 17, 45)
+    assert H.remaining_text(deadline, datetime(2026, 9, 9, 17, 44, 0)) == "1분 0초 남음"
+    assert H.remaining_text(deadline, datetime(2026, 9, 9, 17, 44, 30)) == "30초 남음"
+    assert H.remaining_text(deadline, datetime(2026, 9, 9, 17, 30, 0)) == "15분 0초 남음"
+    assert H.remaining_text(deadline, datetime(2026, 9, 9, 15, 30, 0)) == "2시간 15분 남음"
+    assert H.remaining_text(deadline, datetime(2026, 9, 9, 17, 46, 0)) == "기한 지남"
+    assert H.remaining_text(None, datetime(2026, 9, 9, 17, 44)) == "기한 모름"
+
+
+def test_an_unknown_deadline_is_never_urgent_and_never_expired():
+    """모르는 것을 급하다고도, 지났다고도 하지 않습니다."""
+    now = datetime(2026, 9, 9, 17, 44)
+    assert not H.is_urgent(None, now)
+    assert not H.is_expired(None, now)
+
+
+def test_a_row_is_coloured_by_how_much_time_is_left():
+    held = H.Held(
+        label="가는 편", summary="387 수서→창원중앙", pnr="123", fare="45,300원",
+        deadline=datetime(2026, 9, 9, 17, 45), deadline_text="2026-09-09 17:45",
+    )
+
+    assert held.tag(datetime(2026, 9, 9, 17, 30)) == "held"
+    assert held.tag(datetime(2026, 9, 9, 17, 43)) == "urgent"
+    assert held.tag(datetime(2026, 9, 9, 17, 46)) == "expired"
+    assert held.row(datetime(2026, 9, 9, 17, 44))[-1] == "1분 0초 남음"
+    assert held.row(datetime(2026, 9, 9, 17, 44))[0] == "가는 편"
+
+
+def test_a_one_way_hold_is_labelled_rather_than_left_blank():
+    held = H.Held(
+        label="", summary="101 서울→부산", pnr="1", fare="-",
+        deadline=None, deadline_text="알 수 없음",
+    )
+    assert held.row(datetime(2026, 9, 9, 17, 44))[0] == "편도"
+
+
+def test_reserve_now_sends_exactly_one_reservation():
+    """[바로 예약] 은 한 번만 보냅니다. 되풀이하면 중복 예약입니다."""
+    recorder = _Recorder({RESERVE: _reserve_reply()})
+
+    reserve_once(
+        _client(recorder),
+        _journey(_summary(general="11")),
+        passengers=KorailPassengerCounts(adult=1),
+        seat_class=KorailSeatClass.GENERAL,
+        live=True,
+    )
+
+    assert recorder.count(RESERVE) == 1
+
+
+def test_reserve_now_sends_nothing_unless_it_is_live():
+    recorder = _Recorder({RESERVE: _reserve_reply()})
+
+    result = reserve_once(
+        _client(recorder),
+        _journey(_summary(general="11")),
+        passengers=KorailPassengerCounts(adult=1),
+        seat_class=KorailSeatClass.GENERAL,
+        live=False,
+    )
+
+    assert recorder.count(RESERVE) == 0
+    assert result.category == "reserve"
+
+
+def test_the_screen_learns_about_every_hold_the_booker_makes():
+    """결과에는 방향별 홀드만 남습니다 — 어느 여정의 것인지는 콜백이 나릅니다."""
+    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+    assert "on_hold=self.on_hold_made" in source
+    assert "self.root.after(1000, self._tick_holds)" in source
 
 
 # --- 창 크기 ------------------------------------------------------------------

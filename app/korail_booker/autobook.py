@@ -27,6 +27,7 @@ from korail_mobile_api import (
     BaseKorailResponse,
     KorailAppError,
     KorailClient,
+    KorailPassengerCounts,
     KorailProtocolError,
     KorailReservationJobType,
     KorailSeatClass,
@@ -177,6 +178,41 @@ def fare_text(hold: ReservationHoldResponse | None) -> str:
         return amount
 
 
+def reserve_once(
+    client: KorailClient,
+    journey: Journey,
+    *,
+    passengers: KorailPassengerCounts,
+    seat_class: KorailSeatClass,
+    live: bool = True,
+) -> MutationPreview | ReservationHoldResponse:
+    """지금 자리가 있는 여정 하나를 **한 번만** 잡습니다.
+
+    자동예매를 걸지 않고 바로 누르는 [예약] 이 이것을 부릅니다. 되풀이하지
+    않는다는 점 말고는 :class:`AutoBooker` 의 예약과 같은 길입니다 — 같은
+    consent(``reserve`` 하나), 같은 직통/환승 갈래, 같은 즉시예약 job.
+
+    실패는 그대로 올려 보냅니다. 자동예매는 "놓쳤다" 를 적고 계속 지켜보는
+    것이 맞지만, 사람이 단추를 눌렀을 때는 왜 안 됐는지 그 자리에서 말해
+    주어야 합니다.
+    """
+    consent = reserve_consent(live=live)
+    if journey.is_transfer:
+        return client.reserve_transfer(
+            journey.legs,
+            consent=consent,
+            passengers=passengers,
+            seat_classes=[seat_class] * len(journey.legs),
+        )
+    return client.reserve(
+        journey.first,
+        consent=consent,
+        passengers=passengers,
+        seat_class=seat_class,
+        job_type=KorailReservationJobType.IMMEDIATE,
+    )
+
+
 class AutoBooker:
     """고른 여정들을 지켜보다 먼저 열리는 것 하나를 잡습니다."""
 
@@ -189,6 +225,7 @@ class AutoBooker:
         log: Logger | None = None,
         notify: Notifier | None = None,
         relogin: Callable[[], None] | None = None,
+        on_hold: Callable[[str, str, str, ReservationHoldResponse], None] | None = None,
     ) -> None:
         if not targets:
             raise ValueError("자동예매에는 열차를 하나 이상 골라야 합니다")
@@ -198,6 +235,10 @@ class AutoBooker:
         self._log = log
         self._notify = notify
         self._relogin = relogin
+        #: 홀드 하나가 잡힐 때마다 (구분, 여정 한 줄, 종류, 응답)으로 부릅니다.
+        #: 결과에는 방향별 홀드만 남으므로 어느 여정의 것인지 잃습니다 —
+        #: 화면이 목록을 만들려면 그 짝이 필요합니다.
+        self._on_hold = on_hold
         self._relogins = 0
         #: 방향마다 하나씩만 잡습니다. 잡힌 방향은 여기 들어가고 더는 보지
         #: 않습니다 — 같은 방향을 두 번 잡으면 중복 예약입니다.
@@ -411,9 +452,9 @@ class AutoBooker:
             return None
         return BookingResult(
             Outcome.FAILED,
-            "담긴 열차를 모두 예약할 수 없습니다. 서버가 그 행에 예약에 필요한 "
-            f"값을 주지 않았습니다({reason}). 수서 출발처럼 KORAIL 예매 대상이 "
-            "아닌 열차가 그렇게 옵니다.",
+            "담긴 열차를 모두 예약할 수 없습니다. 조회 결과의 그 행에 예약 폼이 "
+            f"요구하는 값이 없습니다({reason}). 왜 그렇게 오는지는 확인되지 "
+            "않았습니다.",
         )
 
     def _try_standby(self, target: Target, journey: Journey) -> BookingResult | None:
@@ -477,6 +518,8 @@ class AutoBooker:
         hold = result if isinstance(result, ReservationHoldResponse) else None
         pnr = (hold.pnr_no if hold else None) or "(응답에 PNR 이 없습니다)"
         self._settled[target.direction] = hold
+        if hold is not None and self._on_hold is not None:
+            self._on_hold(target.label, journey.summary(), kind, hold)
         self.announce(
             f"🚆 {kind} 성공 (아직 결제 전)\n"
             f"{target.describe()}\n"

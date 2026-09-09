@@ -19,7 +19,7 @@ import time
 import tkinter as tk
 from collections.abc import Callable, Sequence
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
 from tkinter import messagebox, ttk
 
 from korail_mobile_api import (
@@ -27,6 +27,8 @@ from korail_mobile_api import (
     KorailClient,
     KorailPassengerCounts,
     KorailSeatClass,
+    MutationPreview,
+    ReservationHoldResponse,
 )
 
 from . import settings as settings_module
@@ -39,7 +41,11 @@ from .autobook import (
     BookingSession,
     Outcome,
     Target,
+    fare_text,
+    payment_deadline_text,
+    reserve_once,
 )
+from .holds import Held, parse_deadline
 from .journeys import (
     Journey,
     JourneySource,
@@ -113,6 +119,17 @@ CALENDAR_BORDER = "#7a7a7a"
 PANE_CHROME = 13
 #: 스스로 굴러가는 위젯. 이 위에서는 휠을 그쪽에 양보합니다.
 SELF_SCROLLING = frozenset({"Text", "Treeview", "Listbox"})
+#: 잡은 예약 표의 칸 — (이름, 폭, 정렬).
+HOLD_LAYOUT = (
+    ("구분", 70, "center"),
+    ("종류", 80, "center"),
+    ("여정", 380, "w"),
+    ("PNR", 140, "center"),
+    ("운임", 90, "e"),
+    ("결제 기한", 150, "center"),
+    ("남은 시간", 120, "center"),
+)
+HOLD_COLUMNS = tuple(name for name, _width, _anchor in HOLD_LAYOUT)
 #: 자동완성이 무시하는 키. 방향키와 기능키로는 목록을 다시 좁히지 않습니다.
 _NAVIGATION_KEYS = frozenset(
     {
@@ -301,6 +318,9 @@ class BookerApp:
         self._transfer_route: tuple[str, str] | None = None
         #: 전국 역 이름. 자동완성과 환승역 추가가 이것을 씁니다.
         self.station_names: tuple[str, ...] = ()
+        #: 잡아 둔 예약들. 결제 기한 카운트다운이 이것을 봅니다.
+        self.holds: list[Held] = []
+        self._hold_items: dict[int, str] = {}
         #: 붙인 칸들 — (담은 PanedWindow, 묶음, 지정된 최소 높이 또는 None).
         self._panes: list[tuple[tk.PanedWindow, ttk.Widget, int | None]] = []
         #: 각 칸의 최소 높이. 본문 높이를 여기서 더해 냅니다.
@@ -324,6 +344,8 @@ class BookerApp:
             *self.passenger_vars.values(),
         )
         self.root.after(120, self._drain)
+        # 결제 기한 카운트다운. 1초마다 목록의 '남은 시간' 칸만 다시 씁니다.
+        self.root.after(1000, self._tick_holds)
         # 역 목록은 로그인 없이도 받을 수 있습니다. 켜자마자 받아 두면 자동완성이
         # 처음부터 돕니다 — 단추를 눌러야 채워지는 이유를 아무도 모릅니다.
         self.root.after(200, self.on_load_stations)
@@ -385,6 +407,7 @@ class BookerApp:
         self._build_results(body)
         self._build_targets(body)
         self._build_booking(body)
+        self._build_holds(body)
         self._build_log(body)
         # 묶음을 다 붙인 뒤라야 최소 높이를 잴 수 있고, 그 합을 알아야 스크롤
         # 영역을 정할 수 있다 — 창이 그보다 작으면 굴려서 본다.
@@ -866,7 +889,13 @@ class BookerApp:
         # 아닌지를 말해 주지 않으면 "바꿨는데 아무 일도 안 일어난다" 가 됩니다.
         self.results_status = tk.StringVar(value="조건을 정하고 [조회] 를 누르세요.")
         self.results_label = ttk.Label(frame, textvariable=self.results_status)
-        self.results_label.grid(row=2, column=0, columnspan=2, sticky="w", padx=4)
+        self.results_label.grid(row=2, column=0, sticky="w", padx=4)
+        # 이미 자리가 있는 열차는 기다릴 이유가 없습니다. 자동예매에 담고
+        # 돌리는 세 단계 대신 여기서 한 번에 잡습니다.
+        self.reserve_now_button = ttk.Button(
+            frame, text="바로 예약", width=10, command=self.on_reserve_now
+        )
+        self.reserve_now_button.grid(row=2, column=1, sticky="e", padx=6, pady=(0, 4))
 
     def sync_round_trip_panes(self) -> None:
         """왕복이면 표를 좌우로 나눕니다. 편도면 왼쪽 하나만 씁니다."""
@@ -910,6 +939,183 @@ class BookerApp:
             "담으세요 — 방향마다 한 건씩 잡고 멈춥니다.",
             foreground="#666666",
         ).grid(row=1, column=0, columnspan=3, sticky="w", padx=4, pady=(0, 6))
+
+    def on_reserve_now(self) -> None:
+        """고른 열차 하나를 지금 잡습니다. 자동예매를 거치지 않습니다."""
+        picked = self.selected_results()
+        if len(picked) != 1:
+            messagebox.showwarning("바로 예약", "표에서 열차 하나만 고르세요")
+            return
+        target = picked[0]
+        journey = target.journey
+        if not self.logged_in:
+            messagebox.showwarning("바로 예약", "먼저 로그인하세요")
+            return
+        reason = unbookable_reason(journey)
+        if reason is not None:
+            messagebox.showwarning(
+                "바로 예약", unbookable_detail(journey) or reason
+            )
+            return
+        seat_class = journey.bookable_seat_class(
+            dict(SEAT_CHOICES).get(self.seat_choice.get(), SeatPreference.ANY)
+        )
+        if seat_class is None:
+            messagebox.showinfo(
+                "바로 예약",
+                f"{journey.summary()}\n\n지금은 이 등급으로 자리가 없습니다. "
+                "만석을 노리려면 [담기] 로 예매 대상에 넣고 자동예매를 시작하세요.",
+            )
+            return
+        if not messagebox.askyesno(
+            "바로 예약",
+            f"{journey.summary()}\n\n"
+            "지금 **진짜 예약(결제 전 홀드)** 을 만듭니다. 결제는 하지 않습니다 — "
+            "잡은 뒤 기한 안에 코레일 앱에서 결제하거나 취소해야 합니다.\n\n"
+            "계속할까요?",
+        ):
+            return
+        self.reserve_now_button.configure(state="disabled")
+        self._write_log(f"바로 예약 시도 — {journey.summary()}")
+
+        def work() -> None:
+            try:
+                result = reserve_once(
+                    self._ensure_client(),
+                    journey,
+                    passengers=target.request.passengers,
+                    seat_class=seat_class,
+                )
+            except KorailApiError as exc:
+                message = f"{type(exc).__name__}: {exc}"
+                self.events.put(lambda: self._reserve_now_failed(message))
+                return
+            self.events.put(lambda: self._reserve_now_done(target, result))
+
+        self._in_thread(work, "바로 예약")
+
+    def _reserve_now_done(
+        self,
+        target: Target,
+        result: MutationPreview | ReservationHoldResponse,
+    ) -> None:
+        self.reserve_now_button.configure(state="normal")
+        if not isinstance(result, ReservationHoldResponse):
+            self._write_log("바로 예약: 미리보기라 아무것도 보내지 않았습니다.", "warn")
+            return
+        held = self._held_from(
+            target.label, target.journey.summary(), "좌석 예약", result
+        )
+        self.remember_hold(held)
+        self._write_log(
+            f"예약했습니다 — {held.summary}\nPNR {held.pnr}\n"
+            f"운임 {held.fare}\n결제 기한 {held.deadline_text}",
+            "good",
+        )
+        messagebox.showinfo(
+            "예약했습니다 (아직 결제 전)",
+            f"{held.summary}\n\nPNR {held.pnr}\n운임 {held.fare}\n"
+            f"결제 기한 {held.deadline_text}\n\n"
+            "아래 '잡은 예약' 에 남은 시간이 셉니다. 기한 안에 코레일 앱에서 "
+            "결제하세요.",
+        )
+
+    def _reserve_now_failed(self, message: str) -> None:
+        self.reserve_now_button.configure(state="normal")
+        self._write_log(f"바로 예약 실패: {message}", "bad")
+        messagebox.showerror("바로 예약 실패", message)
+
+    def _build_holds(self, parent: tk.PanedWindow) -> None:
+        """잡아 둔 예약과 결제 기한. 남은 시간이 1초마다 줄어듭니다.
+
+        잡고 끝이 아니라 **기한 안에 결제해야** 표가 남습니다. 기한을 기록
+        한 줄로만 알리면 그 줄은 곧 위로 밀려 올라가고, 그러면 아무도 보지
+        않습니다.
+        """
+        frame = ttk.LabelFrame(parent, text="6. 잡은 예약 (기한 안에 코레일 앱에서 결제하세요)")
+        self._add_pane(parent, frame, stretch="always")
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(0, weight=1)
+        self.hold_tree = ttk.Treeview(
+            frame,
+            columns=HOLD_COLUMNS,
+            show="headings",
+            selectmode="browse",
+            height=3,
+        )
+        for name, width, anchor in HOLD_LAYOUT:
+            self.hold_tree.heading(name, text=name)
+            self.hold_tree.column(
+                name,
+                width=width,
+                anchor="w" if anchor == "w" else ("e" if anchor == "e" else "center"),
+                stretch=(name == "여정"),
+            )
+        self.hold_tree.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=self.hold_tree.yview)
+        self.hold_tree.configure(yscrollcommand=scroll.set)
+        scroll.grid(row=0, column=1, sticky="ns", pady=4)
+        # 기한이 가까우면 눈에 띄어야 합니다. 지난 것은 흐리게 — 지웠다고
+        # 착각하지 않도록 남기되, 살아 있는 것과 구별합니다.
+        self.hold_tree.tag_configure("urgent", foreground="#b3261e")
+        self.hold_tree.tag_configure("expired", foreground="#8a8a8a")
+        ttk.Label(
+            frame,
+            text="이 프로그램은 결제하지 않습니다. 기한이 지나면 코레일이 예약을 "
+            "스스로 취소합니다.",
+            foreground="#666666",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 6))
+
+    def _tick_holds(self) -> None:
+        """남은 시간을 1초마다 다시 셉니다. 다른 일은 걸지 않습니다."""
+        now = datetime.now()
+        for index, held in enumerate(self.holds):
+            item = self._hold_items.get(index)
+            if item is None:
+                continue
+            self.hold_tree.item(item, values=held.row(now), tags=(held.tag(now),))
+        self.root.after(1000, self._tick_holds)
+
+    def _held_from(
+        self,
+        label: str,
+        summary: str,
+        kind: str,
+        hold: ReservationHoldResponse,
+    ) -> Held:
+        """서버 응답에서 화면이 쓸 것만 뽑습니다. 없는 값은 지어내지 않습니다."""
+        return Held(
+            label=label,
+            summary=summary,
+            kind=kind,
+            pnr=(hold.pnr_no or "").strip() or "(PNR 없음)",
+            fare=fare_text(hold),
+            deadline=parse_deadline(
+                hold.payment_deadline_date, hold.payment_deadline_time
+            ),
+            deadline_text=payment_deadline_text(hold),
+        )
+
+    def on_hold_made(
+        self,
+        label: str,
+        summary: str,
+        kind: str,
+        hold: ReservationHoldResponse,
+    ) -> None:
+        """자동예매 스레드에서 불립니다 — 큐를 거쳐 화면에 올립니다."""
+        held = self._held_from(label, summary, kind, hold)
+        self.events.put(lambda: self.remember_hold(held))
+
+    def remember_hold(self, held: Held) -> None:
+        """잡은 예약 하나를 목록에 올립니다."""
+        now = datetime.now()
+        self.holds.append(held)
+        item = self.hold_tree.insert(
+            "", "end", values=held.row(now), tags=(held.tag(now),)
+        )
+        self._hold_items[len(self.holds) - 1] = item
+        self.hold_tree.see(item)
 
     def _build_booking(self, parent: tk.PanedWindow) -> None:
         frame = ttk.LabelFrame(parent, text="5. 자동예매 (만석이면 취소표를 계속 노립니다)")
@@ -1792,6 +1998,7 @@ class BookerApp:
             log=self.log_booking,
             notify=self._make_notifier(),
             relogin=self.relogin if self._credentials else None,
+            on_hold=self.on_hold_made,
         )
         self.session = BookingSession(booker)
         self.start_button.configure(state="disabled")
