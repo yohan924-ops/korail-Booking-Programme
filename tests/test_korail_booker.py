@@ -27,6 +27,8 @@ import stat
 import sys
 import threading
 import tomllib
+import urllib.parse
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -1330,6 +1332,87 @@ def test_a_page_without_a_cursor_is_not_the_end_of_the_day():
 
     numbers = sorted(journey.legs[0].train_no for journey in found)
     assert numbers == ["00301", "00351", "04059"], numbers
+
+
+#: 동탄→대구 2026-09-12 환승, 앱 화면에 찍힌 그대로.
+#: (1구간 열차·출발·도착, 2구간 열차·출발·도착)
+DONGTAN_DAEGU = (
+    ("00301", "054700", "062800", "01195", "071500", "090900"),
+    ("00391", "064700", "072800", "01001", "075300", "093400"),
+    ("00381", "071100", "075200", "01003", "081500", "100700"),
+    ("00309", "074400", "082500", "01005", "085100", "102700"),
+    ("00309", "074400", "082500", "01151", "085900", "105800"),
+    ("00313", "082200", "091300", "01153", "092800", "111800"),
+    ("00371", "092300", "100400", "01007", "104000", "121700"),
+    ("04021", "104800", "112900", "01009", "121800", "135900"),
+    ("00327", "130800", "134200", "01013", "135600", "153100"),
+    ("00327", "130800", "134200", "01015", "141600", "155900"),
+    ("00331", "134700", "143300", "01157", "150600", "171100"),
+    ("00339", "155100", "163100", "01161", "165000", "183400"),
+    ("00341", "160900", "164900", "01019", "173000", "191100"),
+    ("00395", "165200", "173200", "01197", "180200", "201500"),
+    ("00345", "171000", "175600", "01021", "183500", "201000"),
+    ("00351", "184200", "192800", "01163", "193900", "213900"),
+    ("00377", "191700", "195800", "04304", "202200", "221400"),
+    ("00387", "194200", "202700", "01111", "211100", "224800"),
+    ("04059", "204600", "213700", "01025", "220000", "234100"),
+)
+
+
+def _cursorless_server(pairs, page: int = 10) -> tuple[Callable, list[str]]:
+    """``txtGoHour`` 이후 여정을 열 개까지 주고 **커서는 주지 않는** 서버.
+
+    사용자가 받은 응답이 이런 모양이었다고 봅니다. 옛 코드가 두 페이지까지
+    보게 돼 있었는데도 열 편에서 멈췄고, 둘째 페이지가 비었다면 남겼을
+    "결과가 없습니다" 기록도 없었기 때문입니다 — 즉 둘째 페이지를 아예 묻지
+    않았고, 그러려면 커서가 ``None`` 이어야 합니다.
+    """
+    asked: list[str] = []
+
+    def server(request: httpx.Request) -> httpx.Response:
+        form = urllib.parse.parse_qs(request.content.decode())
+        since = form.get("txtGoHour", ["000000"])[0]
+        asked.append(since)
+        rows: list[dict[str, Any]] = []
+        for first, out, back, second, out2, back2 in [
+            pair for pair in pairs if pair[1] >= since
+        ][:page]:
+            rows.append(
+                _row(first, departure="동탄", arrival="대전", departure_code="0507",
+                     arrival_code="0010", departure_time=out, arrival_time=back)
+            )
+            rows.append(
+                _row(second, departure="대전", arrival="대구", departure_code="0010",
+                     arrival_code="0015", departure_time=out2, arrival_time=back2)
+            )
+        return httpx.Response(200, json=_search_reply(rows))
+
+    return server, asked
+
+
+def test_the_reported_dongtan_daegu_day_comes_back_whole():
+    """실제로 겪은 누락. 열 편에서 끊기던 하루가 끝까지 나와야 합니다.
+
+    옛 코드는 여기서 열 편(13:08 출발까지)만 찾았습니다 — 화면에 보인 것과
+    같습니다.
+    """
+    server, asked = _cursorless_server(DONGTAN_DAEGU)
+    client = KorailClient(transport=httpx.MockTransport(server))
+    client.session.current = KorailSession(jsessionid="synthetic-session")
+
+    found = S.search_journeys(
+        client,
+        _request(
+            departure="동탄", arrival="대구", date="20260912",
+            include_direct=False, include_transfer=True,
+            max_transfer_minutes=0, max_pages=S.DEFAULT_MAX_PAGES,
+        ),
+    )
+
+    pairs = {(j.legs[0].train_no, j.legs[1].train_no) for j in found}
+    assert pairs == {(a, b) for a, _o, _b, b, _o2, _b2 in DONGTAN_DAEGU}
+    # 하루를 다 훑고도 요청은 몇 번뿐입니다.
+    assert len(asked) == 4, asked
 
 
 def test_the_walk_stops_when_the_clock_stops_moving():
