@@ -100,6 +100,33 @@ class TelegramNotifier:
         except ValueError:
             return False
 
+    def bot_username(self) -> str | None:
+        """봇의 아이디(``@`` 없이). 토큰이 맞는지 확인하는 가장 싼 방법입니다.
+
+        ``getMe`` 는 토큰만 있으면 되고 아무것도 바꾸지 않습니다. 이것이
+        돌아오면 토큰은 맞는 것이고, 남은 문제는 대화 ID 뿐입니다 — 그 둘을
+        갈라 주지 않으면 "왜 안 되는지" 를 사람이 짚을 수 없습니다.
+        """
+        if not self.config.token.strip():
+            return None
+        try:
+            response = self._client.get(self._url("getMe"))
+        except httpx.HTTPError:
+            return None
+        if response.status_code != 200:
+            return None
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        if not payload.get("ok"):
+            return None
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            return None
+        name = result.get("username")
+        return name if isinstance(name, str) and name else None
+
     def resolve_chat_id(self) -> str | None:
         """봇에게 마지막으로 말을 건 대화의 ID.
 

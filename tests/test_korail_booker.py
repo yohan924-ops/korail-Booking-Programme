@@ -1659,14 +1659,65 @@ def test_a_stopped_run_is_announced_too():
     assert sent[-1].startswith("⏹️ 자동예매 종료")
 
 
-def test_the_token_dialog_shows_what_the_two_values_look_like():
+def test_the_token_dialog_walks_through_the_whole_setup():
     """BotFather 답장만 보고는 어느 값을 어디에 넣는지 헷갈립니다."""
     source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
 
+    for step in ("1단계 — 봇 만들기", "2단계 — 토큰 붙여넣기",
+                 "3단계 — 봇에게 먼저 말 걸기", "4단계 — 대화 ID 채우기"):
+        assert step in source, step
     assert "@BotFather" in source and "/newbot" in source
     assert "Use this token to access the HTTP API" in source
-    assert '숫자 10자리 + ":" + 긴 문자열' in source
-    assert '"123456789" (숫자만)' in source
+    # 봇에게 먼저 말을 걸지 않으면 대화 ID 를 못 얻습니다. 여기서 막힙니다.
+    assert "먼저 말을 건 적이 없는 봇에게 대화 ID 를 주지" in source
+    # 잘 안 될 때 어디를 고쳐야 하는지 갈라 줍니다.
+    assert "잘 안 될 때:" in source
+
+
+def test_the_example_token_is_not_a_real_one():
+    """예시로 진짜 토큰을 적어 두면 그대로 붙여 넣는 사람이 생깁니다.
+
+    처음 판은 사용자 스크린샷의 봇 번호를 그대로 예시에 적었습니다. 남의 봇
+    번호를 저장소에 적어 둘 일이 아닙니다.
+    """
+    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+
+    assert "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ" in source
+    # 실제로 받은 토큰의 봇 번호가 들어가 있으면 안 됩니다.
+    assert "8667115971" not in source
+
+
+def test_checking_the_token_is_separate_from_finding_the_chat_id():
+    """"안 와요" 의 원인이 둘인데 증상이 같습니다. 갈라 주어야 고칠 수 있습니다."""
+    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+    assert "def check_token()" in source
+    assert 'text="토큰 확인"' in source
+    assert "bot.bot_username()" in source
+
+
+def test_get_me_names_the_bot_and_never_changes_anything():
+    """토큰만으로 확인할 수 있는 가장 싼 방법입니다."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(f"{request.method} {request.url.path}")
+        return httpx.Response(
+            200, json={"ok": True, "result": {"username": "my_korail_alarm_bot"}}
+        )
+
+    with _telegram(handler) as bot:
+        assert bot.bot_username() == "my_korail_alarm_bot"
+
+    assert calls == [f"GET /bot{FAKE_TOKEN}/getMe"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"ok": False}, {"ok": True, "result": {}}, {"ok": True, "result": {"username": ""}}],
+)
+def test_a_bad_token_names_no_bot(payload):
+    with _telegram(lambda _r: httpx.Response(200, json=payload)) as bot:
+        assert bot.bot_username() is None
 
 
 # --- 로그인 표시와 조회 진행 막대 --------------------------------------------
