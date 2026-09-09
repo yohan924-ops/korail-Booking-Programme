@@ -1,0 +1,799 @@
+"""``app/`` 의 GUI 프로그램에서 화면이 아닌 부분 전부를 시험합니다.
+
+Tkinter 는 여기서 import 하지 않습니다 — 그래서 화면 없는 CI 에서도 돕니다.
+프로그램이 그렇게 나뉘어 있기 때문입니다: 계산은 ``journeys``, 조회는
+``search``, 자동예매는 ``autobook``, 화면은 ``ui`` 하나.
+
+못박는 것은 안전 계약입니다.
+
+* 미리보기 모드에서는 예약 요청이 한 건도 나가지 않는다
+* 잡으면 그 자리에서 끝난다 — 두 번째 예약 요청은 없다
+* 결제·환불·취소 범주의 consent 를 만들지 않는다
+* 텔레그램 토큰은 어떤 문구에도 남지 않는다
+* 설정 파일에는 비밀번호를 담을 자리가 아예 없다
+
+모든 요청은 ``httpx.MockTransport`` 를 지납니다.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+import os
+import stat
+import sys
+import threading
+from pathlib import Path
+from typing import Any
+
+import httpx
+import pytest
+from korail_booker import journeys as J
+from korail_booker import notify as N
+from korail_booker import search as S
+from korail_booker import settings as ST
+from korail_booker.autobook import (
+    AutoBooker,
+    BookingOptions,
+    Outcome,
+    cart_consent,
+    is_standby_available,
+    payment_deadline_text,
+    reserve_consent,
+)
+
+from korail_mobile_api import (
+    KorailClient,
+    KorailPassengerCounts,
+    KorailSeatClass,
+    KorailSession,
+    TrainSummary,
+)
+
+
+APP_DIR = Path(__file__).parents[1] / "app"
+SEARCH = "/classes/com.korail.mobile.seatMovie.ScheduleView"
+RESERVE = "/classes/com.korail.mobile.certification.TicketReservation"
+STANDBY_ROUTE = "/classes/com.korail.mobile.reservationWait.ReservationWait"
+CART = "/classes/com.korail.mobile.cart.addCartList"
+SYNTHETIC_PNR = "399999999999999"
+
+
+def _ok(**extra: Any) -> dict[str, Any]:
+    return {"h_msg_cd": "SYNTHETIC.OK", "h_msg_txt": "ok", "strResult": "SUCC", **extra}
+
+
+def _fail(code: str, message: str = "synthetic failure") -> dict[str, Any]:
+    return {"h_msg_cd": code, "h_msg_txt": message, "strResult": "FAIL"}
+
+
+def _row(
+    train_no: str,
+    *,
+    departure: str = "서울",
+    arrival: str = "부산",
+    departure_code: str = "0001",
+    arrival_code: str = "0020",
+    departure_time: Any = "080000",
+    arrival_time: str = "104200",
+    general: str = "13",
+    name: str = "KTX",
+    **extra: Any,
+) -> dict[str, Any]:
+    return {
+        **extra,
+        "h_trn_no": train_no,
+        "h_trn_gp_cd": "100",
+        "h_dpt_rs_stn_cd": departure_code,
+        "h_arv_rs_stn_cd": arrival_code,
+        "h_dpt_rs_stn_nm": departure,
+        "h_arv_rs_stn_nm": arrival,
+        "h_dpt_dt": "20990101",
+        "h_dpt_tm": departure_time,
+        "h_arv_tm": arrival_time,
+        "h_run_dt": "20990101",
+        "h_trn_clsf_cd": "00",
+        "h_trn_clsf_nm": name,
+        "h_dpt_stn_run_ordr": "1",
+        "h_arv_stn_run_ordr": "2",
+        "h_dpt_stn_cons_ordr": "1",
+        "h_arv_stn_cons_ordr": "2",
+        "h_seat_att_cd": "015",
+        "h_gen_rsv_cd": general,
+    }
+
+
+def _summary(**overrides: Any) -> TrainSummary:
+    return TrainSummary.from_raw(_row(overrides.pop("train_no", "00101"), **overrides))
+
+
+def _search_reply(rows: list[dict[str, Any]], **extra: Any) -> dict[str, Any]:
+    return _ok(trn_infos={"trn_info": rows}, **extra)
+
+
+def _reserve_reply(**extra: Any) -> dict[str, Any]:
+    body = _ok(
+        h_pnr_no=SYNTHETIC_PNR,
+        h_jrny_cnt="1",
+        h_wct_no="SYNTHETIC_WCT",
+        h_tmp_job_sqno1="JOB1",
+        h_tmp_job_sqno2="JOB2",
+        h_tot_prc="59800",
+        h_tot_rcvd_amt="59800",
+        h_ntisu_lmt_dt="20990101",
+        h_ntisu_lmt_tm="121000",
+        jrny_infos={"jrny_info": [{"h_jrny_sqno": "0001", "h_rsv_chg_no": "001"}]},
+    )
+    body.update(extra)
+    return body
+
+
+class _Recorder:
+    def __init__(
+        self,
+        replies: dict[str, dict[str, Any]] | None = None,
+        sequences: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> None:
+        self.replies = replies or {}
+        self.sequences = sequences or {}
+        self.seen: list[str] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        self.seen.append(path)
+        sequence = self.sequences.get(path)
+        if sequence:
+            body = sequence.pop(0) if len(sequence) > 1 else sequence[0]
+            return httpx.Response(200, json=body)
+        body = self.replies.get(path)
+        if body is None:  # pragma: no cover - 배선 실수 가드
+            raise AssertionError(f"unexpected {request.method} {path}")
+        return httpx.Response(200, json=body)
+
+    def count(self, path: str) -> int:
+        return self.seen.count(path)
+
+
+def _client(recorder: _Recorder) -> KorailClient:
+    client = KorailClient(transport=httpx.MockTransport(recorder))
+    client.session.current = KorailSession(jsessionid="synthetic-session")
+    return client
+
+
+def _request(**overrides: Any) -> S.SearchRequest:
+    values: dict[str, Any] = {
+        "departure": "서울",
+        "arrival": "부산",
+        "date": "20990101",
+        "passengers": KorailPassengerCounts(adult=1),
+        "max_pages": 1,
+    }
+    values.update(overrides)
+    return S.SearchRequest(**values)
+
+
+def _journey(*legs: TrainSummary, source: J.JourneySource = J.JourneySource.DIRECT):
+    return J.Journey(legs=tuple(legs), source=source)
+
+
+# --- 시각과 소요 시간 ----------------------------------------------------------
+
+
+def test_a_clock_that_lost_its_leading_zero_is_restored():
+    """서버는 ``h_dpt_tm`` 을 JSON 숫자로도 보냅니다 — ``63000``."""
+    train = _summary(departure_time=63000)
+    assert J.normalize_clock(train.departure_time) == "063000"
+    assert J.clock_to_minutes(train.departure_time) == 6 * 60 + 30
+
+
+def test_a_train_that_crosses_midnight_has_a_positive_duration():
+    assert J.elapsed_minutes("233000", "003000") == 60
+    assert J.elapsed_minutes("080000", "104200") == 162
+    assert J.elapsed_minutes("080000", None) is None
+
+
+def test_durations_read_the_way_people_say_them():
+    assert J.format_duration(162) == "2시간 42분"
+    assert J.format_duration(120) == "2시간"
+    assert J.format_duration(42) == "42분"
+    assert J.format_duration(None) == "-"
+
+
+def test_a_direct_journey_reports_its_own_duration():
+    journey = _journey(_summary(departure_time="080000", arrival_time="104200"))
+    assert journey.total_minutes == 162
+    assert journey.transfer_minutes is None
+    assert journey.transfer_station_name is None
+    assert not journey.is_transfer
+
+
+def test_a_transfer_journey_reports_total_leg_and_wait_times():
+    first = _summary(
+        train_no="00009", arrival="대전", arrival_code="0010",
+        departure_time="082000", arrival_time="091500",
+    )
+    second = _summary(
+        train_no="00503", departure="대전", departure_code="0010",
+        departure_time="093700", arrival_time="110500",
+    )
+    journey = _journey(first, second, source=J.JourneySource.SERVER_TRANSFER)
+    assert journey.total_minutes == 165          # 08:20 → 11:05
+    assert journey.leg_minutes(0) == 55
+    assert journey.leg_minutes(1) == 88
+    assert journey.transfer_minutes == 22        # 09:15 → 09:37
+    assert journey.transfer_station_name == "대전"
+
+
+def test_a_journey_that_changes_station_reports_no_transfer_station():
+    """한 역에 내려 다른 역에서 타는 여정이 실제로 옵니다."""
+    first = _summary(arrival="용산", arrival_code="0104")
+    second = _summary(departure="서울", departure_code="0001")
+    journey = _journey(first, second, source=J.JourneySource.SERVER_TRANSFER)
+    assert journey.transfer_station_name is None
+
+
+# --- 좌석 상태 -----------------------------------------------------------------
+
+
+def test_only_eleven_counts_as_available():
+    for code in ("13", "10", "", "1", "111"):
+        journey = _journey(_summary(general=code))
+        assert not journey.seat_state(KorailSeatClass.GENERAL).available, code
+    assert _journey(_summary(general="11")).seat_state(KorailSeatClass.GENERAL).available
+
+
+def test_a_transfer_is_bookable_only_when_every_leg_is_open():
+    open_leg = _summary(general="11")
+    closed_leg = _summary(train_no="00503", general="13")
+    assert not _journey(open_leg, closed_leg).seat_state(
+        KorailSeatClass.GENERAL
+    ).available
+    assert _journey(open_leg, _summary(train_no="00503", general="11")).seat_state(
+        KorailSeatClass.GENERAL
+    ).available
+
+
+def test_any_prefers_the_general_cabin_then_falls_back_to_the_suite():
+    both = _journey(_summary(general="11", h_spe_rsv_cd="11"))
+    assert both.bookable_seat_class(J.SeatPreference.ANY) is KorailSeatClass.GENERAL
+    suite_only = _journey(_summary(general="13", h_spe_rsv_cd="11"))
+    assert (
+        suite_only.bookable_seat_class(J.SeatPreference.ANY) is KorailSeatClass.SPECIAL
+    )
+    assert suite_only.bookable_seat_class(J.SeatPreference.GENERAL) is None
+    assert _journey(_summary()).bookable_seat_class(J.SeatPreference.ANY) is None
+
+
+def test_the_availability_label_is_what_the_app_prints():
+    journey = _journey(_summary(h_rsv_psb_nm="매진"))
+    assert journey.seat_state(KorailSeatClass.GENERAL).label == "매진"
+
+
+# --- 조회 조건 -----------------------------------------------------------------
+
+
+def test_the_time_window_filters_on_the_first_leg():
+    request = _request(depart_after="080000", depart_before="120000")
+    assert S.accepts(_journey(_summary(departure_time="080000")), request)
+    assert S.accepts(_journey(_summary(departure_time=63000)), request) is False
+    assert not S.accepts(_journey(_summary(departure_time="120100")), request)
+
+
+def test_the_train_kind_filter_applies_to_every_leg():
+    request = _request(train_name="KTX")
+    assert S.accepts(_journey(_summary(name="KTX-이음")), request)
+    assert not S.accepts(_journey(_summary(name="무궁화호")), request)
+    mixed = _journey(
+        _summary(name="KTX", arrival="대전", arrival_code="0010"),
+        _summary(name="무궁화호", departure="대전", departure_code="0010"),
+        source=J.JourneySource.SERVER_TRANSFER,
+    )
+    assert not S.accepts(mixed, request)
+
+
+def _transfer_journey(wait_minutes: int, station: str = "대전") -> J.Journey:
+    arrival = 9 * 60 + 15
+    departure = arrival + wait_minutes
+    return _journey(
+        _summary(arrival=station, arrival_code="0010", arrival_time="091500"),
+        _summary(
+            train_no="00503",
+            departure=station,
+            departure_code="0010",
+            departure_time=f"{departure // 60:02d}{departure % 60:02d}00",
+        ),
+        source=J.JourneySource.SERVER_TRANSFER,
+    )
+
+
+def test_the_transfer_window_is_a_range_the_user_types():
+    request = _request(min_transfer_minutes=10, max_transfer_minutes=30)
+    assert not S.accepts(_transfer_journey(5), request)
+    assert S.accepts(_transfer_journey(20), request)
+    assert not S.accepts(_transfer_journey(45), request)
+    unbounded = _request(min_transfer_minutes=10, max_transfer_minutes=0)
+    assert S.accepts(_transfer_journey(240), unbounded)
+
+
+def test_a_named_transfer_station_filters_server_itineraries():
+    request = _request(transfer_stations=("동대구",), transfer_mode=S.TRANSFER_SERVER)
+    assert not S.accepts(_transfer_journey(20, station="대전"), request)
+    assert S.accepts(_transfer_journey(20, station="동대구"), request)
+
+
+# --- 조회 ---------------------------------------------------------------------
+
+
+def test_direct_search_returns_journeys_in_departure_order():
+    recorder = _Recorder(
+        {SEARCH: _search_reply([
+            _row("00103", departure_time="100000"),
+            _row("00101", departure_time="080000"),
+        ])}
+    )
+    found = S.search_journeys(_client(recorder), _request())
+    assert [j.train_numbers()[0] for j in found] == ["00101", "00103"]
+    assert all(j.source is J.JourneySource.DIRECT for j in found)
+
+
+def test_no_results_is_an_answer_not_a_failure():
+    recorder = _Recorder({SEARCH: _fail("WRD000061", "직통열차가 없습니다")})
+    assert S.search_journeys(_client(recorder), _request()) == []
+
+
+def test_server_transfer_pairs_rows_the_way_the_app_does():
+    recorder = _Recorder(
+        {SEARCH: _search_reply([
+            _row("00009", arrival="대전", arrival_code="0010", arrival_time="091500"),
+            _row("00503", departure="대전", departure_code="0010",
+                 departure_time="093700", arrival_time="110500"),
+        ])}
+    )
+    found = S.search_journeys(
+        _client(recorder),
+        _request(include_direct=False, include_transfer=True),
+    )
+    assert len(found) == 1
+    assert found[0].source is J.JourneySource.SERVER_TRANSFER
+    assert found[0].transfer_station_name == "대전"
+    assert found[0].transfer_minutes == 22
+
+
+def test_custom_transfer_searches_each_leg_and_combines_them():
+    """환승역을 지정하면 두 구간을 각각 조회해 붙입니다."""
+    recorder = _Recorder(
+        sequences={
+            SEARCH: [
+                _search_reply([
+                    _row("00009", arrival="대전", arrival_code="0010",
+                         arrival_time="091500"),
+                ]),
+                _search_reply([
+                    _row("00503", departure="대전", departure_code="0010",
+                         departure_time="093700", arrival_time="110500"),
+                    _row("00505", departure="대전", departure_code="0010",
+                         departure_time="121500", arrival_time="140000"),
+                ]),
+            ]
+        }
+    )
+    found = S.search_journeys(
+        _client(recorder),
+        _request(
+            include_direct=False,
+            include_transfer=True,
+            transfer_mode=S.TRANSFER_CUSTOM,
+            transfer_stations=("대전",),
+            max_transfer_minutes=60,
+        ),
+    )
+    assert recorder.count(SEARCH) == 2  # 구간마다 한 번씩
+    assert len(found) == 1              # 3시간 기다리는 조합은 걸러집니다
+    assert found[0].source is J.JourneySource.CUSTOM_TRANSFER
+    assert found[0].transfer_minutes == 22
+
+
+def test_a_server_itinerary_wins_over_the_same_custom_combination():
+    first = _summary(arrival="대전", arrival_code="0010", arrival_time="091500")
+    second = _summary(train_no="00503", departure="대전", departure_code="0010",
+                      departure_time="093700")
+    server = _journey(first, second, source=J.JourneySource.SERVER_TRANSFER)
+    custom = _journey(first, second, source=J.JourneySource.CUSTOM_TRANSFER)
+    unique = S.deduplicate([server, custom])
+    assert len(unique) == 1
+    assert unique[0].source is J.JourneySource.SERVER_TRANSFER
+
+
+# --- consent ------------------------------------------------------------------
+
+
+def test_the_program_opens_one_category_at_a_time():
+    for live in (False, True):
+        reserve = reserve_consent(live=live)
+        assert reserve.allow_reserve and not reserve.allow_cart
+        assert not (reserve.allow_payment or reserve.allow_refund or reserve.allow_cancel)
+        cart = cart_consent(live=live)
+        assert cart.allow_cart and not cart.allow_reserve
+        assert not (cart.allow_payment or cart.allow_refund or cart.allow_cancel)
+    assert reserve_consent(live=False).dry_run is True
+    assert reserve_consent(live=True).dry_run is False
+
+
+def test_no_module_in_the_app_names_a_money_moving_call():
+    for path in sorted(APP_DIR.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        for forbidden in (
+            "allow_payment=True",
+            "allow_refund=True",
+            "allow_cancel=True",
+            "real_card_acknowledged",
+            "CardPayment",
+            "pay_with_card",
+            "pay_with_fake_card",
+            ".refund(",
+            "cancel_unpaid_hold(",
+        ):
+            assert forbidden not in source, f"{path.name}: {forbidden}"
+
+
+# --- 자동예매 -----------------------------------------------------------------
+
+
+def _booker(recorder: _Recorder, targets, **option_overrides: Any) -> AutoBooker:
+    options = BookingOptions(
+        poll_interval_s=option_overrides.pop("poll_interval_s", 10.0),
+        watch_minutes=option_overrides.pop("watch_minutes", 60),
+        **option_overrides,
+    )
+    return AutoBooker(
+        _client(recorder),
+        _request(),
+        targets,
+        options,
+        log=lambda message: None,
+    )
+
+
+def test_the_poll_interval_has_a_floor():
+    with pytest.raises(ValueError, match="주기"):
+        BookingOptions(poll_interval_s=1.0)
+
+
+def test_preview_mode_sends_no_reservation():
+    recorder = _Recorder({SEARCH: _search_reply([_row("00101", general="11")])})
+    target = _journey(_summary(general="13"))
+    result = _booker(recorder, [target], live=False).run(threading.Event())
+    assert result.outcome is Outcome.PREVIEW
+    assert recorder.count(RESERVE) == 0
+
+
+def test_a_sold_out_target_is_taken_the_moment_it_opens_and_only_once():
+    recorder = _Recorder(
+        replies={RESERVE: _reserve_reply()},
+        sequences={
+            SEARCH: [
+                _search_reply([_row("00101", general="13")]),
+                _search_reply([_row("00101", general="13")]),
+                _search_reply([_row("00101", general="11")]),
+            ]
+        },
+    )
+    target = _journey(_summary(general="13"))
+    booker = _booker(recorder, [target], live=True, poll_interval_s=10.0)
+    booker.options = dataclasses.replace(booker.options, poll_interval_s=10.0)
+    # 주기를 기다리지 않도록 잠을 없앱니다. 무엇을 보내는지가 시험 대상입니다.
+    booker._sleep = lambda stop, deadline: None  # type: ignore[method-assign]
+    result = booker.run(threading.Event())
+    assert result.outcome is Outcome.HELD
+    assert result.pnr_no == SYNTHETIC_PNR
+    assert recorder.count(SEARCH) == 3
+    assert recorder.count(RESERVE) == 1
+    assert recorder.seen[-1] == RESERVE
+
+
+def test_a_seat_lost_in_the_same_second_keeps_watching():
+    recorder = _Recorder(
+        {
+            SEARCH: _search_reply([_row("00101", general="11")]),
+            RESERVE: _fail("ERR211161", "매진"),
+        }
+    )
+    booker = _booker(recorder, [_journey(_summary(general="13"))], live=True,
+                     watch_minutes=0)
+    booker._sleep = lambda stop, deadline: None  # type: ignore[method-assign]
+    stop = threading.Event()
+
+    calls: list[int] = []
+    original = booker._poll
+
+    def counting_poll():
+        calls.append(1)
+        if len(calls) >= 3:
+            stop.set()
+        return original()
+
+    booker._poll = counting_poll  # type: ignore[method-assign]
+    result = booker.run(stop)
+    assert result.outcome is Outcome.STOPPED
+    assert recorder.count(RESERVE) >= 2  # 놓칠 때마다 다시 시도합니다
+
+
+def test_a_transfer_target_books_both_legs_in_one_request():
+    first = _row("00009", arrival="대전", arrival_code="0010", arrival_time="091500",
+                 general="11")
+    second = _row("00503", departure="대전", departure_code="0010",
+                  departure_time="093700", arrival_time="110500", general="11")
+    recorder = _Recorder(
+        {
+            SEARCH: _search_reply([first, second]),
+            RESERVE: _reserve_reply(h_jrny_cnt="2"),
+        }
+    )
+    target = _journey(
+        TrainSummary.from_raw(first),
+        TrainSummary.from_raw(second),
+        source=J.JourneySource.SERVER_TRANSFER,
+    )
+    booker = AutoBooker(
+        _client(recorder),
+        _request(include_direct=False, include_transfer=True),
+        [target],
+        BookingOptions(poll_interval_s=10.0, live=True),
+        log=lambda message: None,
+    )
+    result = booker.run(threading.Event())
+    assert result.outcome is Outcome.HELD
+    assert recorder.count(RESERVE) == 1
+
+
+def test_standby_is_direct_only():
+    direct = _journey(_summary(h_wait_rsv_flg=" 9"))
+    transfer = _journey(
+        _summary(arrival="대전", arrival_code="0010", h_wait_rsv_flg=" 9"),
+        _summary(train_no="00503", departure="대전", departure_code="0010",
+                 h_wait_rsv_flg=" 9"),
+        source=J.JourneySource.SERVER_TRANSFER,
+    )
+    assert is_standby_available(direct)
+    assert not is_standby_available(transfer)
+
+
+def test_standby_holds_then_confirms_when_the_code_says_so():
+    recorder = _Recorder(
+        {
+            SEARCH: _search_reply([_row("00101", h_wait_rsv_flg=" 9")]),
+            RESERVE: _reserve_reply(h_msg_cd="IRR000014"),
+            STANDBY_ROUTE: _ok(),
+        }
+    )
+    target = _journey(_summary(h_wait_rsv_flg=" 9"))
+    result = _booker(recorder, [target], live=True, allow_standby=True).run(
+        threading.Event()
+    )
+    assert result.outcome is Outcome.HELD
+    assert recorder.count(STANDBY_ROUTE) == 1
+
+
+def test_standby_without_the_confirmation_code_leaves_the_hold_alone():
+    recorder = _Recorder(
+        {
+            SEARCH: _search_reply([_row("00101", h_wait_rsv_flg=" 9")]),
+            RESERVE: _reserve_reply(),
+        }
+    )
+    target = _journey(_summary(h_wait_rsv_flg=" 9"))
+    result = _booker(recorder, [target], live=True, allow_standby=True).run(
+        threading.Event()
+    )
+    assert result.outcome is Outcome.HELD
+    assert recorder.count(STANDBY_ROUTE) == 0
+
+
+def test_the_cart_is_only_touched_when_asked():
+    recorder = _Recorder(
+        {SEARCH: _search_reply([_row("00101", general="11")]), RESERVE: _reserve_reply()}
+    )
+    target = _journey(_summary(general="11"))
+    _booker(recorder, [target], live=True).run(threading.Event())
+    assert recorder.count(CART) == 0
+
+    recorder = _Recorder(
+        {
+            SEARCH: _search_reply([_row("00101", general="11")]),
+            RESERVE: _reserve_reply(),
+            CART: _ok(),
+        }
+    )
+    _booker(recorder, [target], live=True, add_to_cart=True).run(threading.Event())
+    assert recorder.count(CART) == 1
+
+
+def test_an_expired_session_logs_in_again():
+    logins: list[int] = []
+    recorder = _Recorder(
+        replies={RESERVE: _reserve_reply()},
+        sequences={
+            SEARCH: [
+                _fail("P058", "세션이 만료되었습니다"),
+                _search_reply([_row("00101", general="11")]),
+            ]
+        },
+    )
+    client = _client(recorder)
+
+    def relogin() -> None:
+        logins.append(1)
+        client.session.current = KorailSession(jsessionid="fresh")
+
+    booker = AutoBooker(
+        client,
+        _request(),
+        [_journey(_summary(general="13"))],
+        BookingOptions(poll_interval_s=10.0, live=True),
+        log=lambda message: None,
+        relogin=relogin,
+    )
+    booker._sleep = lambda stop, deadline: None  # type: ignore[method-assign]
+    result = booker.run(threading.Event())
+    assert result.outcome is Outcome.HELD
+    assert len(logins) == 1
+
+
+def test_a_watch_that_runs_out_of_time_says_so():
+    recorder = _Recorder({SEARCH: _search_reply([_row("00101", general="13")])})
+    booker = _booker(recorder, [_journey(_summary(general="13"))], live=True,
+                     watch_minutes=0)
+    booker.options = dataclasses.replace(booker.options, watch_minutes=1)
+    booker._sleep = lambda stop, deadline: None  # type: ignore[method-assign]
+    polls: list[int] = []
+    original = booker._poll
+
+    def limited():
+        polls.append(1)
+        if len(polls) > 2:
+            booker.options = dataclasses.replace(booker.options, watch_minutes=0)
+        return original()
+
+    booker._poll = limited  # type: ignore[method-assign]
+    stop = threading.Event()
+    threading.Timer(0.4, stop.set).start()
+    result = booker.run(stop)
+    assert result.outcome in (Outcome.STOPPED, Outcome.TIMEOUT)
+    assert recorder.count(RESERVE) == 0
+
+
+def test_the_payment_deadline_is_only_what_the_server_said():
+    class _Hold:
+        payment_deadline_date = "20990101"
+        payment_deadline_time = "121000"
+        payment_deadline_notice = ""
+
+    assert payment_deadline_text(_Hold()) == "2099-01-01 12:10:00"
+
+    class _NoDeadline:
+        payment_deadline_date = ""
+        payment_deadline_time = ""
+        payment_deadline_notice = "12:10 까지 미결제시 자동 취소됩니다"
+
+    assert "자동 취소" in payment_deadline_text(_NoDeadline())
+    assert payment_deadline_text(None) == "알 수 없음"
+
+
+# --- 텔레그램 -----------------------------------------------------------------
+
+FAKE_TOKEN = "123456789:SYNTHETIC-TOKEN-NOT-REAL"
+
+
+def _telegram(handler) -> N.TelegramNotifier:
+    return N.TelegramNotifier(
+        N.TelegramConfig(token=FAKE_TOKEN, chat_id="42"),
+        transport=httpx.MockTransport(handler),
+    )
+
+
+def test_a_notification_is_sent_to_the_configured_chat():
+    seen: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/sendMessage")
+        seen.append(dict(httpx.QueryParams(request.content.decode())))
+        return httpx.Response(200, json={"ok": True})
+
+    with _telegram(handler) as bot:
+        assert bot.send("잡았습니다") is True
+    assert seen[0]["chat_id"] == "42"
+    assert seen[0]["text"] == "잡았습니다"
+
+
+def test_a_failed_notification_is_false_not_an_exception():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no network", request=request)
+
+    with _telegram(handler) as bot:
+        assert bot.send("잡았습니다") is False
+
+    def refusing(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"ok": False, "description": "Unauthorized"})
+
+    with _telegram(refusing) as bot:
+        assert bot.send("잡았습니다") is False
+
+
+def test_notifications_are_off_until_both_values_are_set():
+    assert not N.TelegramConfig(token=FAKE_TOKEN).enabled
+    assert not N.TelegramConfig(chat_id="42").enabled
+    assert N.TelegramConfig(token=FAKE_TOKEN, chat_id="42").enabled
+
+
+def test_the_chat_id_can_be_found_from_the_bot_updates():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/getUpdates")
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "result": [
+                    {"update_id": 1, "message": {"chat": {"id": 555, "type": "private"}}}
+                ],
+            },
+        )
+
+    with _telegram(handler) as bot:
+        assert bot.resolve_chat_id() == "555"
+
+
+def test_the_token_never_survives_in_a_message():
+    """텔레그램은 토큰을 URL 에 싣습니다 — 예외 문구에 그대로 들어옵니다."""
+    leaked = f"Client error for url https://api.telegram.org/bot{FAKE_TOKEN}/sendMessage"
+    masked = N.mask_token(leaked, FAKE_TOKEN)
+    assert FAKE_TOKEN not in masked
+    assert "123456789" not in masked
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(f"failed for {request.url}", request=request)
+
+    with _telegram(handler) as bot:
+        described = bot.describe_failure(httpx.ConnectError(leaked))
+    assert FAKE_TOKEN not in described
+
+
+# --- 설정 ---------------------------------------------------------------------
+
+
+def test_settings_have_nowhere_to_put_a_password():
+    fields = {field.name for field in dataclasses.fields(ST.Settings)}
+    for forbidden in ("password", "pw", "passwd", "secret", "credential"):
+        assert not any(forbidden in name for name in fields), forbidden
+
+
+def test_settings_round_trip_and_are_owner_only(tmp_path: Path):
+    path = tmp_path / "settings.json"
+    stored = ST.Settings(login_id="tester", telegram_token=FAKE_TOKEN, adult=2)
+    assert ST.save(stored, path) == path
+    if os.name != "nt":
+        mode = stat.S_IMODE(path.stat().st_mode)
+        assert mode == ST.SETTINGS_FILE_MODE, oct(mode)
+    loaded = ST.load(path)
+    assert loaded.login_id == "tester"
+    assert loaded.adult == 2
+    assert loaded.telegram_token == FAKE_TOKEN
+
+
+def test_a_broken_settings_file_falls_back_to_defaults(tmp_path: Path):
+    path = tmp_path / "settings.json"
+    path.write_text("{not json", encoding="utf-8")
+    assert ST.load(path) == ST.Settings()
+    path.write_text(json.dumps({"adult": "여덟", "unknown": 1}), encoding="utf-8")
+    assert ST.load(path).adult == 1
+
+
+def test_a_masked_settings_dump_hides_the_token():
+    dumped = ST.Settings(telegram_token=FAKE_TOKEN).masked()
+    assert dumped["telegram_token"] == "***"
+
+
+def test_the_settings_file_lives_outside_the_repository(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/tmp/synthetic-config")
+    if sys.platform != "win32":
+        assert ST.settings_path() == Path("/tmp/synthetic-config/korail-booker/settings.json")
+    assert Path(__file__).parents[1] not in ST.settings_path().parents

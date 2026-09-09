@@ -1,0 +1,260 @@
+"""여정 하나를 화면에 보여 줄 수 있는 모양으로 바꾸는 순수 계산.
+
+여기에는 I/O 가 없습니다. 검색 결과 행(:class:`TrainSummary`)을 받아 소요
+시간·환승 시간·좌석 상태를 셈하는 것이 전부라, 네트워크 없이 시험됩니다.
+
+시각 다루기가 이 파일의 절반입니다. KORAIL 은 ``h_dpt_tm`` 을 JSON 숫자로도
+보내서 ``"063000"`` 이 ``"63000"`` 으로 도착하고(``models._train_scalar`` 의
+주석), 도착이 출발보다 이르면 자정을 넘긴 열차입니다. 둘 다 여기서 처리하지
+않으면 새벽 열차가 시간창 밖으로 밀려나거나 소요 시간이 음수가 됩니다.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+
+from korail_mobile_api import KorailSeatClass, TrainSummary
+
+
+#: "이 객실에 예매 가능한 자리가 있다"는 유일한 값. 라이브러리의 예약 폼도 같은
+#: 값만 받아들입니다(``mutation_payloads._assert_leg_is_bookable``).
+AVAILABLE_SEAT_CODE = "11"
+
+MINUTES_PER_DAY = 24 * 60
+
+
+class SeatPreference(Enum):
+    """사용자가 고른 객실. ``ANY`` 는 "구별 없이"입니다."""
+
+    GENERAL = "general"
+    SPECIAL = "special"
+    ANY = "any"
+
+    @property
+    def label(self) -> str:
+        return {"general": "일반실", "special": "특실", "any": "무관"}[self.value]
+
+    def seat_classes(self) -> tuple[KorailSeatClass, ...]:
+        """시도할 등급을 우선순위대로. ``ANY`` 는 일반실을 먼저 봅니다."""
+        if self is SeatPreference.GENERAL:
+            return (KorailSeatClass.GENERAL,)
+        if self is SeatPreference.SPECIAL:
+            return (KorailSeatClass.SPECIAL,)
+        return (KorailSeatClass.GENERAL, KorailSeatClass.SPECIAL)
+
+
+class JourneySource(Enum):
+    """이 여정이 어디서 왔는지. 화면의 경고 문구가 여기서 갈립니다."""
+
+    DIRECT = "direct"
+    #: ``search_transfer_trains`` 가 짝지어 준 여정. 라이브 검증된 예약 경로.
+    SERVER_TRANSFER = "server_transfer"
+    #: 사용자가 환승역을 지정해 이 프로그램이 직접 붙인 조합. 예약 폼은
+    #: 만들어지지만 **서버가 받아들이는지는 확인된 바 없습니다.**
+    CUSTOM_TRANSFER = "custom_transfer"
+
+
+def normalize_clock(value: str | None) -> str:
+    """``HHMMSS`` 여섯 자리로. 서버가 떨어뜨린 앞의 0 을 되살립니다."""
+    raw = (value or "").strip()
+    if not raw or not raw.isdigit():
+        return ""
+    return raw.zfill(6)
+
+
+def clock_to_minutes(value: str | None) -> int | None:
+    """``"063000"`` → ``390``. 시각이 아니면 ``None``."""
+    clock = normalize_clock(value)
+    if len(clock) != 6:
+        return None
+    hours, minutes = int(clock[:2]), int(clock[2:4])
+    if hours > 23 or minutes > 59:
+        return None
+    return hours * 60 + minutes
+
+
+def elapsed_minutes(start: str | None, end: str | None) -> int | None:
+    """두 시각 사이의 분. 끝이 시작보다 이르면 자정을 넘긴 것으로 봅니다.
+
+    날짜를 함께 보지 않는 것은 검색 행이 **출발일만** 주기 때문입니다
+    (``h_dpt_dt``). 도착일은 응답에 없으므로, 앱이 화면에 그러듯 하루를
+    넘기는 것까지만 셈합니다.
+    """
+    first = clock_to_minutes(start)
+    second = clock_to_minutes(end)
+    if first is None or second is None:
+        return None
+    delta = second - first
+    return delta if delta >= 0 else delta + MINUTES_PER_DAY
+
+
+def format_clock(value: str | None) -> str:
+    clock = normalize_clock(value)
+    return f"{clock[:2]}:{clock[2:4]}" if len(clock) == 6 else "--:--"
+
+
+def format_duration(minutes: int | None) -> str:
+    if minutes is None:
+        return "-"
+    hours, rest = divmod(minutes, 60)
+    if hours and rest:
+        return f"{hours}시간 {rest}분"
+    if hours:
+        return f"{hours}시간"
+    return f"{rest}분"
+
+
+@dataclass(frozen=True)
+class SeatState:
+    """한 여정의 한 객실 등급이 지금 어떤 상태인지."""
+
+    available: bool
+    #: 앱이 화면에 찍는 문구를 이은 것(``"매진"``, ``"여유"``…). 구간마다
+    #: 다르면 ``" · "`` 로 잇습니다. 그 문구는 표시용이고, 예약 여부를
+    #: 정하는 것은 :attr:`available` 입니다.
+    label: str
+    #: 이 등급이 이 여정에 아예 없을 때(특실 없는 열차 등) 참.
+    absent: bool = False
+
+
+def _reservation_code(train: TrainSummary, seat_class: KorailSeatClass) -> str | None:
+    if seat_class is KorailSeatClass.SPECIAL:
+        return train.special_reservation_code
+    return train.general_reservation_code
+
+
+def _availability_name(train: TrainSummary, seat_class: KorailSeatClass) -> str:
+    if seat_class is KorailSeatClass.SPECIAL:
+        return (train.special_availability_name or "").strip()
+    return (train.general_availability_name or "").strip()
+
+
+@dataclass(frozen=True)
+class Journey:
+    """예약 단위 하나 — 직통이면 열차 한 편, 환승이면 두 구간.
+
+    ``legs`` 는 탑승 순서대로이며 그대로
+    :meth:`~korail_mobile_api.client.KorailClient.reserve_transfer` 에 넘길 수
+    있습니다.
+    """
+
+    legs: tuple[TrainSummary, ...]
+    source: JourneySource
+
+    def __post_init__(self) -> None:
+        if not self.legs:
+            raise ValueError("a journey needs at least one leg")
+
+    @property
+    def is_transfer(self) -> bool:
+        return len(self.legs) > 1
+
+    @property
+    def first(self) -> TrainSummary:
+        return self.legs[0]
+
+    @property
+    def last(self) -> TrainSummary:
+        return self.legs[-1]
+
+    @property
+    def departure_clock(self) -> str:
+        return normalize_clock(self.first.departure_time)
+
+    @property
+    def arrival_clock(self) -> str:
+        return normalize_clock(self.last.arrival_time)
+
+    @property
+    def departure_date(self) -> str:
+        return (self.first.departure_date or "").strip()
+
+    @property
+    def total_minutes(self) -> int | None:
+        """첫 구간 출발부터 마지막 구간 도착까지. 환승 대기가 포함됩니다."""
+        return elapsed_minutes(self.first.departure_time, self.last.arrival_time)
+
+    @property
+    def transfer_minutes(self) -> int | None:
+        """환승역에서 기다리는 시간. 직통이면 ``None``."""
+        if not self.is_transfer:
+            return None
+        return elapsed_minutes(self.legs[0].arrival_time, self.legs[1].departure_time)
+
+    @property
+    def transfer_station_name(self) -> str | None:
+        """환승역 이름. 내리는 역과 타는 역이 다르면 ``None`` — 실제로 그런
+        여정이 옵니다(``models.TransferItinerary`` 참조)."""
+        if not self.is_transfer:
+            return None
+        arrival = (self.legs[0].arrival_station_name or "").strip()
+        departure = (self.legs[1].departure_station_name or "").strip()
+        return arrival if arrival and arrival == departure else None
+
+    def leg_minutes(self, index: int) -> int | None:
+        train = self.legs[index]
+        return elapsed_minutes(train.departure_time, train.arrival_time)
+
+    def train_numbers(self) -> tuple[str, ...]:
+        return tuple((train.train_no or "").strip() for train in self.legs)
+
+    def train_names(self) -> tuple[str, ...]:
+        return tuple((train.train_class_name or "").strip() for train in self.legs)
+
+    def seat_state(self, seat_class: KorailSeatClass) -> SeatState:
+        """이 등급으로 지금 예약할 수 있는지. **모든 구간**이 열려 있어야 합니다."""
+        codes = [_reservation_code(train, seat_class) for train in self.legs]
+        names = [_availability_name(train, seat_class) for train in self.legs]
+        absent = all(code is None or not code.strip() for code in codes)
+        available = all(code == AVAILABLE_SEAT_CODE for code in codes)
+        shown = [name for name in names if name]
+        if not shown:
+            label = "-" if absent else ("예약가능" if available else "불가")
+        else:
+            label = " · ".join(dict.fromkeys(shown))
+        return SeatState(available=available, label=label, absent=absent)
+
+    def bookable_seat_class(
+        self,
+        preference: SeatPreference,
+    ) -> KorailSeatClass | None:
+        """지금 잡을 수 있는 등급 하나. 없으면 ``None``.
+
+        ``ANY`` 는 일반실을 먼저 봅니다. 환승이라도 **두 구간을 같은 등급**으로
+        만 잡습니다 — 라이브러리는 구간별로 다른 등급을 받지만, 그렇게 섞은
+        예약이 서버에서 확인된 적이 없습니다.
+        """
+        for seat_class in preference.seat_classes():
+            if self.seat_state(seat_class).available:
+                return seat_class
+        return None
+
+    def key(self) -> tuple[tuple[str, str, str, str], ...]:
+        """다시 조회했을 때 같은 여정인지 알아보는 값.
+
+        열차번호만으로는 부족합니다 — 같은 번호가 날짜와 구간을 달리해 옵니다.
+        """
+        return tuple(
+            (
+                (train.train_no or "").strip(),
+                normalize_clock(train.departure_time),
+                (train.departure_station_code or train.departure_station_name or ""),
+                (train.arrival_station_code or train.arrival_station_name or ""),
+            )
+            for train in self.legs
+        )
+
+    def summary(self) -> str:
+        """로그와 알림에 쓰는 한 줄."""
+        route = f"{self.first.departure_station_name}→{self.last.arrival_station_name}"
+        times = f"{format_clock(self.departure_clock)}-{format_clock(self.arrival_clock)}"
+        trains = "+".join(self.train_numbers())
+        if not self.is_transfer:
+            return f"{trains} {route} {times} ({format_duration(self.total_minutes)})"
+        station = self.transfer_station_name or "환승"
+        return (
+            f"{trains} {route} {times} "
+            f"({format_duration(self.total_minutes)}, "
+            f"{station} 환승 {format_duration(self.transfer_minutes)})"
+        )
