@@ -407,6 +407,59 @@ def test_a_server_itinerary_wins_over_the_same_custom_combination():
     assert unique[0].source is J.JourneySource.SERVER_TRANSFER
 
 
+# --- 환승역 후보 ---------------------------------------------------------------
+
+STATION_DATA = "/classes/com.korail.mobile.common.stationdata"
+TRANSFER_STATIONS = "/classes/com.korail.mobile.qry.chtnStn.do"
+
+
+def test_transfer_candidates_are_the_ones_the_server_names_for_this_route():
+    """전국 역 목록이 아니라 이 구간에서 갈아탈 수 있는 역만 옵니다."""
+    recorder = _Recorder(
+        {
+            STATION_DATA: {
+                "stns": {
+                    "stn": [
+                        {"stn_cd": "0001", "stn_nm": "서울"},
+                        {"stn_cd": "0020", "stn_nm": "부산"},
+                        {"stn_cd": "0010", "stn_nm": "대전"},
+                    ]
+                }
+            },
+            TRANSFER_STATIONS: _ok(
+                chtnList=[
+                    {"chtnRsStnCd": "0010", "chtnRsStnNm": "대전"},
+                    {"chtnRsStnCd": "0015", "chtnRsStnNm": "동대구"},
+                ]
+            ),
+        }
+    )
+    names = S.transfer_station_candidates(_client(recorder), "서울", "부산")
+    assert names == ["대전", "동대구"]
+    assert recorder.count(TRANSFER_STATIONS) == 1
+
+
+def test_a_route_with_no_transfer_station_is_an_empty_answer():
+    recorder = _Recorder(
+        {
+            STATION_DATA: {"stns": {"stn": [{"stn_cd": "0001", "stn_nm": "서울"},
+                                            {"stn_cd": "0104", "stn_nm": "용산"}]}},
+            TRANSFER_STATIONS: _ok(chtnList=[]),
+        }
+    )
+    assert S.transfer_station_candidates(_client(recorder), "서울", "용산") == []
+
+
+def test_station_codes_pass_through_and_unknown_names_are_refused():
+    index = {"서울": "0001", "부산": "0020"}
+    assert S.resolve_station_code("서울", index) == "0001"
+    assert S.resolve_station_code("0020", index) == "0020"  # 이미 코드면 그대로
+    assert S.resolve_station_code("없는역", index) is None
+    recorder = _Recorder({STATION_DATA: {"stns": {"stn": []}}})
+    with pytest.raises(ValueError, match="코드"):
+        S.transfer_station_candidates(_client(recorder), "없는역", "부산")
+
+
 # --- consent ------------------------------------------------------------------
 
 
@@ -814,6 +867,20 @@ def test_a_broken_settings_file_falls_back_to_defaults(tmp_path: Path):
     assert ST.load(path) == ST.Settings()
     path.write_text(json.dumps({"adult": "여덟", "unknown": 1}), encoding="utf-8")
     assert ST.load(path).adult == 1
+
+
+def test_the_stored_transfer_window_matches_the_screen_default():
+    """저장값이 화면 기본값을 덮어써 "0분 이하"로 되돌아간 적이 있습니다.
+
+    화면(``ui``)을 import 하면 Tkinter 가 필요하므로, 여기서는 그 파일의 상수를
+    원문에서 읽어 대조합니다.
+    """
+    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+    for name, value in (
+        ("DEFAULT_MIN_TRANSFER_MINUTES", ST.Settings().min_transfer_minutes),
+        ("DEFAULT_MAX_TRANSFER_MINUTES", ST.Settings().max_transfer_minutes),
+    ):
+        assert f"{name} = {value}\n" in source, name
 
 
 def test_a_masked_settings_dump_hides_the_token():

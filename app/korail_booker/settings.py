@@ -59,7 +59,9 @@ class Settings:
     transfer_mode: str = "server"
     transfer_stations: list[str] = field(default_factory=list)
     min_transfer_minutes: int = 0
-    max_transfer_minutes: int = 0
+    #: 위쪽을 열어 두면(0) 몇 시간씩 기다리는 조합까지 다 딸려옵니다. 30분이
+    #: 기본입니다 — 화면의 기본값과 같아야 하므로 시험이 둘을 대조합니다.
+    max_transfer_minutes: int = 30
     poll_interval_s: float = 30.0
     watch_minutes: int = 60
     allow_standby: bool = False

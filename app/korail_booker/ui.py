@@ -50,14 +50,37 @@ from .search import (
     TRANSFER_SERVER,
     SearchRequest,
     search_journeys,
+    transfer_station_candidates,
 )
 from .session import build_client
 from .session import login as do_login
 
 
-TRAIN_KINDS = ("전체", "KTX", "ITX", "새마을", "무궁화", "누리로")
+#: 열차 종별. 거르는 방식이 **부분일치**라 ``"KTX"`` 하나로 ``KTX-산천`` 과
+#: ``KTX-이음`` 까지 함께 잡힙니다. 산천만 보려면 그 이름을 직접 고르면 됩니다.
+#: 목록에 없는 종별은 칸에 직접 쳐 넣을 수 있습니다(콤보가 읽기 전용이 아님).
+TRAIN_KINDS = (
+    "전체",
+    "KTX",
+    "KTX-산천",
+    "KTX-이음",
+    "ITX",
+    "ITX-새마을",
+    "ITX-마음",
+    "새마을",
+    "무궁화",
+    "누리로",
+)
 SEAT_CHOICES = (("무관", SeatPreference.ANY), ("일반실", SeatPreference.GENERAL),
                 ("특실", SeatPreference.SPECIAL))
+#: 시각 선택지. 빈 값은 "제한 없음"입니다.
+CLOCK_CHOICES = (
+    "",
+    *(f"{hour:02d}:{minute:02d}" for hour in range(24) for minute in (0, 30)),
+)
+#: 환승시간 기본값. 위쪽을 열어 두면 몇 시간씩 기다리는 조합까지 다 딸려옵니다.
+DEFAULT_MIN_TRANSFER_MINUTES = 0
+DEFAULT_MAX_TRANSFER_MINUTES = 30
 POLL_HINT = f"{MIN_POLL_INTERVAL_S:g}초 이상"
 
 
@@ -163,9 +186,8 @@ class BookerApp:
         self.include_direct = tk.BooleanVar(value=True)
         self.include_transfer = tk.BooleanVar(value=False)
         self.transfer_mode = tk.StringVar(value=TRANSFER_SERVER)
-        self.transfer_stations = tk.StringVar()
-        self.min_transfer = tk.StringVar(value="0")
-        self.max_transfer = tk.StringVar(value="0")
+        self.min_transfer = tk.StringVar(value=str(DEFAULT_MIN_TRANSFER_MINUTES))
+        self.max_transfer = tk.StringVar(value=str(DEFAULT_MAX_TRANSFER_MINUTES))
         self.passenger_vars = {
             "adult": tk.StringVar(value="1"),
             "teenager": tk.StringVar(value="0"),
@@ -184,10 +206,24 @@ class BookerApp:
         self.arrival_box.pack(side="left", padx=(2, 8))
         ttk.Label(row, text="날짜").pack(side="left")
         ttk.Entry(row, textvariable=self.date, width=12).pack(side="left", padx=(2, 8))
+        # 시각은 고르는 것입니다. 손으로 치면 형식을 틀리기 쉽고, 틀린 값은
+        # 조회 전에 경고창으로만 돌아옵니다.
         ttk.Label(row, text="시간").pack(side="left")
-        ttk.Entry(row, textvariable=self.after_time, width=7).pack(side="left", padx=2)
+        ttk.Combobox(
+            row,
+            textvariable=self.after_time,
+            values=CLOCK_CHOICES,
+            width=7,
+            state="readonly",
+        ).pack(side="left", padx=2)
         ttk.Label(row, text="~").pack(side="left")
-        ttk.Entry(row, textvariable=self.before_time, width=7).pack(side="left", padx=2)
+        ttk.Combobox(
+            row,
+            textvariable=self.before_time,
+            values=CLOCK_CHOICES,
+            width=7,
+            state="readonly",
+        ).pack(side="left", padx=2)
         ttk.Button(row, text="역 목록 불러오기", command=self.on_load_stations).pack(
             side="left", padx=8
         )
@@ -195,12 +231,13 @@ class BookerApp:
         row2 = ttk.Frame(frame)
         row2.grid(row=1, column=0, sticky="w", padx=4, pady=4)
         ttk.Label(row2, text="열차 종류").pack(side="left")
+        # 읽기 전용이 아닙니다 — 목록에 없는 종별을 직접 칠 수 있어야 합니다.
+        # 거르는 방식이 부분일치라 "KTX" 는 KTX-산천·KTX-이음까지 함께 잡습니다.
         ttk.Combobox(
             row2,
             textvariable=self.train_kind,
             values=TRAIN_KINDS,
-            width=8,
-            state="readonly",
+            width=12,
         ).pack(side="left", padx=(2, 8))
         ttk.Label(row2, text="좌석").pack(side="left")
         ttk.Combobox(
@@ -213,9 +250,12 @@ class BookerApp:
         ttk.Checkbutton(row2, text="직통", variable=self.include_direct).pack(
             side="left"
         )
-        ttk.Checkbutton(row2, text="환승", variable=self.include_transfer).pack(
-            side="left", padx=(4, 12)
-        )
+        ttk.Checkbutton(
+            row2,
+            text="환승",
+            variable=self.include_transfer,
+            command=self.sync_transfer_state,
+        ).pack(side="left", padx=(4, 12))
         ttk.Label(row2, text="승객").pack(side="left")
         for label, key in (
             ("어른", "adult"),
@@ -228,36 +268,70 @@ class BookerApp:
             ttk.Entry(row2, textvariable=self.passenger_vars[key], width=3).pack(
                 side="left"
             )
+        self.search_button = ttk.Button(row2, text="조회", command=self.on_search)
+        self.search_button.pack(side="left", padx=16)
 
-        # 환승 줄은 폭이 넓어 두 줄로 나눕니다. 한 줄에 몰면 창 오른쪽 끝에서
-        # 조회 단추가 잘려 나갑니다 — 실제로 그렇게 잘렸습니다.
-        row3 = ttk.Frame(frame)
-        row3.grid(row=2, column=0, sticky="w", padx=4, pady=(4, 0))
-        ttk.Radiobutton(
-            row3,
+        # 환승 조건은 환승을 켰을 때만 만질 수 있습니다. 꺼져 있으면 아무 효과도
+        # 없는 칸이라 켜 두면 헷갈리기만 합니다.
+        self.transfer_frame = ttk.LabelFrame(frame, text="환승 조건")
+        self.transfer_frame.grid(row=2, column=0, sticky="ew", padx=4, pady=(2, 6))
+        left = ttk.Frame(self.transfer_frame)
+        left.grid(row=0, column=0, sticky="nw", padx=4, pady=4)
+        self.server_radio = ttk.Radiobutton(
+            left,
             text="서버 추천 환승 (검증됨)",
             variable=self.transfer_mode,
             value=TRANSFER_SERVER,
-        ).pack(side="left")
-        ttk.Radiobutton(
-            row3,
+        )
+        self.server_radio.pack(anchor="w")
+        self.custom_radio = ttk.Radiobutton(
+            left,
             text="환승역 직접 지정 (서버 수용 미검증)",
             variable=self.transfer_mode,
             value=TRANSFER_CUSTOM,
-        ).pack(side="left", padx=(8, 4))
-        ttk.Label(row3, text="환승역(쉼표로 여러 개)").pack(side="left", padx=(8, 2))
-        self.transfer_box = ttk.Entry(row3, textvariable=self.transfer_stations, width=24)
-        self.transfer_box.pack(side="left")
+        )
+        self.custom_radio.pack(anchor="w")
+        self.transfer_time_row = ttk.Frame(left)
+        self.transfer_time_row.pack(anchor="w", pady=(6, 0))
+        ttk.Label(self.transfer_time_row, text="환승시간").pack(side="left")
+        self.min_transfer_entry = ttk.Entry(
+            self.transfer_time_row, textvariable=self.min_transfer, width=4
+        )
+        self.min_transfer_entry.pack(side="left", padx=2)
+        ttk.Label(self.transfer_time_row, text="분 이상").pack(side="left", padx=(1, 6))
+        self.max_transfer_entry = ttk.Entry(
+            self.transfer_time_row, textvariable=self.max_transfer, width=4
+        )
+        self.max_transfer_entry.pack(side="left", padx=2)
+        ttk.Label(self.transfer_time_row, text="분 이하 (0 = 제한 없음)").pack(
+            side="left"
+        )
 
-        row4 = ttk.Frame(frame)
-        row4.grid(row=3, column=0, sticky="w", padx=4, pady=(2, 6))
-        ttk.Label(row4, text="환승시간").pack(side="left", padx=(0, 2))
-        ttk.Entry(row4, textvariable=self.min_transfer, width=4).pack(side="left")
-        ttk.Label(row4, text="분 이상").pack(side="left", padx=(1, 6))
-        ttk.Entry(row4, textvariable=self.max_transfer, width=4).pack(side="left")
-        ttk.Label(row4, text="분 이하 (0 = 제한 없음)").pack(side="left", padx=1)
-        self.search_button = ttk.Button(row4, text="조회", command=self.on_search)
-        self.search_button.pack(side="left", padx=16)
+        right = ttk.Frame(self.transfer_frame)
+        right.grid(row=0, column=1, sticky="nw", padx=12, pady=4)
+        ttk.Label(right, text="환승역 (Ctrl+클릭으로 여러 개)").pack(anchor="w")
+        picker = ttk.Frame(right)
+        picker.pack(anchor="w")
+        self.transfer_list = tk.Listbox(
+            picker, selectmode="extended", height=4, width=24, exportselection=False
+        )
+        self.transfer_list.pack(side="left")
+        list_scroll = ttk.Scrollbar(
+            picker, orient="vertical", command=self.transfer_list.yview
+        )
+        self.transfer_list.configure(yscrollcommand=list_scroll.set)
+        list_scroll.pack(side="left", fill="y")
+        self.transfer_load_button = ttk.Button(
+            right,
+            text="이 구간의 환승역 불러오기",
+            command=self.on_load_transfer_stations,
+        )
+        self.transfer_load_button.pack(anchor="w", pady=(4, 0))
+        ttk.Label(
+            right,
+            text="고르지 않으면 서버가 주는 환승역을 모두 봅니다.",
+            foreground="#666666",
+        ).pack(anchor="w")
 
     def _build_results(self) -> None:
         frame = ttk.LabelFrame(self.root, text="3. 열차 (여러 개 고르면 먼저 열리는 것을 잡습니다)")
@@ -366,7 +440,7 @@ class BookerApp:
         self.include_direct.set(stored.include_direct)
         self.include_transfer.set(stored.include_transfer)
         self.transfer_mode.set(stored.transfer_mode or TRANSFER_SERVER)
-        self.transfer_stations.set(", ".join(stored.transfer_stations))
+        self._fill_transfer_stations(list(stored.transfer_stations), select_all=True)
         self.min_transfer.set(str(stored.min_transfer_minutes))
         self.max_transfer.set(str(stored.max_transfer_minutes))
         self.poll_interval.set(f"{stored.poll_interval_s:g}")
@@ -376,6 +450,70 @@ class BookerApp:
         self.notify_enabled.set(stored.notify_enabled)
         for key, var in self.passenger_vars.items():
             var.set(str(getattr(stored, key)))
+        self.sync_transfer_state()
+
+    # -- 환승 조건 -----------------------------------------------------------
+
+    def sync_transfer_state(self) -> None:
+        """환승 조건은 환승을 켰을 때만 만질 수 있습니다."""
+        state = "normal" if self.include_transfer.get() else "disabled"
+        for widget in (
+            self.server_radio,
+            self.custom_radio,
+            self.min_transfer_entry,
+            self.max_transfer_entry,
+            self.transfer_load_button,
+        ):
+            widget.configure(state=state)
+        self.transfer_list.configure(state=state)
+
+    def selected_transfer_stations(self) -> tuple[str, ...]:
+        picked = tuple(
+            self.transfer_list.get(index) for index in self.transfer_list.curselection()
+        )
+        return tuple(name.strip() for name in picked if name.strip())
+
+    def _fill_transfer_stations(
+        self,
+        names: list[str],
+        *,
+        select_all: bool = False,
+    ) -> None:
+        keep = set(self.selected_transfer_stations())
+        self.transfer_list.configure(state="normal")
+        self.transfer_list.delete(0, "end")
+        for name in names:
+            self.transfer_list.insert("end", name)
+        for index, name in enumerate(names):
+            if select_all or name in keep:
+                self.transfer_list.selection_set(index)
+        self.sync_transfer_state()
+
+    def on_load_transfer_stations(self) -> None:
+        """이 구간에서 갈아탈 수 있는 역만 불러옵니다. 전국 역 목록이 아닙니다."""
+        departure = self.departure.get().strip()
+        arrival = self.arrival.get().strip()
+        if not departure or not arrival:
+            messagebox.showwarning("환승역", "출발역과 도착역을 먼저 입력하세요")
+            return
+        self.transfer_load_button.configure(state="disabled")
+
+        def work() -> None:
+            client = self._ensure_client()
+            names = transfer_station_candidates(client, departure, arrival)
+            self.events.put(lambda: self._transfer_stations_loaded(names))
+
+        self._in_thread(work, "korail-transfer-stations")
+
+    def _transfer_stations_loaded(self, names: list[str]) -> None:
+        self.transfer_load_button.configure(state="normal")
+        self._fill_transfer_stations(names)
+        self._write_log(
+            f"{self.departure.get()}→{self.arrival.get()} 환승역 {len(names)}개를 "
+            "불러왔습니다."
+            if names
+            else "이 구간에는 서버가 알려 주는 환승역이 없습니다."
+        )
 
     def _remember(self, request: SearchRequest) -> None:
         self.settings = replace(
@@ -427,7 +565,36 @@ class BookerApp:
         self.root.after(120, self._drain)
 
     def _in_thread(self, work: Callable[[], None], name: str) -> None:
-        threading.Thread(target=work, name=name, daemon=True).start()
+        """작업 스레드 하나. 무슨 예외가 나든 조용히 죽지 않습니다.
+
+        스레드에서 새는 예외는 아무 데도 찍히지 않고 사라집니다. 그러면 눌러
+        둔 단추가 영영 잠긴 채로 화면만 멀쩡해 보입니다 — 실제로 그렇게
+        보였습니다. 여기서 붙잡아 기록에 남기고 단추를 되돌립니다.
+        """
+
+        def guarded() -> None:
+            try:
+                work()
+            except Exception as exc:  # 화면까지 죽이지 않는다
+                detail = f"{type(exc).__name__}: {exc}"
+                self.events.put(lambda: self._worker_failed(name, detail))
+
+        threading.Thread(target=guarded, name=name, daemon=True).start()
+
+    def _worker_failed(self, name: str, detail: str) -> None:
+        self._write_log(f"[{name}] 예상 못 한 오류: {detail}")
+        self._reset_buttons()
+        messagebox.showerror("오류", detail)
+
+    def _reset_buttons(self) -> None:
+        self.login_button.configure(state="normal")
+        self.search_button.configure(state="normal")
+        self.transfer_load_button.configure(
+            state="normal" if self.include_transfer.get() else "disabled"
+        )
+        if self.session is None or not self.session.running:
+            self.start_button.configure(state="normal")
+            self.stop_button.configure(state="disabled")
 
     # -- 클라이언트 ----------------------------------------------------------
 
@@ -524,17 +691,16 @@ class BookerApp:
             raise ValueError("직통이나 환승 중 하나는 켜야 합니다")
         kind = self.train_kind.get().strip()
         preference = dict(SEAT_CHOICES).get(self.seat_choice.get(), SeatPreference.ANY)
-        stations = tuple(
-            name.strip()
-            for name in self.transfer_stations.get().split(",")
-            if name.strip()
-        )
+        stations = self.selected_transfer_stations()
         if (
             self.include_transfer.get()
             and self.transfer_mode.get() == TRANSFER_CUSTOM
             and not stations
         ):
-            raise ValueError("환승역을 직접 지정하려면 역 이름을 입력하세요")
+            raise ValueError(
+                "환승역을 직접 지정하려면 목록에서 역을 고르세요. "
+                "[이 구간의 환승역 불러오기] 를 먼저 누르면 됩니다."
+            )
         passengers = KorailPassengerCounts(
             **{
                 key: parse_int_field(var.get(), label=key)
@@ -617,6 +783,13 @@ class BookerApp:
                     )
                 self.tree.item(item, open=True)
         self._write_log(f"열차 {len(journeys)}편을 찾았습니다.")
+        if not journeys:
+            messagebox.showinfo(
+                "조회 결과 없음",
+                "조건에 맞는 열차가 없습니다.\n\n"
+                "아래 기록 창에 서버가 뭐라고 답했는지 찍혀 있습니다. "
+                "역 이름(예: '서울', '동대구')과 날짜를 먼저 확인해 보세요.",
+            )
 
     def _row_values(self, journey: Journey) -> tuple[str, ...]:
         if journey.is_transfer:

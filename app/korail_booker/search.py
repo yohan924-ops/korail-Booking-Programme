@@ -21,7 +21,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 
 from korail_mobile_api import (
@@ -102,6 +102,56 @@ class SearchRequest:
         )
 
 
+def station_code_index(client: KorailClient) -> dict[str, str]:
+    """역 이름 → 역 코드. 환승역 조회가 이름이 아니라 코드를 받습니다."""
+    return {
+        station.name: station.code
+        for station in client.get_station_data().stations
+        if station.name and station.code
+    }
+
+
+def resolve_station_code(
+    reference: str,
+    index: Mapping[str, str],
+) -> str | None:
+    """이름이면 코드로 바꾸고, 이미 코드면 그대로. 모르는 역이면 ``None``."""
+    value = reference.strip()
+    if not value:
+        return None
+    if value.isdigit():
+        return value
+    return index.get(value)
+
+
+def transfer_station_candidates(
+    client: KorailClient,
+    departure: str,
+    arrival: str,
+    *,
+    index: Mapping[str, str] | None = None,
+) -> list[str]:
+    """이 구간에서 갈아탈 수 있는 역 이름들.
+
+    ``qry.chtnStn.do`` 가 구간마다 답해 주는 목록입니다. 전국 역을 다 보여
+    주는 것과 다릅니다 — 여기 없는 역은 이 구간의 환승역이 아닙니다.
+
+    빈 목록은 오류가 아니라 "이 구간에는 환승역이 없다"는 답입니다.
+    """
+    resolved = index if index is not None else station_code_index(client)
+    departure_code = resolve_station_code(departure, resolved)
+    arrival_code = resolve_station_code(arrival, resolved)
+    if departure_code is None or arrival_code is None:
+        raise ValueError("출발역이나 도착역의 코드를 찾지 못했습니다")
+    response = client.get_transfer_stations(departure_code, arrival_code)
+    names = [
+        station.station_name.strip()
+        for station in response.stations
+        if station.station_name and station.station_name.strip()
+    ]
+    return list(dict.fromkeys(names))
+
+
 def _matches_window(journey: Journey, request: SearchRequest) -> bool:
     departure = journey.departure_clock
     if not departure:
@@ -152,14 +202,23 @@ def _direct_pages(
     query: TrainSearchQuery,
     *,
     max_pages: int,
+    log: Logger | None = None,
 ) -> Iterator[TrainSearchResult]:
     """직통 검색 결과 페이지. 결과 없음은 빈 흐름입니다."""
     continuation = None
     for _ in range(max(1, max_pages)):
         try:
             result = client.search_trains(query, continuation=continuation)
-        except KorailNoResultsError:
+        except KorailNoResultsError as exc:
             # 직통 없음(``WRD000061``)과 결과 없음은 실패가 아니라 답입니다.
+            # 다만 조용히 비면 사람은 프로그램이 고장 난 줄 압니다 — 서버가
+            # 뭐라고 답했는지 남깁니다.
+            if log:
+                log(
+                    f"직통 조회에 결과가 없습니다 (서버 코드 {exc.code}): "
+                    f"{query.departure_station_code}→{query.arrival_station_code} "
+                    f"{query.departure_date} {query.departure_time} 이후"
+                )
             return
         yield result
         continuation = result.next_page()
@@ -172,13 +231,16 @@ def _transfer_pages(
     query: TrainSearchQuery,
     *,
     max_pages: int,
+    log: Logger | None = None,
 ) -> Iterator[TransferSearchResult]:
     """환승 검색 결과 페이지. 커서가 직통과 다르므로 따로 돕니다."""
     continuation = None
     for _ in range(max(1, max_pages)):
         try:
             result = client.search_transfer_trains(query, continuation=continuation)
-        except KorailNoResultsError:
+        except KorailNoResultsError as exc:
+            if log:
+                log(f"환승 조회에 결과가 없습니다 (서버 코드 {exc.code})")
             return
         yield result
         continuation = result.next_page()
@@ -189,9 +251,13 @@ def _transfer_pages(
 def search_direct(
     client: KorailClient,
     request: SearchRequest,
+    *,
+    log: Logger | None = None,
 ) -> list[Journey]:
     journeys: list[Journey] = []
-    for result in _direct_pages(client, request.query(), max_pages=request.max_pages):
+    for result in _direct_pages(
+        client, request.query(), max_pages=request.max_pages, log=log
+    ):
         journeys.extend(
             Journey(legs=(train,), source=JourneySource.DIRECT)
             for train in result.trains
@@ -202,9 +268,13 @@ def search_direct(
 def search_server_transfer(
     client: KorailClient,
     request: SearchRequest,
+    *,
+    log: Logger | None = None,
 ) -> list[Journey]:
     journeys: list[Journey] = []
-    for result in _transfer_pages(client, request.query(), max_pages=request.max_pages):
+    for result in _transfer_pages(
+        client, request.query(), max_pages=request.max_pages, log=log
+    ):
         journeys.extend(
             Journey(
                 legs=itinerary.legs,
@@ -335,7 +405,7 @@ def search_journeys(
     """
     journeys: list[Journey] = []
     if request.include_direct:
-        journeys.extend(search_direct(client, request))
+        journeys.extend(search_direct(client, request, log=log))
         if log:
             log(f"직통 {len(journeys)}편")
     if request.include_transfer:
@@ -345,9 +415,17 @@ def search_journeys(
                 search_custom_transfer(client, request, log=log)[:MAX_CUSTOM_JOURNEYS]
             )
         else:
-            journeys.extend(search_server_transfer(client, request))
+            journeys.extend(search_server_transfer(client, request, log=log))
         if log:
             log(f"환승 {len(journeys) - before}편")
-    kept = [journey for journey in deduplicate(journeys) if accepts(journey, request)]
+    unique = deduplicate(journeys)
+    kept = [journey for journey in unique if accepts(journey, request)]
+    if log and unique and not kept:
+        # 서버는 열차를 줬는데 화면이 비는 경우입니다. 조건 탓이라고 말해 주지
+        # 않으면 프로그램이 고장 난 것처럼 보입니다.
+        log(
+            f"서버는 {len(unique)}편을 줬지만 조회 조건(시간대·열차 종류·"
+            "환승시간)이 전부 걸러 냈습니다."
+        )
     kept.sort(key=sort_key)
     return kept
