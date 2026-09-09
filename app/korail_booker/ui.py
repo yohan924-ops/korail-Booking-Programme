@@ -100,8 +100,8 @@ TREE_COLUMNS = {
     "train": ("열차", 140),
     "departure": ("출발", 65),
     "arrival": ("도착", 65),
-    "duration": ("소요", 85),
-    "transfer": ("환승", 120),
+    "duration": ("총 소요", 95),
+    "transfer": ("환승 대기", 140),
     # 좌석 문구에는 "매진" 만 오는 것이 아니라 운임과 적립 안내까지 담겨
     # 옵니다. 좁으면 글자가 잘립니다.
     "general": ("일반실", 175),
@@ -465,8 +465,13 @@ class BookerApp:
         # 영역을 정할 수 있다 — 창이 그보다 작으면 굴려서 본다.
         self._settle_panes()
         fit(canvas.winfo_width(), canvas.winfo_height())
-        # 조건을 고치고 Enter — 조회 단추를 찾아 누르지 않아도 됩니다.
-        self.root.bind("<Return>", lambda _event: self.on_search())
+        # Enter 는 **칸마다** 답니다. 창 전체에 걸면 아이디를 치다 Enter 를
+        # 눌러도 조회가 돌았습니다 — 눈이 가 있는 칸이 무엇을 뜻하는지가
+        # 사람의 기대입니다. 로그인 칸에서는 로그인, 조회 칸에서는 조회.
+        for widget in self.login_fields:
+            widget.bind("<Return>", lambda _event: self.on_login())
+        for widget in self.query_fields:
+            widget.bind("<Return>", lambda _event: self.on_search())
 
     def _add_pane(
         self,
@@ -536,11 +541,13 @@ class BookerApp:
         self.login_pw = tk.StringVar()
         self.login_state = tk.StringVar(value="로그인하지 않았습니다 — 조회만 됩니다")
         ttk.Label(frame, text="아이디").grid(row=0, column=0, padx=4, pady=6)
-        ttk.Entry(frame, textvariable=self.login_id, width=18).grid(row=0, column=1)
+        id_entry = ttk.Entry(frame, textvariable=self.login_id, width=18)
+        id_entry.grid(row=0, column=1)
         ttk.Label(frame, text="비밀번호").grid(row=0, column=2, padx=4)
-        ttk.Entry(frame, textvariable=self.login_pw, show="*", width=18).grid(
-            row=0, column=3
-        )
+        pw_entry = ttk.Entry(frame, textvariable=self.login_pw, show="*", width=18)
+        pw_entry.grid(row=0, column=3)
+        #: 이 칸들에서 Enter 를 누르면 로그인합니다.
+        self.login_fields = (id_entry, pw_entry)
         self.login_button = ttk.Button(frame, text="로그인", command=self.on_login)
         self.login_button.grid(row=0, column=4, padx=(8, 2))
         self.logout_button = ttk.Button(
@@ -608,6 +615,8 @@ class BookerApp:
             route, textvariable=self.arrival, width=12
         )
         self.arrival_box.pack(side="left", padx=(2, 14))
+        #: 이 칸들에서 Enter 를 누르면 조회합니다. 로그인 칸과 갈라 둡니다.
+        self.query_fields = (self.departure_box, self.arrival_box)
         self.station_state = tk.StringVar(value="역 불러오는 중…")
 
         people = self._section(frame, 1, "승객")
@@ -925,6 +934,8 @@ class BookerApp:
         tree.tag_configure("open", foreground="#1a7f37")
         tree.tag_configure("soldout", foreground="#b42318")
         tree.tag_configure("unbookable", foreground="#8a8a8a")
+        # 두 번 누르면 담깁니다. 고르고 단추를 찾는 것보다 빠릅니다.
+        tree.bind("<Double-Button-1>", self._result_double_clicked)
         tree.grid(row=0, column=0, sticky="nsew")
         vertical = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
         vertical.grid(row=0, column=1, sticky="ns")
@@ -968,10 +979,10 @@ class BookerApp:
         # 돌리는 세 단계 대신 여기서 한 번에 잡습니다.
         buttons = ttk.Frame(frame)
         buttons.grid(row=2, column=1, sticky="e", padx=6, pady=(0, 4))
-        self.reserve_now_button = ttk.Button(
-            buttons, text="바로 예약", width=10, command=self.on_reserve_now
-        )
-        self.reserve_now_button.pack(side="left")
+        # 고른 표 바로 옆에 둡니다. 담는 것은 이 표에서 하는 일입니다.
+        ttk.Button(
+            buttons, text="↓ 예매 대상에 담기", command=self.add_targets
+        ).pack(side="left")
         ttk.Button(
             buttons, text="결과 비우기", width=10, command=self.clear_results
         ).pack(side="left", padx=(6, 0))
@@ -1013,6 +1024,8 @@ class BookerApp:
                 anchor="w" if anchor == "w" else "center",
                 stretch=(name == "여정"),
             )
+        # 두 번 누르면 뺍니다. 담는 것과 빼는 것이 같은 몸짓의 앞뒤입니다.
+        self.target_list.bind("<Double-Button-1>", self._target_double_clicked)
         self.target_list.grid(row=0, column=0, sticky="nsew", padx=(4, 0), pady=4)
         scroll = ttk.Scrollbar(frame, orient="vertical", command=self.target_list.yview)
         self.target_list.configure(yscrollcommand=scroll.set)
@@ -1023,11 +1036,16 @@ class BookerApp:
         self.target_list.tag_configure("idle", foreground="#666666")
         buttons = ttk.Frame(frame)
         buttons.grid(row=0, column=2, sticky="n", padx=6, pady=4)
-        ttk.Button(buttons, text="↑ 담기", width=10, command=self.add_targets).pack()
-        ttk.Button(buttons, text="빼기", width=10, command=self.remove_targets).pack(
+        # 예약은 **담은 것** 중에서 합니다. 조회 결과에 두면 담기 전 줄까지
+        # 잡을 수 있어 "담아 둔 것만 노린다" 는 규칙이 흐려집니다.
+        self.reserve_now_button = ttk.Button(
+            buttons, text="바로 예약", width=14, command=self.on_reserve_now
+        )
+        self.reserve_now_button.pack()
+        ttk.Button(buttons, text="빼기", width=14, command=self.remove_targets).pack(
             pady=(4, 0)
         )
-        ttk.Button(buttons, text="비우기", width=10, command=self.clear_targets).pack(
+        ttk.Button(buttons, text="비우기", width=14, command=self.clear_targets).pack(
             pady=(4, 0)
         )
         # 조건은 시작할 때 한 번 읽습니다. 도는 중에 위 칸을 고쳐도 그 묶음은
@@ -1037,9 +1055,10 @@ class BookerApp:
         ).pack(pady=(10, 0))
         ttk.Label(
             frame,
-            text="위 목록에서 고르고 [담기]. 왕복이면 가는 편·오는 편을 각각 "
-            "담으세요 — 방향마다 한 건씩 잡고 멈춥니다.\n"
-            "조회 주기·감시 시간은 **시작할 때** 읽습니다. 도는 중에 바꾸려면 "
+            text="위 표에서 고르고 [담기](줄을 두 번 눌러도 담깁니다). 여기서 "
+            "두 번 누르면 빠집니다. 왕복이면 가는 편·오는 편을 각각 담으세요 — "
+            "방향마다 한 건씩 잡고 멈춥니다.\n"
+            "조회 주기·감시 시간은 시작할 때 읽습니다. 도는 중에 바꾸려면 "
             "그 줄을 고르고 [조건 바꿔 재시작].",
             foreground="#666666",
         ).grid(row=1, column=0, columnspan=3, sticky="w", padx=4, pady=(0, 6))
@@ -1089,7 +1108,7 @@ class BookerApp:
         if not messagebox.askyesno(
             "바로 예약",
             f"{journey.summary()}\n\n"
-            "지금 **진짜 예약(결제 전 홀드)** 을 만듭니다. 결제는 하지 않습니다 — "
+            "지금 진짜 예약(결제 전 홀드)을 만듭니다. 결제는 하지 않습니다 — "
             "잡은 뒤 기한 안에 코레일 앱에서 결제하거나 취소해야 합니다.\n\n"
             "계속할까요?",
         ):
@@ -2104,6 +2123,16 @@ class BookerApp:
                     chosen.append(self.results[index])
         return chosen
 
+    def _result_double_clicked(self, event: tk.Event) -> None:
+        widget = event.widget
+        if not isinstance(widget, ttk.Treeview):
+            return
+        item = widget.identify_row(event.y)
+        if not item:
+            return
+        widget.selection_set(item)
+        self.add_targets()
+
     def add_targets(self) -> None:
         picked = self.selected_results()
         if not picked:
@@ -2141,6 +2170,13 @@ class BookerApp:
             if added
             else "이미 담긴 열차입니다."
         )
+
+    def _target_double_clicked(self, event: tk.Event) -> None:
+        item = self.target_list.identify_row(event.y)
+        if not item:
+            return
+        self.target_list.selection_set(item)
+        self.remove_targets()
 
     def remove_targets(self) -> None:
         """고른 것을 뺍니다. **감시 중인 것은 빼지 않습니다.**
@@ -2301,7 +2337,7 @@ class BookerApp:
         if not self.logged_in:
             messagebox.showwarning("자동예매", "실제 예약을 하려면 먼저 로그인하세요")
             return
-        if not self._confirm_live(targets):
+        if not self._confirm_live(targets, options):
             return
         custom = [
             target
@@ -2349,15 +2385,32 @@ class BookerApp:
         ))
         self.sync_target_list()
 
-    def _confirm_live(self, targets: list[Target]) -> bool:
-        lines = "\n".join(f"· {target.describe()}" for target in targets[:5])
+    def _confirm_live(self, targets: list[Target], options: BookingOptions) -> bool:
+        """시작 전 확인. **지금 조건을 그대로** 적습니다.
+
+        예전에는 몇 초마다 얼마나 지켜보는지 말하지 않아, 확인 창을 보고도
+        무엇에 동의하는지 알 수 없었습니다.
+        """
+        shown = targets[:5]
+        lines = "\n".join(f"· {target.describe()}" for target in shown)
+        if len(targets) > len(shown):
+            lines += f"\n… 외 {len(targets) - len(shown)}편"
+        window = (
+            "끌 때까지" if options.watch_minutes == 0 else f"{options.watch_minutes}분 동안"
+        )
+        standby = "\n· 좌석이 안 열리면 예약대기도 시도합니다(직통·일반실)." if (
+            options.allow_standby
+        ) else ""
         return messagebox.askyesno(
             "실제 예약을 만듭니다",
-            "아래 열차를 지켜보다가 **방향마다 한 건씩** 진짜 예약(결제 전 홀드)을 "
-            "만듭니다.\n\n"
+            f"아래 {len(targets)}편을 {options.poll_interval_s:g}초마다 다시 "
+            f"조회하며 {window} 지켜봅니다.\n"
+            "자리가 열리면 방향마다 한 건씩 진짜 예약(결제 전 홀드)을 만들고 "
+            f"멈춥니다.{standby}\n\n"
             f"{lines}\n\n"
-            "결제는 하지 않습니다. 잡은 뒤에는 코레일 앱에서 기한 안에 결제하거나 "
-            "취소해야 합니다. 계속할까요?",
+            "결제는 하지 않습니다. 잡은 뒤에는 기한 안에 코레일 앱에서 "
+            "결제하거나 취소해야 합니다.\n\n"
+            "계속할까요?",
         )
 
     def _make_notifier(self) -> Callable[[str], None] | None:
@@ -2500,7 +2553,7 @@ class BookerApp:
         step3.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
         ttk.Label(
             step3,
-            text="BotFather 답장 첫 줄의 t.me/… 링크를 눌러 **내 봇과의 대화**를 열고,\n"
+            text="BotFather 답장 첫 줄의 t.me/… 링크를 눌러 내 봇과의 대화를 열고,\n"
             "[시작] 단추를 누르거나 /start 를 한 번 보냅니다.\n"
             "\n"
             "텔레그램은 사용자가 먼저 말을 건 적이 없는 봇에게 대화 ID 를 주지\n"
@@ -2514,13 +2567,13 @@ class BookerApp:
         ttk.Entry(step4, textvariable=chat_id, width=24).pack(anchor="w", padx=8, pady=(6, 2))
         ttk.Label(
             step4,
-            text="모양: 123456789 — **숫자**입니다(그룹이면 앞에 - 가 붙습니다).\n"
+            text="모양: 123456789 — 숫자입니다(그룹이면 앞에 - 가 붙습니다).\n"
             "봇 이름(@my_korail_alarm_bot 같은 것)을 넣는 칸이 아닙니다. 텔레그램이\n"
             "@이름을 받는 것은 채널·슈퍼그룹뿐이고, 봇 자신은 대화 상대가 될 수\n"
             "없습니다.\n"
             "\n"
             "직접 알 필요 없습니다 — 3단계를 마쳤으면 아래 [내 대화 ID 찾기] 가\n"
-            "채워 줍니다. 그 단추는 이 칸에 뭐가 적혀 있든 **보지 않고 덮어씁니다**\n"
+            "채워 줍니다. 그 단추는 이 칸에 뭐가 적혀 있든 보지 않고 덮어씁니다\n"
             "(봇이 받은 마지막 메시지에서 읽어 옵니다). 그래서 뭘 쳐 넣었든\n"
             "누르는 순간 숫자로 바뀝니다.",
             foreground="#666666",

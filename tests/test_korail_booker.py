@@ -1301,7 +1301,7 @@ def test_the_program_always_reserves_for_real_and_still_gates_it():
 
     assert "live=True," in source
     assert "self.live_mode" not in source
-    assert "if not self._confirm_live(targets):" in source
+    assert "if not self._confirm_live(targets, options):" in source
     assert "if not self.logged_in:" in source
 
 
@@ -1532,6 +1532,79 @@ def test_the_booker_waits_for_both_legs_instead_of_grabbing_one():
     assert recorder.count(RESERVE) == 0
 
 
+# --- 화면 글과 손놀림 -----------------------------------------------------------
+
+
+def test_no_screen_text_carries_markdown_asterisks():
+    """Tk 은 마크다운을 모릅니다 — ``**`` 가 그대로 찍힙니다.
+
+    실제로 확인 창에 "**방향마다 한 건씩**" 이 별표째로 나왔습니다.
+    """
+    source = _ui_source()
+    tree = ast.parse(source)
+    shown: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        called = ast.unparse(node.func)
+        # 화면에 나가는 것: 위젯의 text= 와 messagebox 의 인자.
+        if called.startswith("messagebox."):
+            shown += [
+                arg.value for arg in node.args if isinstance(arg, ast.Constant)
+                and isinstance(arg.value, str)
+            ]
+        for keyword in node.keywords:
+            if keyword.arg == "text" and isinstance(keyword.value, ast.Constant):
+                value = keyword.value.value
+                if isinstance(value, str):
+                    shown.append(value)
+
+    offenders = [text for text in shown if "**" in text]
+    assert not offenders, offenders
+
+
+def test_the_confirmation_says_the_conditions_it_is_starting_with():
+    """무엇에 동의하는지 창이 말해야 합니다 — 몇 초마다, 얼마 동안."""
+    body = _ui_function("_confirm_live")
+
+    assert "options.poll_interval_s" in body
+    assert "options.watch_minutes" in body
+    assert "options.allow_standby" in body
+    # 담긴 것이 많으면 다 적지 않고 몇 편 더 있는지 말합니다.
+    assert "외 {len(targets) - len(shown)}편" in body
+
+
+def test_double_click_adds_from_the_results_and_removes_from_the_targets():
+    source = _ui_source()
+
+    assert 'tree.bind("<Double-Button-1>", self._result_double_clicked)' in source
+    assert (
+        'self.target_list.bind("<Double-Button-1>", self._target_double_clicked)'
+        in source
+    )
+    assert "self.add_targets()" in _ui_function("_result_double_clicked")
+    assert "self.remove_targets()" in _ui_function("_target_double_clicked")
+
+
+def test_enter_is_bound_per_field_not_to_the_whole_window():
+    """창 전체에 걸면 아이디를 치다 Enter 를 눌러도 조회가 돌았습니다."""
+    source = _ui_source()
+
+    assert 'self.root.bind("<Return>"' not in source
+    assert "for widget in self.login_fields:" in source
+    assert "for widget in self.query_fields:" in source
+
+
+def test_the_add_button_sits_with_the_results_and_reserve_with_the_targets():
+    """담는 것은 조회 결과에서, 예약은 담아 둔 것 중에서."""
+    results = _ui_function("_build_results")
+    targets = _ui_function("_build_targets")
+
+    assert "예매 대상에 담기" in results and "command=self.add_targets" in results
+    assert "바로 예약" in targets and "command=self.on_reserve_now" in targets
+    assert "바로 예약" not in results
+
+
 # --- 작은 단추들 ----------------------------------------------------------------
 
 
@@ -1723,7 +1796,8 @@ def test_the_announcement_says_which_journeys_are_being_watched():
     stop.set()
     booker.run(stop)
 
-    assert "00101" in sent[0] and "00103" in sent[0]
+    # 열차 번호는 사람이 보는 대로 앞의 0 을 뗀 모양입니다(코레일 화면과 같이).
+    assert "101" in sent[0] and "103" in sent[0]
     assert "2편 감시" in sent[0]
 
 
@@ -1756,7 +1830,8 @@ def test_the_chat_id_is_a_number_not_a_bot_name():
 def test_the_dialog_says_the_button_overwrites_whatever_is_typed():
     source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
 
-    assert "뭐가 적혀 있든 **보지 않고 덮어씁니다**" in source
+    # Tk 은 마크다운을 모르므로 별표 없이 적습니다.
+    assert "뭐가 적혀 있든 보지 않고 덮어씁니다" in source
     assert "봇 이름(@my_korail_alarm_bot 같은 것)을 넣는 칸이 아닙니다" in source
     # 숫자가 아닌 값으로는 보내지도 저장하지도 않습니다.
     assert "def bad_chat_id()" in source

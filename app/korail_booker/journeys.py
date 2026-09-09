@@ -397,16 +397,47 @@ class Journey:
             for train in self.legs
         )
 
+    def train_label(self) -> str:
+        """열차를 사람이 알아보는 이름으로. ``KTX-산천 387 + ITX-새마을 1111``.
+
+        번호만 적으면(``00387+01111``) 무슨 조합인지 알 수 없습니다 — 환승은
+        어느 종별을 갈아타는지가 곧 갈아타는 값어치입니다.
+        """
+        parts = []
+        for train in self.legs:
+            name = (train.train_class_name or "").strip()
+            number = (train.train_no or "").strip().lstrip("0") or "?"
+            parts.append(f"{name} {number}".strip())
+        return " + ".join(parts)
+
+    def leg_summary(self, index: int) -> str:
+        """구간 하나를 한 줄로. 환승 목록의 자식 줄이 씁니다."""
+        train = self.legs[index]
+        return (
+            f"{train.departure_station_name}→{train.arrival_station_name} "
+            f"{format_clock(normalize_clock(train.departure_time))}-"
+            f"{format_clock(normalize_clock(train.arrival_time))} "
+            f"({format_duration(self.leg_minutes(index))})"
+        )
+
     def summary(self) -> str:
-        """로그와 알림에 쓰는 한 줄."""
+        """로그·알림·예매 대상에 쓰는 한 줄.
+
+        **총 소요는 환승 대기를 포함합니다** — 첫 구간 출발부터 마지막 구간
+        도착까지입니다. 그 사실이 안 보이면 사람이 두 값을 더해 보게 되므로,
+        환승이면 대기 시간을 괄호 안에 함께 적습니다.
+        """
         route = f"{self.first.departure_station_name}→{self.last.arrival_station_name}"
         times = f"{format_clock(self.departure_clock)}-{format_clock(self.arrival_clock)}"
-        trains = "+".join(self.train_numbers())
+        total = format_duration(self.total_minutes)
         if not self.is_transfer:
-            return f"{trains} {route} {times} ({format_duration(self.total_minutes)})"
-        station = self.transfer_station_name or "환승"
+            return f"{self.train_label()}  {route} {times}  총 {total}"
+        station = self.transfer_station_name or "환승역"
+        legs = " / ".join(
+            format_duration(self.leg_minutes(index)) for index in range(len(self.legs))
+        )
         return (
-            f"{trains} {route} {times} "
-            f"({format_duration(self.total_minutes)}, "
-            f"{station} 환승 {format_duration(self.transfer_minutes)})"
+            f"{self.train_label()}  {route} {times}  "
+            f"총 {total} (구간 {legs} + {station} 대기 "
+            f"{format_duration(self.transfer_minutes)})"
         )
