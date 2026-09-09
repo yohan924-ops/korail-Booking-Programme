@@ -18,14 +18,30 @@ cd /d "%~dp0"
 set "VENV=%CD%\.venv"
 set "VPY=%VENV%\Scripts\python.exe"
 
-if not exist "%VPY%" (
-  echo.
-  echo   먼저 `실행 (Windows).bat` 을 한 번 눌러 주세요.
-  echo   그것이 만드는 전용 환경^(.venv^)을 여기서 그대로 씁니다.
-  echo.
-  pause
-  exit /b 1
+rem --- 전용 환경이 없으면 여기서 만듭니다 -------------------------------------
+rem  `실행 (Windows).bat` 을 먼저 누르라고 시키지 않습니다. 친구에게 줄 파일
+rem  하나를 만들려고 온 사람에게 "다른 것부터 누르세요" 는 단계 하나가 더
+rem  느는 것일 뿐입니다.
+rem  괄호로 묶지 않고 goto 로 건너뜁니다. cmd 는 괄호 블록을 통째로 한 번에
+rem  해석하면서 %PY% 를 그 자리에서 펼치므로, 블록 안에서 방금 set 한 값을
+rem  같은 블록에서 읽으면 빈 값이 나옵니다.
+if exist "%VPY%" goto haveenv
+
+set "PY="
+py -3 --version >nul 2>&1 && set "PY=py -3"
+if not defined PY (
+  python --version >nul 2>&1 && set "PY=python"
 )
+if not defined PY goto nopython
+
+echo.
+echo   전용 환경을 만듭니다. 1~2분 걸립니다.
+echo.
+%PY% -m venv "%VENV%" || goto setupfailed
+"%VPY%" -m pip install --upgrade pip >nul 2>&1
+"%VPY%" -m pip install httpx cryptography || goto setupfailed
+
+:haveenv
 
 echo.
 echo   PyInstaller 를 준비합니다.
@@ -70,3 +86,25 @@ echo   파일에 흔한 오탐입니다^).
 echo.
 pause
 endlocal
+exit /b 0
+
+:nopython
+echo.
+echo   파이썬이 없습니다.
+echo.
+echo   https://www.python.org/downloads/windows/ 에서 받아 설치하세요.
+echo   설치 화면에서 두 가지를 꼭 켜야 합니다:
+echo     - Add python.exe to PATH
+echo     - tcl/tk and IDLE          ^(이게 없으면 창이 안 뜹니다^)
+echo.
+pause
+exit /b 1
+
+:setupfailed
+echo.
+echo   준비에 실패했습니다. 인터넷 연결을 확인하고 다시 하세요.
+echo   반쯤 만들어진 환경은 지웁니다.
+echo.
+rmdir /s /q "%VENV%" 2>nul
+pause
+exit /b 1

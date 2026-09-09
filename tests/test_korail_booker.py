@@ -524,7 +524,9 @@ def test_custom_transfer_searches_each_leg_and_combines_them():
             max_transfer_minutes=60,
         ),
     )
-    assert recorder.count(SEARCH) == 2  # 구간마다 한 번씩
+    # 구간마다 두 번 — 첫 페이지, 그리고 마지막 행의 시각부터 한 번 더.
+    # 서버가 커서를 주지 않아도 뒤쪽 열차를 놓치지 않으려는 것입니다.
+    assert recorder.count(SEARCH) == 4
     assert len(found) == 1              # 3시간 기다리는 조합은 걸러집니다
     assert found[0].source is J.JourneySource.CUSTOM_TRANSFER
     assert found[0].transfer_minutes == 22
@@ -1301,6 +1303,146 @@ def test_the_live_switch_is_never_written_to_the_settings_file():
     assert not [name for name in stored if "live" in name]
 
 
+# --- 페이지 끝까지 훑기 --------------------------------------------------------
+
+
+def test_a_page_without_a_cursor_is_not_the_end_of_the_day():
+    """서버가 "다음 있음" 을 주지 않아도 뒤쪽 열차를 놓치지 않습니다.
+
+    동탄→대구(2026-09-12)를 00:00~23:30 으로 조회했더니 13:08 출발까지 열 편만
+    나왔습니다. 앱에는 22:00 까지 나오는 구간입니다. 그 응답에 커서가 없었고,
+    예전에는 거기서 끝냈습니다. 이제 마지막 행의 시각부터 다시 묻습니다.
+    """
+    recorder = _Recorder(
+        sequences={
+            SEARCH: [
+                _search_reply([_row("00301", departure_time="054700")]),
+                _search_reply([_row("00351", departure_time="184200")]),
+                _search_reply([_row("04059", departure_time="204600")]),
+            ]
+        }
+    )
+
+    found = S.search_journeys(
+        _client(recorder),
+        _request(include_direct=True, include_transfer=False, max_pages=3),
+    )
+
+    numbers = sorted(journey.legs[0].train_no for journey in found)
+    assert numbers == ["00301", "00351", "04059"], numbers
+
+
+def test_the_walk_stops_when_the_clock_stops_moving():
+    """같은 시각을 다시 묻지 않습니다 — 안 그러면 한 페이지를 영원히 돕니다."""
+    recorder = _Recorder({SEARCH: _search_reply([_row("00301", departure_time="054700")])})
+
+    found = S.search_journeys(
+        _client(recorder),
+        _request(include_direct=True, include_transfer=False, max_pages=3),
+    )
+
+    # 첫 물음, 그리고 05:47 부터 한 번 더. 그 다음은 시각이 그대로라 멈춥니다.
+    assert recorder.count(SEARCH) == 2
+    assert len(found) == 1  # 같은 열차가 두 번 와도 하나로 셉니다
+
+
+def test_the_next_ask_starts_at_the_same_minute_not_a_minute_later():
+    """1분을 더하면 같은 분에 떠나는 다른 여정을 건너뜁니다.
+
+    실제로 그런 줄이 옵니다 — 같은 열차 309(07:44)가 뒤 구간만 달리해 두 번.
+    """
+    recorder = _Recorder(
+        sequences={
+            SEARCH: [
+                _search_reply([_row("00309", departure_time="074400")]),
+                _search_reply([_row("00313", departure_time="074400")]),
+            ]
+        }
+    )
+
+    found = S.search_journeys(
+        _client(recorder),
+        _request(include_direct=True, include_transfer=False, max_pages=3),
+    )
+
+    assert sorted(journey.legs[0].train_no for journey in found) == ["00309", "00313"]
+
+
+# --- 환승 한 구간만 매진일 때 ---------------------------------------------------
+
+
+def _half_sold_out() -> J.Journey:
+    """앞 구간은 매진, 뒤 구간은 예약가능. 환승에서 흔한 모양입니다."""
+    return _journey(
+        _summary(train_no="00009", general="13", general_name="매진"),
+        _summary(train_no="00503", general="11", general_name="45,300원"),
+        source=J.JourneySource.SERVER_TRANSFER,
+    )
+
+
+def test_one_sold_out_leg_makes_the_whole_transfer_unbookable():
+    """두 구간을 한 PNR 로 잡습니다 — 한쪽만 타는 예약은 없습니다."""
+    state = _half_sold_out().seat_state(KorailSeatClass.GENERAL)
+
+    assert state.available is False
+    assert state.sold_out is True
+    assert state.status == "매진"
+    assert _half_sold_out().bookable_seat_class(J.SeatPreference.ANY) is None
+
+
+def test_the_parent_row_says_sold_out_but_each_leg_still_shows_its_own_state():
+    """부모 줄만으로는 어느 구간이 막혔는지 모릅니다. 구간 줄이 그것을 말합니다."""
+    journey = _half_sold_out()
+    per_leg = [
+        J.Journey(legs=(leg,), source=journey.source).seat_text(KorailSeatClass.GENERAL)
+        for leg in journey.legs
+    ]
+
+    assert journey.seat_text(KorailSeatClass.GENERAL).startswith("매진")
+    assert per_leg[0].startswith("매진")
+    assert per_leg[1].startswith("예약가능")
+
+
+def test_the_leg_rows_are_not_blank_where_the_seat_columns_are():
+    """구간 줄의 좌석 칸이 비어 있으면 어느 구간이 매진인지 볼 방법이 없습니다."""
+    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    inserts = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_insert_row"
+    ]
+    assert len(inserts) == 1
+    body = ast.unparse(inserts[0])
+    assert "Journey(legs=(leg,)" in body
+    assert "alone.seat_text(KorailSeatClass.GENERAL)" in body
+
+
+def test_the_booker_waits_for_both_legs_instead_of_grabbing_one():
+    """한 구간이라도 닫혀 있으면 아무것도 보내지 않고 계속 지켜봅니다."""
+    request = _request()
+    recorder = _Recorder(
+        {
+            SEARCH: _search_reply(
+                [
+                    _row("00009", general="13", general_name="매진"),
+                    _row("00503", general="11", general_name="45,300원"),
+                ]
+            )
+        }
+    )
+    booker = AutoBooker(
+        _client(recorder),
+        [_target(_half_sold_out(), request)],
+        BookingOptions(poll_interval_s=10.0, live=True, watch_minutes=0),
+        log=lambda message: None,
+    )
+
+    booker._act_on(1, [(booker.targets[0], _half_sold_out())])
+
+    assert recorder.count(RESERVE) == 0
+
+
 # --- 배포용 실행기 --------------------------------------------------------------
 
 
@@ -1365,11 +1507,32 @@ def test_the_local_exe_builder_matches_the_ci_build():
         assert fragment.replace("/", "\\") in script or fragment in script, fragment
 
 
-def test_the_local_exe_builder_reuses_the_launchers_environment():
-    """실행기가 만든 .venv 를 그대로 씁니다 — 환경을 둘로 만들지 않습니다."""
+def test_the_local_exe_builder_stands_on_its_own():
+    """더블클릭 하나로 끝나야 합니다 — 다른 것부터 누르라고 시키지 않습니다.
+
+    .venv 가 있으면 그대로 쓰고, 없으면 여기서 만듭니다. 친구에게 줄 파일
+    하나를 만들러 온 사람에게 준비 단계를 더 붙이지 않습니다.
+    """
     script = (REPO_ROOT / "exe 만들기 (Windows).bat").read_text(encoding="utf-8")
-    assert "실행 (Windows).bat" in script
-    assert 'if not exist "%VPY%"' in script
+
+    assert 'if exist "%VPY%" goto haveenv' in script
+    assert '%PY% -m venv "%VENV%"' in script
+    assert "pip install httpx cryptography" in script
+
+
+def test_neither_batch_file_reads_a_variable_it_set_in_the_same_block():
+    """cmd 는 괄호 블록을 통째로 펼칩니다 — 그 안에서 방금 set 한 값은 빈 값입니다.
+
+    실제로 이 함정에 걸린 판을 썼습니다. 눈으로 다시 볼 일이 아니라 여기서
+    막습니다.
+    """
+    block = re.compile(r"^\s*(?:if|for)[^\n]*\(\s*\n(.*?)^\s*\)\s*$", re.M | re.S)
+    for name in ("실행 (Windows).bat", "exe 만들기 (Windows).bat"):
+        script = (REPO_ROOT / name).read_text(encoding="utf-8")
+        for body in block.findall(script):
+            assigned = set(re.findall(r'set "(\w+)=', body))
+            read = set(re.findall(r"%(\w+)%", body))
+            assert not (assigned & read), (name, assigned & read)
 
 
 def test_the_frozen_entry_point_does_not_lean_on_runtime_paths():

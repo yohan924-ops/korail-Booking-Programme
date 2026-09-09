@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
+from typing import Any, Protocol, TypeVar
 
 from korail_mobile_api import (
     KorailApiError,
@@ -47,8 +48,18 @@ from .journeys import (
 )
 
 
-#: 조회 한 번에 넘겨 볼 페이지 수의 기본값. 페이지마다 요청이 하나 더 나갑니다.
-DEFAULT_MAX_PAGES = 2
+#: 조회 한 번에 물어볼 횟수의 상한. 한 번마다 요청이 하나 나갑니다.
+#:
+#: 2 였습니다. 그래서 동탄→대구(2026-09-12)를 00:00~23:30 으로 조회했을 때
+#: 13:08 출발까지 열 편만 나오고 그 뒤가 통째로 빠졌습니다 — 앱에는 22:00 까지
+#: 스물넷이 나오는 구간입니다. 서버가 첫 페이지에서 "다음 있음"(``h_next_pg_flg``)
+#: 을 주지 않으면 커서로는 더 갈 수 없고, 예전에는 거기서 끝냈습니다.
+#: :func:`_walk` 가 그때 **시각을 밀어** 다시 묻습니다.
+DEFAULT_MAX_PAGES = 8
+#: 직접 조합 환승은 역마다 조회가 둘입니다. 여기까지 8번씩 물으면 역 셋에
+#: 열여섯 요청이 됩니다. 어차피 :data:`MAX_CUSTOM_LEGS_PER_SIDE` 로 자르므로
+#: 앞쪽만 봅니다.
+CUSTOM_LEG_MAX_PAGES = 2
 #: 직접 조합 환승에서 한 구간당 들고 갈 후보 수. 조합이 곱으로 늘기 때문에
 #: 자릅니다.
 MAX_CUSTOM_LEGS_PER_SIDE = 12
@@ -302,6 +313,76 @@ def rejection_lines(
     return lines
 
 
+class _Paged(Protocol):
+    """페이지를 가진 검색 결과. 직통과 환승이 커서 모양만 다르고 이것은 같습니다."""
+
+    def next_page(self) -> Any: ...
+
+
+ResultT = TypeVar("ResultT", bound=_Paged)
+
+
+def _walk(
+    fetch: Callable[[TrainSearchQuery, Any], ResultT],
+    query: TrainSearchQuery,
+    *,
+    max_pages: int,
+    last_clock: Callable[[ResultT], str | None],
+    on_empty: Callable[[KorailNoResultsError, TrainSearchQuery], None] | None = None,
+) -> Iterator[ResultT]:
+    """검색 결과를 끝까지 훑습니다. **두 가지 방법으로** 이어 갑니다.
+
+    1. 서버가 준 커서(``h_next_pg_flg`` 가 ``"Y"`` 일 때만 나옵니다). 앱과 같은
+       게이트입니다.
+    2. 커서가 없으면 **마지막 행의 출발 시각부터 새로 조회**합니다. 사람이
+       "이 시각 이후"를 다시 묻는 것과 같은 요청이고, 새 규약을 가정하지
+       않습니다.
+
+    2번이 필요한 이유: 동탄→대구(2026-09-12)를 00:00~23:30 으로 조회하니
+    13:08 출발까지 열 편만 오고 그 뒤가 통째로 빠졌습니다. 그 응답의
+    ``h_next_pg_flg`` 가 ``"Y"`` 가 아니어서 커서로는 갈 데가 없었고, 그러면
+    "더 없다" 로 끝내는 수밖에 없었습니다 — 앱에는 22:00 까지 나오는데도.
+
+    **왜 그 응답에 커서가 없었는지는 확인하지 못했습니다.** 여기서 하는 일은
+    원인을 고치는 것이 아니라, 같은 질문을 시각만 바꿔 다시 던지는 것입니다.
+
+    시각이 나아가지 않으면 멈춥니다(같은 시각을 다시 묻지 않습니다). 그래서
+    최악이라도 요청은 ``max_pages`` 번입니다. 겹쳐 오는 행은 부르는 쪽의
+    :func:`deduplicate` 가 걷어냅니다.
+    """
+    continuation = None
+    current = query
+    asked: set[str] = {query.departure_time}
+    for _ in range(max(1, max_pages)):
+        try:
+            result = fetch(current, continuation)
+        except KorailNoResultsError as exc:
+            # 첫 물음이 비면 답이 없는 것이고, 이어 가다 비면 끝에 닿은
+            # 것입니다. 사람에게 알릴 것은 앞쪽뿐입니다.
+            if on_empty is not None and current is query and continuation is None:
+                on_empty(exc, current)
+            return
+        yield result
+        continuation = result.next_page()
+        if continuation is not None:
+            continue
+        clock = last_clock(result)
+        if clock is None or clock in asked:
+            return
+        asked.add(clock)
+        # 마지막 행의 시각을 **그대로** 씁니다. 1분을 더하면 같은 분에 떠나는
+        # 다른 여정을 건너뜁니다 — 실제로 그런 줄이 옵니다(같은 열차 309 가
+        # 뒤 구간만 다르게 두 번).
+        current = replace(query, departure_time=clock)
+
+
+def _latest_departure(clocks: Iterable[str | None]) -> str | None:
+    """이 페이지에서 가장 늦은 출발 시각. 없으면 ``None``."""
+    valid = [normalize_clock(clock) for clock in clocks if clock]
+    usable = [clock for clock in valid if clock and clock.isdigit()]
+    return max(usable) if usable else None
+
+
 def _direct_pages(
     client: KorailClient,
     query: TrainSearchQuery,
@@ -310,25 +391,27 @@ def _direct_pages(
     log: Logger | None = None,
 ) -> Iterator[TrainSearchResult]:
     """직통 검색 결과 페이지. 결과 없음은 빈 흐름입니다."""
-    continuation = None
-    for _ in range(max(1, max_pages)):
-        try:
-            result = client.search_trains(query, continuation=continuation)
-        except KorailNoResultsError as exc:
-            # 직통 없음(``WRD000061``)과 결과 없음은 실패가 아니라 답입니다.
-            # 다만 조용히 비면 사람은 프로그램이 고장 난 줄 압니다 — 서버가
-            # 뭐라고 답했는지 남깁니다.
-            if log:
-                log(
-                    f"직통 조회에 결과가 없습니다 (서버 코드 {exc.code}): "
-                    f"{query.departure_station_code}→{query.arrival_station_code} "
-                    f"{query.departure_date} {query.departure_time} 이후"
-                )
-            return
-        yield result
-        continuation = result.next_page()
-        if continuation is None:
-            return
+
+    def on_empty(exc: KorailNoResultsError, asked: TrainSearchQuery) -> None:
+        # 직통 없음(``WRD000061``)과 결과 없음은 실패가 아니라 답입니다.
+        # 다만 조용히 비면 사람은 프로그램이 고장 난 줄 압니다 — 서버가
+        # 뭐라고 답했는지 남깁니다.
+        if log:
+            log(
+                f"직통 조회에 결과가 없습니다 (서버 코드 {exc.code}): "
+                f"{asked.departure_station_code}→{asked.arrival_station_code} "
+                f"{asked.departure_date} {asked.departure_time} 이후"
+            )
+
+    return _walk(
+        lambda asked, cursor: client.search_trains(asked, continuation=cursor),
+        query,
+        max_pages=max_pages,
+        last_clock=lambda result: _latest_departure(
+            train.departure_time for train in result.trains
+        ),
+        on_empty=on_empty,
+    )
 
 
 def _transfer_pages(
@@ -339,18 +422,24 @@ def _transfer_pages(
     log: Logger | None = None,
 ) -> Iterator[TransferSearchResult]:
     """환승 검색 결과 페이지. 커서가 직통과 다르므로 따로 돕니다."""
-    continuation = None
-    for _ in range(max(1, max_pages)):
-        try:
-            result = client.search_transfer_trains(query, continuation=continuation)
-        except KorailNoResultsError as exc:
-            if log:
-                log(f"환승 조회에 결과가 없습니다 (서버 코드 {exc.code})")
-            return
-        yield result
-        continuation = result.next_page()
-        if continuation is None:
-            return
+
+    def on_empty(exc: KorailNoResultsError, _asked: TrainSearchQuery) -> None:
+        if log:
+            log(f"환승 조회에 결과가 없습니다 (서버 코드 {exc.code})")
+
+    return _walk(
+        lambda asked, cursor: client.search_transfer_trains(asked, continuation=cursor),
+        query,
+        max_pages=max_pages,
+        # 여정의 시각은 **첫 구간** 것입니다. 다음 조회의 시작점도 그것이어야
+        # 합니다 — 뒤 구간 시각으로 밀면 그 사이 여정을 건너뜁니다.
+        last_clock=lambda result: _latest_departure(
+            itinerary.legs[0].departure_time
+            for itinerary in result.itineraries
+            if itinerary.legs
+        ),
+        on_empty=on_empty,
+    )
 
 
 def search_direct(
@@ -397,7 +486,7 @@ def _first_leg_candidates(
 ) -> list[TrainSummary]:
     trains: list[TrainSummary] = []
     for result in _direct_pages(
-        client, request.query(arrival=station), max_pages=request.max_pages
+        client, request.query(arrival=station), max_pages=CUSTOM_LEG_MAX_PAGES
     ):
         trains.extend(result.trains)
     return trains[:MAX_CUSTOM_LEGS_PER_SIDE]
@@ -413,7 +502,7 @@ def _second_leg_candidates(
     for result in _direct_pages(
         client,
         request.query(departure=station, departure_time=earliest_arrival),
-        max_pages=request.max_pages,
+        max_pages=CUSTOM_LEG_MAX_PAGES,
     ):
         trains.extend(result.trains)
     return trains[:MAX_CUSTOM_LEGS_PER_SIDE]

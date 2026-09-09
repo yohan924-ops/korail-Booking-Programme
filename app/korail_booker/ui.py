@@ -1467,6 +1467,11 @@ class BookerApp:
         if not journey.is_transfer:
             return
         for leg_index, leg in enumerate(journey.legs):
+            # 구간 줄에도 그 구간의 좌석 상태를 적습니다. 부모 줄은 두 구간을
+            # 합쳐 하나로 말하므로(한 구간만 매진이어도 '매진'), 어느 쪽이
+            # 막혔는지는 여기서만 보입니다. 한 구간짜리 여정으로 만들어
+            # 같은 계산을 그대로 씁니다 — 규칙을 두 번 쓰지 않습니다.
+            alone = Journey(legs=(leg,), source=journey.source)
             tree.insert(
                 item,
                 "end",
@@ -1477,9 +1482,9 @@ class BookerApp:
                     format_clock(leg.arrival_time),
                     format_duration(journey.leg_minutes(leg_index)),
                     f"{leg.departure_station_name}→{leg.arrival_station_name}",
-                    "",
-                    "",
-                    "",
+                    alone.seat_text(KorailSeatClass.GENERAL),
+                    alone.seat_text(KorailSeatClass.SPECIAL),
+                    " · ".join(alone.extras()) or "-",
                 ),
                 tags=("leg",),
             )
