@@ -1162,6 +1162,29 @@ def test_the_ui_event_pump_schedules_nothing_but_itself():
     assert scheduled == ["self._drain"], scheduled
 
 
+def test_startup_applies_the_round_trip_state_to_the_return_fields():
+    """켜자마자의 '오는 편' 칸은 왕복 체크박스를 따라야 합니다.
+
+    ``_restore`` 가 ``_round_trip_toggled`` 을 부르지 않아, 왕복이 꺼져 있는데도
+    오는 날짜 칸과 [달력] 이 눌리는 상태로 떴습니다. Tkinter 를 띄우지 않고
+    원문에서 확인합니다 — 화면 없이 도는 시험이라야 매번 돕니다.
+    """
+    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    restores = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_restore"
+    ]
+    assert len(restores) == 1
+    called = {
+        ast.unparse(call.func)
+        for call in ast.walk(restores[0])
+        if isinstance(call, ast.Call)
+    }
+    assert "self._round_trip_toggled" in called, sorted(called)
+
+
 # --- 텔레그램 -----------------------------------------------------------------
 
 FAKE_TOKEN = "123456789:SYNTHETIC-TOKEN-NOT-REAL"

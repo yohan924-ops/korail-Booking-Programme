@@ -845,6 +845,9 @@ class BookerApp:
         for key, var in self.passenger_vars.items():
             var.set(str(getattr(stored, key)))
         self.sync_transfer_state()
+        # 켜자마자의 '오는 편' 칸 상태도 체크박스를 따라야 합니다. 이것을
+        # 부르지 않으면 왕복이 꺼져 있는데도 오는 날짜와 [달력] 이 눌렸습니다.
+        self._round_trip_toggled()
 
     # -- 결과가 지금 조건의 것인지 -------------------------------------------
 
