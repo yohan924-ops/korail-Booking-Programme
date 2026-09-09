@@ -1246,6 +1246,8 @@ def test_the_second_line_of_a_message_lines_up_under_the_first():
 def test_a_new_poll_round_gets_a_blank_line_before_it():
     """회차마다 덩어리로 끊겨야 눈이 따라갑니다."""
     assert LF.format_entry("[3] 387(GE:매진)", stamp="09:00:00").blank_before
+    # 여러 묶음을 따로 돌리면 앞에 꼬리표가 붙습니다. 그래도 회차는 회차입니다.
+    assert LF.format_entry("[A] [3] 387(GE:매진)", stamp="09:00:00").blank_before
     assert not LF.format_entry("로그인했습니다.", stamp="09:00:00").blank_before
 
 
@@ -1264,7 +1266,8 @@ def test_the_two_log_panes_are_separate_widgets():
     """자동예매 회차 기록이 조회 기록을 밀어 올리면 안 됩니다."""
     source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
     assert "self.booking_text" in source
-    assert "log=self.log_booking," in source
+    # 묶음마다 꼬리표를 단 기록기를 씁니다.
+    assert "log=self._tagged_log(tag)," in source
 
 
 def test_a_preview_run_says_out_loud_that_nothing_was_sent():
@@ -1529,6 +1532,72 @@ def test_the_booker_waits_for_both_legs_instead_of_grabbing_one():
     assert recorder.count(RESERVE) == 0
 
 
+# --- 감시 여럿 따로 돌리기 ------------------------------------------------------
+
+
+def _ui_source() -> str:
+    return (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+
+
+def _ui_function(name: str) -> str:
+    tree = ast.parse(_ui_source())
+    return next(
+        ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+
+
+def test_watches_are_remembered_by_journey_not_by_row_number():
+    """자리 번호로 기억하면 사이에서 하나를 빼는 순간 전부 어긋납니다."""
+    source = _ui_source()
+    assert "keys: frozenset" in source
+    assert "keys=frozenset(target.journey.key() for target in targets)" in source
+
+
+def test_starting_again_never_watches_the_same_journey_twice():
+    """같은 열차를 두 묶음이 노리면 예약이 두 번 나갑니다."""
+    body = _ui_function("on_start")
+    assert "watching = self.watching_keys()" in body
+    assert "if t.journey.key() not in watching" in body
+
+
+def test_selected_only_start_and_stop_both_exist():
+    """담긴 것 전부와 고른 것만 — 넷으로 나뉩니다."""
+    source = _ui_source()
+    for name in ("on_start_selected", "on_stop_selected"):
+        assert f"def {name}" in source
+    assert 'text="고른 것만 시작"' in source
+    assert 'text="고른 것만 중지"' in source
+
+
+def test_a_watched_target_cannot_be_removed_from_the_list():
+    """빼도 그 묶음은 계속 노립니다 — 목록에 없는데 예약이 잡히면 알 수 없습니다."""
+    body = _ui_function("remove_targets")
+    assert "watching = self.watching_keys()" in body
+    assert "감시 중인 열차는 뺄 수 없습니다" in body
+
+    cleared = _ui_function("clear_targets")
+    assert "self.any_running()" in cleared
+
+
+def test_every_booking_log_line_says_which_watch_it_came_from():
+    """여럿이 돌면 꼬리표 없이는 어느 줄이 어느 묶음 것인지 모릅니다."""
+    body = _ui_function("_tagged_log")
+    # 곁가지 줄(공백으로 시작)은 그 성질을 지켜야 들여쓰기가 깨지지 않습니다.
+    # ast.unparse 는 따옴표를 홑따옴표로 바꿉니다.
+    assert "message.startswith(' ')" in body
+    assert "f'    [{tag}] {message.strip()}'" in body
+    assert "f'[{tag}] {message}'" in body
+
+
+def test_the_target_list_shows_what_is_running():
+    body = _ui_function("sync_target_list")
+    assert "▶" in body and "대기" in body
+    # 다시 그린 뒤에도 고른 줄은 그대로 있어야 합니다.
+    assert "chosen = set(self.target_list.curselection())" in body
+
+
 # --- 텔레그램 알림 --------------------------------------------------------------
 
 
@@ -1629,7 +1698,7 @@ def test_logging_out_drops_the_session_and_the_password():
     assert "self._credentials = None" in body
     assert "self.login_pw.set('')" in body
     # 돌고 있는데 세션을 버리면 자동예매가 도중에 죽습니다.
-    assert "self.session.running" in body
+    assert "self.any_running()" in body
 
 
 def test_every_way_a_search_ends_stops_the_progress_bar():

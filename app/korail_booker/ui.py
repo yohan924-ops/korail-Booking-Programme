@@ -18,7 +18,7 @@ import threading
 import time
 import tkinter as tk
 from collections.abc import Callable, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from tkinter import messagebox, ttk
 
@@ -134,6 +134,8 @@ HOLD_COLUMNS = tuple(name for name, _width, _anchor in HOLD_LAYOUT)
 LOGIN_OK_COLOUR = "#1a7f37"
 LOGIN_BAD_COLOUR = "#b3261e"
 LOGIN_OFF_COLOUR = "#666666"
+#: 감시 묶음의 꼬리표. 기록에서 어느 묶음의 줄인지 이것으로 압니다.
+ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 #: 자동완성이 무시하는 키. 방향키와 기능키로는 목록을 다시 좁히지 않습니다.
 _NAVIGATION_KEYS = frozenset(
     {
@@ -303,6 +305,28 @@ class CalendarPanel(tk.Frame):
                 button.grid(row=row, column=column, padx=1, pady=1)
 
 
+@dataclass
+class Watch:
+    """돌고 있는 감시 하나 — 자동예매 묶음 하나.
+
+    담긴 열차 전부를 한꺼번에 돌리던 것을 쪼갠 결과입니다. 어느 여정을 보고
+    있는지 **여정 열쇠로** 기억합니다 — 목록의 자리 번호로 기억하면 사이에서
+    하나를 빼는 순간 전부 어긋납니다.
+    """
+
+    #: 기록에 붙는 한 글자 꼬리표(``A``, ``B``…). 여럿이 돌 때 어느 줄이
+    #: 어느 묶음 것인지 이것으로 압니다.
+    tag: str
+    session: BookingSession
+    keys: frozenset[tuple[tuple[str, str, str, str], ...]]
+    #: 사람이 읽는 이름. 알림과 기록에 씁니다.
+    title: str
+
+    @property
+    def running(self) -> bool:
+        return self.session.running
+
+
 class BookerApp:
     """창 하나에 로그인·조회·자동예매가 다 들어간 화면."""
 
@@ -315,7 +339,10 @@ class BookerApp:
         self.journeys: list[Journey] = []
         #: (표, 항목) → 결과 번호. 표마다 항목 id 가 따로 매겨집니다.
         self.item_journeys: dict[tuple[str, str], int] = {}
-        self.session: BookingSession | None = None
+        #: 지금 돌고 있는 감시들. 하나가 아니라 여럿입니다 — 담긴 것 중 고른
+        #: 것만 따로 시작하고 따로 멈출 수 있어야 하기 때문입니다.
+        self.watches: list[Watch] = []
+        self._next_tag = 0
         self.events: queue.Queue[Callable[[], None]] = queue.Queue()
         self._credentials: tuple[str, str] | None = None
         #: 환승역 목록이 어느 구간 것인지. 같은 구간이면 다시 묻지 않습니다.
@@ -1168,12 +1195,20 @@ class BookerApp:
         ttk.Button(row2, text="텔레그램 설정", command=self.on_telegram_settings).pack(
             side="left", padx=12
         )
-        self.start_button = ttk.Button(row2, text="자동예매 시작", command=self.on_start)
+        # 담긴 것 전부와 고른 것만 — 넷으로 나눕니다. 하나로 두면 여러 여정을
+        # 담아 두고 그중 하나만 노릴 수가 없습니다.
+        self.start_button = ttk.Button(row2, text="전체 시작", command=self.on_start)
         self.start_button.pack(side="left", padx=4)
-        self.stop_button = ttk.Button(
-            row2, text="중지", command=self.on_stop, state="disabled"
+        ttk.Button(row2, text="고른 것만 시작", command=self.on_start_selected).pack(
+            side="left", padx=2
         )
-        self.stop_button.pack(side="left")
+        self.stop_button = ttk.Button(
+            row2, text="전체 중지", command=self.on_stop, state="disabled"
+        )
+        self.stop_button.pack(side="left", padx=(10, 2))
+        ttk.Button(row2, text="고른 것만 중지", command=self.on_stop_selected).pack(
+            side="left"
+        )
         # 미리보기 스위치는 없앴습니다. 켜는 것을 잊고 미리보기를 진짜라고
         # 믿는 일이 실제로 생겼고, 이 프로그램을 켜는 이유가 진짜 예약이기
         # 때문입니다. 대신 시작할 때 확인 창이 뜨고, 로그인하지 않았으면
@@ -1553,7 +1588,7 @@ class BookerApp:
         self.transfer_load_button.configure(
             state="normal" if self.include_transfer.get() else "disabled"
         )
-        if self.session is None or not self.session.running:
+        if not self.any_running():
             self.start_button.configure(state="normal")
             self.stop_button.configure(state="disabled")
 
@@ -1621,7 +1656,7 @@ class BookerApp:
         아무것도 부르지 않고, 세션을 버리면 이 프로그램은 더 못 씁니다.
         코레일 앱의 로그인까지 끊는다고 약속하지 않습니다.
         """
-        if self.session is not None and self.session.running:
+        if self.any_running():
             messagebox.showwarning(
                 "로그아웃", "자동예매가 돌고 있습니다. [중지] 를 먼저 누르세요"
             )
@@ -1984,8 +2019,8 @@ class BookerApp:
             ):
                 continue
             self.targets.append(target)
-            self.target_list.insert("end", target.describe())
             added += 1
+        self.sync_target_list()
         self._write_log(
             f"예매 대상에 {added}편을 담았습니다 (모두 {len(self.targets)}편)."
             if added
@@ -1993,14 +2028,41 @@ class BookerApp:
         )
 
     def remove_targets(self) -> None:
-        for index in sorted(self.target_list.curselection(), reverse=True):
-            self.target_list.delete(index)
+        """고른 것을 뺍니다. **감시 중인 것은 빼지 않습니다.**
+
+        빼도 그 묶음은 계속 그 열차를 노립니다 — 목록에서 사라졌는데 예약이
+        잡히면 무슨 일인지 알 수 없습니다. 먼저 멈추라고 말합니다.
+        """
+        watching = self.watching_keys()
+        chosen = sorted(self.target_list.curselection(), reverse=True)
+        if not chosen:
+            messagebox.showinfo("예매 대상", "뺄 열차를 고르세요")
+            return
+        busy = [
+            self.targets[index]
+            for index in chosen
+            if self.targets[index].journey.key() in watching
+        ]
+        if busy:
+            messagebox.showwarning(
+                "예매 대상",
+                "감시 중인 열차는 뺄 수 없습니다. [고른 것만 중지] 를 먼저 "
+                "누르세요.\n\n" + "\n".join(f"· {t.describe()}" for t in busy),
+            )
+            return
+        for index in chosen:
             del self.targets[index]
+        self.sync_target_list()
         self._write_log(f"예매 대상 {len(self.targets)}편 남았습니다.")
 
     def clear_targets(self) -> None:
-        self.target_list.delete(0, "end")
+        if self.any_running():
+            messagebox.showwarning(
+                "예매 대상", "감시가 돌고 있습니다. [전체 중지] 를 먼저 누르세요"
+            )
+            return
         self.targets.clear()
+        self.sync_target_list()
         self._write_log("예매 대상을 비웠습니다.")
 
     def build_options(self) -> BookingOptions:
@@ -2020,15 +2082,80 @@ class BookerApp:
             live=True,
         )
 
-    def on_start(self) -> None:
-        if self.session is not None and self.session.running:
-            messagebox.showinfo("자동예매", "이미 돌고 있습니다")
-            return
-        targets = list(self.targets)
+    # -- 감시 여럿 ------------------------------------------------------------
+
+    def watching_keys(self) -> set[object]:
+        """지금 돌고 있는 감시들이 보고 있는 여정 열쇠 전부."""
+        keys: set[object] = set()
+        for watch in self.watches:
+            if watch.running:
+                keys |= set(watch.keys)
+        return keys
+
+    def any_running(self) -> bool:
+        return any(watch.running for watch in self.watches)
+
+    def _next_watch_tag(self) -> str:
+        """``A``, ``B``… 스물여섯을 넘으면 다시 ``A`` 로. 꼬리표는 이름표일
+        뿐이고, 어느 여정인지는 :attr:`Watch.keys` 가 압니다."""
+        tag = ALPHABET[self._next_tag % len(ALPHABET)]
+        self._next_tag += 1
+        return tag
+
+    def _tagged_log(self, tag: str) -> Callable[[str], None]:
+        """기록 줄 앞에 꼬리표를 답니다.
+
+        곁가지 줄(공백으로 시작)은 그 성질을 지켜야 합니다 — 앞에 그냥 붙이면
+        더는 곁가지로 보이지 않아 들여쓰기가 깨집니다.
+        """
+
+        def write(message: str) -> None:
+            if message.startswith(" "):
+                self.log_booking(f"    [{tag}] {message.strip()}")
+            else:
+                self.log_booking(f"[{tag}] {message}")
+
+        return write
+
+    def selected_targets(self) -> list[Target]:
+        chosen = [self.targets[index] for index in self.target_list.curselection()]
+        return chosen or list(self.targets)
+
+    def sync_target_list(self) -> None:
+        """목록 줄 앞에 지금 상태를 적습니다 — 무엇이 돌고 있는지 한눈에."""
+        watching = self.watching_keys()
+        tags = {
+            key: watch.tag
+            for watch in self.watches
+            if watch.running
+            for key in watch.keys
+        }
+        chosen = set(self.target_list.curselection())
+        self.target_list.delete(0, "end")
+        for target in self.targets:
+            key = target.journey.key()
+            mark = f"▶ [{tags[key]}]" if key in watching else "○ 대기"
+            self.target_list.insert("end", f"{mark}  {target.describe()}")
+        for index in chosen:
+            if index < len(self.targets):
+                self.target_list.selection_set(index)
+        self.stop_button.configure(state="normal" if self.any_running() else "disabled")
+
+    def on_start_selected(self) -> None:
+        self.on_start(selected_only=True)
+
+    def on_start(self, selected_only: bool = False) -> None:
+        targets = self.selected_targets() if selected_only else list(self.targets)
         if not targets:
             messagebox.showwarning(
                 "자동예매", "먼저 [담기] 로 예매 대상에 열차를 넣으세요"
             )
+            return
+        # 이미 보고 있는 것을 또 걸면 같은 열차에 두 번 예약이 나갑니다.
+        watching = self.watching_keys()
+        targets = [t for t in targets if t.journey.key() not in watching]
+        if not targets:
+            messagebox.showinfo("자동예매", "고른 열차는 이미 감시 중입니다")
             return
         try:
             options = self.build_options()
@@ -2051,25 +2178,34 @@ class BookerApp:
             " 확인된 바 없습니다. 그래도 시도할까요?",
         ):
             return
+        tag = self._next_watch_tag()
         booker = AutoBooker(
             self._ensure_client(),
             targets,
             options,
-            log=self.log_booking,
+            log=self._tagged_log(tag),
             notify=self._make_notifier(),
             relogin=self.relogin if self._credentials else None,
             on_hold=self.on_hold_made,
         )
-        self.session = BookingSession(booker)
-        self.start_button.configure(state="disabled")
-        self.stop_button.configure(state="normal")
+        title = " / ".join(target.describe() for target in targets[:2])
+        if len(targets) > 2:
+            title += f" 외 {len(targets) - 2}편"
+        watch = Watch(
+            tag=tag,
+            session=BookingSession(booker),
+            keys=frozenset(target.journey.key() for target in targets),
+            title=title,
+        )
+        self.watches.append(watch)
         directions = len({target.direction for target in targets})
         self._write_booking(
-            f"자동예매 시작 — {len(targets)}편 감시, 방향 {directions}개"
+            f"[{tag}] 시작 — {len(targets)}편 감시, 방향 {directions}개\n{title}"
         )
-        self.session.start(on_done=lambda result: self.events.put(
-            lambda: self._booking_done(result)
+        watch.session.start(on_done=lambda result: self.events.put(
+            lambda: self._booking_done(watch, result)
         ))
+        self.sync_target_list()
 
     def _confirm_live(self, targets: list[Target]) -> bool:
         lines = "\n".join(f"· {target.describe()}" for target in targets[:5])
@@ -2100,38 +2236,42 @@ class BookerApp:
 
         return send
 
-    def on_stop(self) -> None:
-        if self.session is not None:
-            self.session.stop()
-            self._write_booking("중지를 요청했습니다. 이번 조회가 끝나면 멈춥니다.")
+    def on_stop(self, selected_only: bool = False) -> None:
+        """돌고 있는 감시를 멈춥니다. 고른 것만 멈출 수도 있습니다."""
+        if selected_only:
+            wanted = {t.journey.key() for t in self.selected_targets()}
+            targets = [w for w in self.watches if w.running and (set(w.keys) & wanted)]
+        else:
+            targets = [w for w in self.watches if w.running]
+        if not targets:
+            messagebox.showinfo("자동예매", "멈출 감시가 없습니다")
+            return
+        for watch in targets:
+            watch.session.stop()
+            self._write_booking(
+                f"[{watch.tag}] 중지를 요청했습니다. 이번 조회가 끝나면 멈춥니다."
+            )
 
-    def _booking_done(self, result: BookingResult) -> None:
-        self.start_button.configure(state="normal")
-        self.stop_button.configure(state="disabled")
+    def on_stop_selected(self) -> None:
+        self.on_stop(selected_only=True)
+
+    def _booking_done(self, watch: Watch, result: BookingResult) -> None:
         levels = {
             Outcome.HELD: "good",
             Outcome.FAILED: "bad",
             Outcome.PREVIEW: "warn",
         }
         self._write_booking(
-            f"자동예매 종료 ({result.outcome.value}): {result.message}",
+            f"[{watch.tag}] 종료 ({result.outcome.value}): {result.message}",
             levels.get(result.outcome, "info"),
         )
+        self.sync_target_list()
+        # 창은 잡았을 때와 실패했을 때만 띄웁니다. 여럿을 돌리는데 중지·시간
+        # 끝마다 창이 뜨면 그것부터 치우느라 정작 볼 것을 못 봅니다.
         if result.outcome is Outcome.HELD:
-            messagebox.showinfo("예약됨", result.message)
+            messagebox.showinfo(f"예약됨 [{watch.tag}]", result.message)
         elif result.outcome is Outcome.FAILED:
-            messagebox.showerror("자동예매 실패", result.message)
-        elif result.outcome is Outcome.PREVIEW:
-            # 미리보기는 "잡을 수 있었다" 로 끝납니다. 기록 한 줄로만 알리면
-            # 잡힌 줄 알고 코레일 장바구니를 열어 보게 됩니다.
-            messagebox.showinfo(
-                "미리보기 — 아무것도 보내지 않았습니다",
-                f"{result.message}\n\n"
-                "이번 실행은 미리보기였습니다. 예약도 장바구니도 만들어지지 "
-                "않았고, 코레일에는 아무 요청도 나가지 않았습니다.\n\n"
-                "실제로 잡으려면 [실제 예약(홀드) 만들기] 를 켜고 다시 "
-                "[자동예매 시작] 을 누르세요.",
-            )
+            messagebox.showerror(f"자동예매 실패 [{watch.tag}]", result.message)
 
     # -- 동작: 텔레그램 ------------------------------------------------------
 
@@ -2244,10 +2384,11 @@ class BookerApp:
     # -- 종료 ----------------------------------------------------------------
 
     def on_close(self) -> None:
-        if self.session is not None and self.session.running:
+        if self.any_running():
             if not messagebox.askyesno("종료", "자동예매가 돌고 있습니다. 정말 끝낼까요?"):
                 return
-            self.session.stop()
+            for watch in self.watches:
+                watch.session.stop()
         if self.client is not None:
             self.client.close()
         self.root.destroy()
