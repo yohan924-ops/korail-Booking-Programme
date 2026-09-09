@@ -1532,6 +1532,48 @@ def test_the_booker_waits_for_both_legs_instead_of_grabbing_one():
     assert recorder.count(RESERVE) == 0
 
 
+# --- 바로 예약 ------------------------------------------------------------------
+
+
+def test_reserve_now_only_looks_at_the_target_list():
+    """단추만 옮기고 동작을 두면, 4번에 있는 단추가 3번 표를 잡습니다."""
+    body = _ui_function("on_reserve_now")
+
+    assert "self.selected_indices()" in body
+    assert "self.targets[index]" in body
+    # 조회 결과를 보던 옛 길이 남아 있으면 안 됩니다.
+    assert "selected_results" not in body
+
+
+def test_reserve_now_needs_an_explicit_selection():
+    """아무것도 안 고른 것을 '전부'로 읽으면 실수 한 번이 여러 건의 예약입니다."""
+    body = _ui_function("on_reserve_now")
+    assert "if not indices:" in body
+    assert "예매 대상에서 잡을 열차를 고르세요" in body
+
+
+def test_reserve_now_refuses_two_of_the_same_direction():
+    """같은 여정을 두 번 잡는 것은 중복 예약입니다."""
+    body = _ui_function("on_reserve_now")
+    assert "directions.count(d) > 1" in body
+    assert "중복 예약" in body
+
+
+def test_reserve_now_keeps_going_when_one_of_several_fails():
+    """여럿을 골랐다면 그중 되는 것은 잡히는 편이 낫습니다."""
+    body = _ui_function("on_reserve_now")
+    assert "continue" in body
+    assert "self._reserve_now_finished" in body
+
+
+def test_the_sold_out_message_points_at_the_right_button_now():
+    """[바로 예약] 이 이미 예매 대상에 있으므로 "담기" 로 보내면 안 됩니다."""
+    body = _ui_function("on_reserve_now")
+
+    assert "[고른 것만 시작]" in body
+    assert "[담기] 로 예매 대상에 넣고" not in body
+
+
 # --- 로그인 팝업 ----------------------------------------------------------------
 
 

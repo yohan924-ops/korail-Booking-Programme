@@ -1168,65 +1168,120 @@ class BookerApp:
         self._write_log("열차 목록을 비웠습니다 (예매 대상은 그대로입니다).")
 
     def on_reserve_now(self) -> None:
-        """고른 열차 하나를 지금 잡습니다. 자동예매를 거치지 않습니다."""
-        picked = self.selected_results()
-        if len(picked) != 1:
-            messagebox.showwarning("바로 예약", "표에서 열차 하나만 고르세요")
+        """**예매 대상에 담긴 것 중** 고른 것을 지금 잡습니다.
+
+        조회 결과에서 바로 잡을 수 있게 두었더니 "담아 둔 것만 노린다" 는
+        규칙이 흐려졌습니다. 담는 것과 잡는 것을 같은 목록에서 하면, 무엇을
+        잡았는지도 그 목록에 그대로 남습니다.
+
+        여럿 고를 수 있습니다. 다만 **같은 방향을 둘 이상 고르면 막습니다** —
+        같은 여정을 두 번 잡는 것은 중복 예약이고, 하나는 기한이 지나 버려질
+        뿐입니다.
+        """
+        if not self.targets:
+            messagebox.showwarning(
+                "바로 예약", "먼저 위 표에서 고르고 [예매 대상에 담기] 를 누르세요"
+            )
             return
-        target = picked[0]
-        journey = target.journey
+        indices = self.selected_indices()
+        if not indices:
+            messagebox.showwarning("바로 예약", "예매 대상에서 잡을 열차를 고르세요")
+            return
         if not self.logged_in:
             messagebox.showwarning("바로 예약", "먼저 로그인하세요")
             return
-        reason = unbookable_reason(journey)
-        if reason is not None:
+        picked = [self.targets[index] for index in indices]
+
+        directions = [target.direction for target in picked]
+        repeated = {d for d in directions if directions.count(d) > 1}
+        if repeated:
             messagebox.showwarning(
-                "바로 예약", unbookable_detail(journey) or reason
+                "바로 예약",
+                "같은 방향을 둘 이상 골랐습니다. 한 방향에 한 건만 잡습니다 — "
+                "둘을 잡으면 하나는 중복 예약이고 기한이 지나 버려집니다.\n\n"
+                + "\n".join(f"· {a}→{b} {c}" for a, b, c in sorted(repeated)),
             )
             return
-        seat_class = journey.bookable_seat_class(
-            dict(SEAT_CHOICES).get(self.seat_choice.get(), SeatPreference.ANY)
-        )
-        if seat_class is None:
+
+        preference = dict(SEAT_CHOICES).get(self.seat_choice.get(), SeatPreference.ANY)
+        plan: list[tuple[Target, KorailSeatClass]] = []
+        blocked: list[str] = []
+        for target in picked:
+            journey = target.journey
+            reason = unbookable_reason(journey)
+            if reason is not None:
+                blocked.append(
+                    f"· {journey.summary()}\n   {unbookable_detail(journey) or reason}"
+                )
+                continue
+            seat_class = journey.bookable_seat_class(preference)
+            if seat_class is None:
+                blocked.append(
+                    f"· {journey.summary()}\n   지금 이 등급으로 자리가 없습니다."
+                )
+                continue
+            plan.append((target, seat_class))
+
+        if not plan:
             messagebox.showinfo(
                 "바로 예약",
-                f"{journey.summary()}\n\n지금은 이 등급으로 자리가 없습니다. "
-                "만석을 노리려면 [담기] 로 예매 대상에 넣고 자동예매를 시작하세요.",
+                "지금 잡을 수 있는 것이 없습니다.\n\n"
+                + "\n".join(blocked)
+                + "\n\n만석을 노리려면 이 줄을 고른 채 [고른 것만 시작] 으로 "
+                "자동예매를 거세요 — 자리가 열리는 순간 잡습니다.",
             )
             return
+
+        lines = "\n".join(f"· {target.describe()}" for target, _seat in plan)
+        skipped = ("\n\n지금 못 잡는 것(건너뜁니다):\n" + "\n".join(blocked)) if blocked else ""
         if not messagebox.askyesno(
             "바로 예약",
-            f"{journey.summary()}\n\n"
-            "지금 진짜 예약(결제 전 홀드)을 만듭니다. 결제는 하지 않습니다 — "
-            "잡은 뒤 기한 안에 코레일 앱에서 결제하거나 취소해야 합니다.\n\n"
-            "계속할까요?",
+            f"아래 {len(plan)}편을 지금 잡습니다 (결제 전 홀드).\n\n"
+            f"{lines}{skipped}\n\n"
+            "결제는 하지 않습니다 — 잡은 뒤 기한 안에 코레일 앱에서 결제하거나 "
+            "취소해야 합니다.\n\n계속할까요?",
         ):
             return
+
         self.reserve_now_button.configure(state="disabled")
-        self._write_log(f"바로 예약 시도 — {journey.summary()}")
+        for target, _seat in plan:
+            self._write_log(f"바로 예약 시도 — {target.describe()}")
 
         def work() -> None:
-            try:
-                result = reserve_once(
-                    self._ensure_client(),
-                    journey,
-                    passengers=target.request.passengers,
-                    seat_class=seat_class,
+            client = self._ensure_client()
+            for target, seat_class in plan:
+                try:
+                    result = reserve_once(
+                        client,
+                        target.journey,
+                        passengers=target.request.passengers,
+                        seat_class=seat_class,
+                    )
+                except KorailApiError as exc:
+                    # 하나가 실패해도 나머지는 계속합니다. 여럿을 골랐다면
+                    # 그중 되는 것은 잡히는 편이 낫습니다.
+                    message = f"{target.describe()}: {type(exc).__name__}: {exc}"
+                    self.events.put(
+                        lambda m=message: self._write_log(
+                            f"바로 예약 실패 — {m}", "bad"
+                        )
+                    )
+                    continue
+                self.events.put(
+                    lambda t=target, r=result: self._reserve_now_done(t, r)
                 )
-            except KorailApiError as exc:
-                message = f"{type(exc).__name__}: {exc}"
-                self.events.put(lambda: self._reserve_now_failed(message))
-                return
-            self.events.put(lambda: self._reserve_now_done(target, result))
+            self.events.put(self._reserve_now_finished)
 
         self._in_thread(work, "바로 예약")
+
+    def _reserve_now_finished(self) -> None:
+        self.reserve_now_button.configure(state="normal")
 
     def _reserve_now_done(
         self,
         target: Target,
         result: MutationPreview | ReservationHoldResponse,
     ) -> None:
-        self.reserve_now_button.configure(state="normal")
         if not isinstance(result, ReservationHoldResponse):
             self._write_log("바로 예약: 미리보기라 아무것도 보내지 않았습니다.", "warn")
             return
@@ -1243,14 +1298,10 @@ class BookerApp:
             "예약했습니다 (아직 결제 전)",
             f"{held.summary}\n\nPNR {held.pnr}\n운임 {held.fare}\n"
             f"결제 기한 {held.deadline_text}\n\n"
-            "아래 '잡은 예약' 에 남은 시간이 셉니다. 기한 안에 코레일 앱에서 "
+            "6번 '잡은 예약' 에 남은 시간이 셉니다. 기한 안에 코레일 앱에서 "
             "결제하세요.",
         )
 
-    def _reserve_now_failed(self, message: str) -> None:
-        self.reserve_now_button.configure(state="normal")
-        self._write_log(f"바로 예약 실패: {message}", "bad")
-        messagebox.showerror("바로 예약 실패", message)
 
     def _searching(self, busy: bool) -> None:
         """조회 중임을 막대로 보입니다. 끝나면 자리까지 거둡니다."""
