@@ -33,6 +33,7 @@ from typing import Any
 import httpx
 import pytest
 from korail_booker import journeys as J
+from korail_booker import logfmt as LF
 from korail_booker import notify as N
 from korail_booker import search as S
 from korail_booker import settings as ST
@@ -1206,6 +1207,58 @@ def test_startup_applies_the_round_trip_state_to_the_return_fields():
         if isinstance(call, ast.Call)
     }
     assert "self._round_trip_toggled" in called, sorted(called)
+
+
+# --- 기록 모양 ----------------------------------------------------------------
+
+
+def _drawn(message: str, level: str = "info") -> str:
+    entry = LF.format_entry(message, stamp="09:00:00", level=level)
+    assert entry is not None
+    return "".join(text for text, _tag in entry.pieces)
+
+
+def test_a_detail_line_drops_the_repeated_clock_and_indents():
+    """곁가지 줄마다 같은 시각을 찍으면 시각이 오히려 안 보입니다."""
+    drawn = _drawn("    장바구니에도 담았습니다")
+
+    assert drawn == " " * LF.STAMP_WIDTH + "· 장바구니에도 담았습니다\n"
+    entry = LF.format_entry("    담았습니다", stamp="09:00:00")
+    assert entry is not None
+    assert entry.pieces[-1][1] == "detail"
+
+
+def test_the_second_line_of_a_message_lines_up_under_the_first():
+    """예전에는 둘째 줄이 왼쪽 끝에 붙어 새 기록처럼 보였습니다."""
+    drawn = _drawn("예약했습니다\nPNR 123\n결제 기한 17:45")
+
+    assert drawn.splitlines()[0] == "[09:00:00] 예약했습니다"
+    for line in drawn.splitlines()[1:]:
+        assert line.startswith(" " * LF.STAMP_WIDTH)
+
+
+def test_a_new_poll_round_gets_a_blank_line_before_it():
+    """회차마다 덩어리로 끊겨야 눈이 따라갑니다."""
+    assert LF.format_entry("[3] 387(GE:매진)", stamp="09:00:00").blank_before
+    assert not LF.format_entry("로그인했습니다.", stamp="09:00:00").blank_before
+
+
+def test_a_level_beats_the_shape_so_a_failure_never_reads_as_a_side_note():
+    entry = LF.format_entry("    놓쳤습니다", stamp="09:00:00", level="bad")
+    assert entry is not None
+    assert entry.pieces[-1][1] == "bad"
+
+
+def test_an_empty_message_draws_nothing():
+    assert LF.format_entry("", stamp="09:00:00") is None
+    assert LF.format_entry("   \n  ", stamp="09:00:00") is None
+
+
+def test_the_two_log_panes_are_separate_widgets():
+    """자동예매 회차 기록이 조회 기록을 밀어 올리면 안 됩니다."""
+    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+    assert "self.booking_text" in source
+    assert "log=self.log_booking," in source
 
 
 def test_a_preview_run_says_out_loud_that_nothing_was_sent():

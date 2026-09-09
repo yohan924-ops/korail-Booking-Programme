@@ -49,6 +49,7 @@ from .journeys import (
     unbookable_detail,
     unbookable_reason,
 )
+from .logfmt import format_entry
 from .notify import TelegramConfig, TelegramNotifier
 from .search import (
     TRANSFER_CUSTOM,
@@ -303,16 +304,21 @@ class BookerApp:
 
     def _build(self) -> None:
         self.root.title("코레일 예매 도우미")
-        self.root.geometry("1180x900")
-        self.root.minsize(980, 620)
+        # 조회 칸과 자동예매 칸은 높이가 정해진 서식이라, 늘어날 자리는 목록과
+        # 기록입니다. 처음 크기를 넉넉히 잡아 그 둘이 눌린 채로 뜨지 않게 합니다.
+        self.root.geometry("1240x1040")
+        self.root.minsize(1000, 700)
         self.root.columnconfigure(0, weight=1)
-        # minsize 가 없으면 위쪽 조건이 커질 때 표가 몇 줄로 눌립니다.
-        self.root.rowconfigure(2, weight=5, minsize=240)
-        self.root.rowconfigure(5, weight=1, minsize=110)
+        # 늘어나는 자리는 두 곳입니다 — 목록 묶음과 기록 묶음. 그 안의 나눔은
+        # PanedWindow 가 맡아, 손잡이를 끌어 사용자가 직접 정합니다.
+        self.root.rowconfigure(2, weight=3, minsize=260)
+        self.root.rowconfigure(4, weight=2, minsize=140)
         self._build_login()
         self._build_query()
-        self._build_results()
-        self._build_targets()
+        middle = ttk.PanedWindow(self.root, orient="vertical")
+        middle.grid(row=2, column=0, sticky="nsew", padx=8, pady=4)
+        self._build_results(middle)
+        self._build_targets(middle)
         self._build_booking()
         self._build_log()
         # 조건을 고치고 Enter — 조회 단추를 찾아 누르지 않아도 됩니다.
@@ -676,10 +682,10 @@ class BookerApp:
         tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
         return tree
 
-    def _build_results(self) -> None:
-        frame = ttk.LabelFrame(self.root, text="3. 열차 (고른 것을 [담기] 로 예매 대상에 넣습니다)")
+    def _build_results(self, parent: ttk.PanedWindow) -> None:
+        frame = ttk.LabelFrame(parent, text="3. 열차 (고른 것을 [담기] 로 예매 대상에 넣습니다)")
         self.results_frame = frame
-        frame.grid(row=2, column=0, sticky="nsew", padx=8, pady=4)
+        parent.add(frame, weight=3)
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(1, weight=1)
         self.outbound_title = ttk.Label(frame, text="가는 편", foreground="#1f6feb")
@@ -718,14 +724,15 @@ class BookerApp:
             self.inbound_pane.grid_remove()
             frame.columnconfigure(1, weight=0)
 
-    def _build_targets(self) -> None:
-        frame = ttk.LabelFrame(self.root, text="4. 예매 대상 (여기 담긴 것만 노립니다)")
-        frame.grid(row=3, column=0, sticky="ew", padx=8, pady=4)
+    def _build_targets(self, parent: ttk.PanedWindow) -> None:
+        frame = ttk.LabelFrame(parent, text="4. 예매 대상 (여기 담긴 것만 노립니다)")
+        parent.add(frame, weight=1)
         frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(0, weight=1)
         self.target_list = tk.Listbox(
             frame, height=4, selectmode="extended", exportselection=False
         )
-        self.target_list.grid(row=0, column=0, sticky="ew", padx=(4, 0), pady=4)
+        self.target_list.grid(row=0, column=0, sticky="nsew", padx=(4, 0), pady=4)
         scroll = ttk.Scrollbar(frame, orient="vertical", command=self.target_list.yview)
         self.target_list.configure(yscrollcommand=scroll.set)
         scroll.grid(row=0, column=1, sticky="ns", pady=4)
@@ -747,7 +754,7 @@ class BookerApp:
 
     def _build_booking(self) -> None:
         frame = ttk.LabelFrame(self.root, text="5. 자동예매 (만석이면 취소표를 계속 노립니다)")
-        frame.grid(row=4, column=0, sticky="ew", padx=8, pady=4)
+        frame.grid(row=3, column=0, sticky="ew", padx=8, pady=4)
         self.poll_interval = tk.StringVar(value=f"{DEFAULT_POLL_INTERVAL_S:g}")
         self.watch_minutes = tk.StringVar(value="60")
         self.allow_standby = tk.BooleanVar(value=False)
@@ -801,18 +808,49 @@ class BookerApp:
         ).grid(row=2, column=0, sticky="w", padx=4, pady=(0, 6))
 
     def _build_log(self) -> None:
-        frame = ttk.LabelFrame(self.root, text="기록")
-        frame.grid(row=5, column=0, sticky="nsew", padx=8, pady=(4, 8))
+        """기록을 둘로 나눕니다 — 조회 쪽과 자동예매 쪽.
+
+        한 창에 섞어 두면 자동예매가 도는 동안 회차 기록이 조회 기록을 밀어
+        올려, 정작 보고 싶은 "지금 몇 번째 조회에서 무엇이 매진인지" 가 흘러가
+        버립니다. 가운데 손잡이를 끌어 폭을 정할 수 있습니다.
+        """
+        paned = ttk.PanedWindow(self.root, orient="horizontal")
+        paned.grid(row=4, column=0, sticky="nsew", padx=8, pady=(4, 8))
+        self.log_text = self._log_pane(
+            paned, "기록 (로그인·조회)", self.clear_log, weight=3
+        )
+        self.booking_text = self._log_pane(
+            paned, "자동예매 기록", self.clear_booking_log, weight=2
+        )
+
+    def _log_pane(
+        self,
+        parent: ttk.PanedWindow,
+        title: str,
+        clear: Callable[[], None],
+        *,
+        weight: int,
+    ) -> tk.Text:
+        frame = ttk.LabelFrame(parent, text=title)
+        parent.add(frame, weight=weight)
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
-        self.log_text = tk.Text(frame, height=6, wrap="word", state="disabled")
-        self.log_text.grid(row=0, column=0, sticky="nsew")
-        scroll = ttk.Scrollbar(frame, orient="vertical", command=self.log_text.yview)
-        self.log_text.configure(yscrollcommand=scroll.set)
+        text = tk.Text(frame, height=6, width=40, wrap="word", state="disabled")
+        text.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
         scroll.grid(row=0, column=1, sticky="ns")
-        buttons = ttk.Frame(frame)
-        buttons.grid(row=0, column=2, sticky="n", padx=6, pady=4)
-        ttk.Button(buttons, text="지우기", width=8, command=self.clear_log).pack()
+        # 시각은 흐리게, 본문은 그대로. 색은 뜻이 있을 때만 씁니다 — 전부
+        # 색칠하면 아무것도 눈에 띄지 않습니다.
+        text.tag_configure("stamp", foreground="#999999")
+        text.tag_configure("detail", foreground="#555555")
+        text.tag_configure("good", foreground="#1a7f37")
+        text.tag_configure("bad", foreground="#b3261e")
+        text.tag_configure("warn", foreground="#a15c00")
+        ttk.Button(frame, text="지우기", width=8, command=clear).grid(
+            row=0, column=2, sticky="n", padx=6, pady=4
+        )
+        return text
 
     # -- 설정 되살리기 -------------------------------------------------------
 
@@ -1053,17 +1091,41 @@ class BookerApp:
         """스레드 어디서 불러도 됩니다 — 실제 쓰기는 :meth:`_drain` 에서."""
         self.events.put(lambda: self._write_log(message))
 
-    def _write_log(self, message: str) -> None:
-        self.log_text.configure(state="normal")
-        self.log_text.insert("end", f"[{time.strftime('%H:%M:%S')}] {message}\n")
-        self.log_text.see("end")
-        self.log_text.configure(state="disabled")
+    def log_booking(self, message: str) -> None:
+        """자동예매 쪽 기록. :class:`AutoBooker` 가 이것을 부릅니다."""
+        self.events.put(lambda: self._write_booking(message))
+
+    def _write_log(self, message: str, level: str = "info") -> None:
+        self._append(self.log_text, message, level)
+
+    def _write_booking(self, message: str, level: str = "info") -> None:
+        self._append(self.booking_text, message, level)
+
+    def _append(self, widget: tk.Text, message: str, level: str = "info") -> None:
+        """기록 한 덩어리를 씁니다. 어떻게 그릴지는 :mod:`logfmt` 가 정합니다."""
+        entry = format_entry(message, stamp=time.strftime("%H:%M:%S"), level=level)
+        if entry is None:
+            return
+        widget.configure(state="normal")
+        if entry.blank_before and widget.index("end-1c") != "1.0":
+            widget.insert("end", "\n")
+        for text, tag in entry.pieces:
+            widget.insert("end", text, tag)
+        widget.see("end")
+        widget.configure(state="disabled")
 
     def clear_log(self) -> None:
         """기록을 비웁니다. 오래 돌리면 스크롤이 감당이 안 됩니다."""
-        self.log_text.configure(state="normal")
-        self.log_text.delete("1.0", "end")
-        self.log_text.configure(state="disabled")
+        self._clear(self.log_text)
+
+    def clear_booking_log(self) -> None:
+        self._clear(self.booking_text)
+
+    @staticmethod
+    def _clear(widget: tk.Text) -> None:
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        widget.configure(state="disabled")
 
     def _drain(self) -> None:
         while True:
@@ -1151,7 +1213,7 @@ class BookerApp:
         self.logged_in = True
         self.login_state.set("로그인됨")
         self.login_button.configure(state="normal")
-        self._write_log("로그인했습니다.")
+        self._write_log("로그인했습니다.", "good")
         self.settings = replace(self.settings, login_id=self.login_id.get().strip())
         settings_module.save(self.settings)
 
@@ -1159,7 +1221,7 @@ class BookerApp:
         self.logged_in = False
         self.login_state.set("로그인 실패")
         self.login_button.configure(state="normal")
-        self._write_log(f"로그인 실패: {message}")
+        self._write_log(f"로그인 실패: {message}", "bad")
         messagebox.showerror("로그인 실패", message)
 
     def relogin(self) -> None:
@@ -1176,6 +1238,7 @@ class BookerApp:
                 client = self._ensure_client()
                 stations = client.get_station_data().stations
             except KorailApiError as exc:
+                # 작업 스레드입니다. Tk 위젯은 큐를 거쳐서만 건드립니다.
                 self.log(f"역 목록을 불러오지 못했습니다: {exc}")
                 self.events.put(lambda: self.station_state.set("역 목록 없음"))
                 return
@@ -1346,7 +1409,7 @@ class BookerApp:
         self.search_button.configure(state="normal")
         self.results_status.set("조회에 실패했습니다. 기록을 확인하세요.")
         self.results_label.configure(foreground="#b42318")
-        self._write_log(f"조회 실패: {message}")
+        self._write_log(f"조회 실패: {message}", "bad")
         messagebox.showerror("조회 실패", message)
 
     def _show_journeys(self, results: list[Target]) -> None:
@@ -1374,7 +1437,7 @@ class BookerApp:
             f"(직통 {direct} · 환승 {transfer}){split}"
         )
         self.results_label.configure(foreground="#1a7f37" if journeys else "#b42318")
-        self._write_log(f"열차 {len(journeys)}편을 찾았습니다.")
+        self._write_log(f"열차 {len(journeys)}편을 찾았습니다.", "good")
         if not journeys:
             messagebox.showinfo(
                 "조회 결과 없음",
@@ -1481,7 +1544,7 @@ class BookerApp:
             reason = unbookable_reason(target.journey)
             if reason is not None:
                 detail = unbookable_detail(target.journey) or reason
-                self._write_log(f"담지 못했습니다 — {target.describe()}: {detail}")
+                self._write_log(f"담지 못했습니다 — {target.describe()}: {detail}", "warn")
                 messagebox.showwarning(
                     "예매 대상",
                     f"{target.journey.summary()}\n\n"
@@ -1570,7 +1633,7 @@ class BookerApp:
             self._ensure_client(),
             targets,
             options,
-            log=self.log,
+            log=self.log_booking,
             notify=self._make_notifier(),
             relogin=self.relogin if self._credentials else None,
         )
@@ -1579,8 +1642,9 @@ class BookerApp:
         self.stop_button.configure(state="normal")
         mode = "실제 예약" if options.live else "미리보기(아무것도 보내지 않음)"
         directions = len({target.direction for target in targets})
-        self.log(
-            f"자동예매 시작 — {len(targets)}편 감시, 방향 {directions}개, {mode}"
+        self._write_booking(
+            f"자동예매 시작 — {len(targets)}편 감시, 방향 {directions}개, {mode}",
+            "warn" if not options.live else "info",
         )
         self.session.start(on_done=lambda result: self.events.put(
             lambda: self._booking_done(result)
@@ -1614,25 +1678,33 @@ class BookerApp:
             chat_id=self.settings.telegram_chat_id,
         )
         if not config.enabled:
-            self.log("텔레그램 설정이 없어 알림은 보내지 않습니다.")
+            self._write_booking("텔레그램 설정이 없어 알림은 보내지 않습니다.", "warn")
             return None
 
         def send(message: str) -> None:
             with TelegramNotifier(config) as notifier:
                 if not notifier.send(message):
-                    self.log("텔레그램 전송에 실패했습니다.")
+                    self.log_booking("텔레그램 전송에 실패했습니다.")
 
         return send
 
     def on_stop(self) -> None:
         if self.session is not None:
             self.session.stop()
-            self.log("중지를 요청했습니다. 이번 조회가 끝나면 멈춥니다.")
+            self._write_booking("중지를 요청했습니다. 이번 조회가 끝나면 멈춥니다.")
 
     def _booking_done(self, result: BookingResult) -> None:
         self.start_button.configure(state="normal")
         self.stop_button.configure(state="disabled")
-        self._write_log(f"자동예매 종료 ({result.outcome.value}): {result.message}")
+        levels = {
+            Outcome.HELD: "good",
+            Outcome.FAILED: "bad",
+            Outcome.PREVIEW: "warn",
+        }
+        self._write_booking(
+            f"자동예매 종료 ({result.outcome.value}): {result.message}",
+            levels.get(result.outcome, "info"),
+        )
         if result.outcome is Outcome.HELD:
             messagebox.showinfo("예약됨", result.message)
         elif result.outcome is Outcome.FAILED:

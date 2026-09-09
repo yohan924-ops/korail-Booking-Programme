@@ -100,6 +100,17 @@ Tkinter. 리눅스에서 `ModuleNotFoundError: No module named 'tkinter'` 가 �
      `실제 예약을 만듭니다`), 미리보기로 끝나면 창을 띄워 다시 알립니다.
    - 이 체크는 **저장하지 않습니다.** 켤 때마다 사람이 켜야 하고, 켜고 시작하면
      확인 창이 한 번 더 뜹니다.
+   - **[잡으면 장바구니에도] 는 두 번 예약하는 것이 아닙니다.** 코레일의
+     장바구니 담기(`cart.addCartList`)가 보내는 값은 **이미 잡은 예약의
+     PNR 하나뿐**입니다(`hidPnrNo`). 좌석을 새로 잡지 않으므로 중복 예약이
+     되지 않습니다. 다만 **담아서 무엇이 좋아지는지는 이 저장소가 확인한 바가
+     없습니다** — 결제 기한이 늘거나 줄지 않는지도 확인한 기록이 없습니다.
+     확인된 것은 "담기면 장바구니 목록에서 읽힌다" 뿐입니다
+     (`docs/verification-record.md`, 2026-07-27). 기본값이 꺼짐인 이유입니다.
+6. **기록** — 왼쪽은 로그인·조회, 오른쪽은 자동예매입니다. 한 창에 섞으면
+   자동예매 회차 기록이 조회 기록을 밀어 올려 정작 볼 것이 흘러갑니다. 가운데
+   손잡이를 끌어 폭을 정하고, 각각 [지우기] 로 비웁니다. 열차 목록과 예매 대상
+   사이에도 같은 손잡이가 있습니다.
 
 ## 안전
 
@@ -165,6 +176,7 @@ Tkinter. 리눅스에서 `ModuleNotFoundError: No module named 'tkinter'` 가 �
 | `korail_booker/search.py` | 조회 → 여정 목록 | 클라이언트를 인자로 받음 |
 | `korail_booker/autobook.py` | 자동예매 루프 | 클라이언트를 인자로 받음 |
 | `korail_booker/notify.py` | 텔레그램 | `api.telegram.org` |
+| `korail_booker/logfmt.py` | 기록 한 줄을 어떻게 그릴지(순수 계산) | 없음 |
 | `korail_booker/settings.py` | 설정 저장 | 없음 |
 | `korail_booker/session.py` | 클라이언트 생성·로그인·페이싱 | KORAIL |
 | `korail_booker/ui.py` | Tkinter 화면 | 없음(작업 스레드에 맡김) |
