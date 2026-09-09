@@ -122,6 +122,45 @@ def format_duration(minutes: int | None) -> str:
 _FIELD_IN_MESSAGE = re.compile(r"train field ([a-z_]+) ")
 
 
+#: 환승 대기가 이보다 짧으면 화면이 빨갛게 경고합니다(분).
+#:
+#: **코레일의 최소 환승 허용 시간이 몇 분인지는 확인하지 못했습니다.** 서버는
+#: 너무 촉박한 조합의 예약을 ``ERR911193 환승최소허용시간 미달`` 로 거절합니다
+#: — 실제로 받은 응답입니다. 그런데 그 기준값을 알려 주는 필드도, 이 저장소가
+#: 확인한 문서도 없습니다. 그래서 10 은 **코레일의 기준이 아니라 화면이 눈에
+#: 띄게 해 주는 선**입니다. 이 선을 넘겼다고 예약이 된다는 뜻이 아니고,
+#: 밑돌았다고 반드시 거절된다는 뜻도 아닙니다.
+TIGHT_TRANSFER_MINUTES = 10
+
+
+def is_tight_transfer(journey: Journey) -> bool:
+    """환승 대기가 :data:`TIGHT_TRANSFER_MINUTES` 미만인가.
+
+    직통이거나 대기 시간을 계산할 수 없으면 거짓입니다 — 모르는 것을 경고로
+    바꾸지 않습니다.
+    """
+    minutes = journey.transfer_minutes
+    return minutes is not None and minutes < TIGHT_TRANSFER_MINUTES
+
+
+def books_as_one_reservation(journey: Journey) -> bool:
+    """이 여정을 **한 건(PNR 하나)** 으로 살 수 있는가.
+
+    직통은 당연히 한 건입니다. 서버 추천 환승도 한 건입니다 — 코레일이 짝지어
+    준 조합이고, ``reserve_transfer`` 가 두 구간을 한 요청으로 보냅니다.
+
+    **직접 조합은 아닙니다.** 서버가 검증한 조합이 아니라, 환승 예약으로
+    보내면 서버가 ``ERR911193 환승최소허용시간 미달`` 로 거절하는 일이
+    있습니다(실제로 받았습니다). 그런 조합은 구간마다 따로 삽니다 — 각 구간은
+    그냥 직통 열차 한 편이라 보통의 예약 길이고, 서버가 환승 조합으로 심사할
+    일이 없습니다.
+
+    **따로 사면 예약도 따로입니다** — PNR 이 둘, 결제도 둘이고, 한쪽만 잡히고
+    다른 쪽을 놓치는 일이 생길 수 있습니다. 그 위험은 화면이 말해 줍니다.
+    """
+    return not journey.is_transfer or journey.source is not JourneySource.CUSTOM_TRANSFER
+
+
 def first_leg_key(journey: Journey) -> tuple[str, str, str]:
     """1구간을 알아보는 값 — 열차 번호와 출발·도착 시각.
 

@@ -41,7 +41,12 @@ from korail_mobile_api import (
 )
 from korail_mobile_api.constants import KORAIL_STANDBY_WAIT_FLAG
 
-from .journeys import Journey, SeatPreference, format_duration
+from .journeys import (
+    Journey,
+    SeatPreference,
+    books_as_one_reservation,
+    format_duration,
+)
 from .search import SearchRequest, search_journeys
 
 
@@ -195,32 +200,104 @@ def reserve_once(
     passengers: KorailPassengerCounts,
     seat_class: KorailSeatClass,
     live: bool = True,
-) -> MutationPreview | ReservationHoldResponse:
+) -> list[MutationPreview | ReservationHoldResponse]:
     """지금 자리가 있는 여정 하나를 **한 번만** 잡습니다.
 
     자동예매를 걸지 않고 바로 누르는 [예약] 이 이것을 부릅니다. 되풀이하지
     않는다는 점 말고는 :class:`AutoBooker` 의 예약과 같은 길입니다 — 같은
-    consent(``reserve`` 하나), 같은 직통/환승 갈래, 같은 즉시예약 job.
+    consent(``reserve`` 하나), 같은 갈래, 같은 즉시예약 job.
+
+    **돌려주는 것이 목록인 이유**는 직접 조합 환승 때문입니다. 서버가 검증한
+    조합이 아니면 한 건으로 사지 않고 구간마다 따로 삽니다
+    (:func:`~korail_booker.journeys.books_as_one_reservation`). 그때는 예약이
+    둘이고, 부르는 쪽이 둘 다 알아야 합니다. 그 밖에는 늘 한 건입니다.
 
     실패는 그대로 올려 보냅니다. 자동예매는 "놓쳤다" 를 적고 계속 지켜보는
     것이 맞지만, 사람이 단추를 눌렀을 때는 왜 안 됐는지 그 자리에서 말해
-    주어야 합니다.
+    주어야 합니다. **다만 구간을 따로 살 때 뒤 구간에서 실패하면 앞 구간은
+    이미 잡혀 있습니다** — 그 사실을 잃지 않게
+    :class:`PartialTransferError` 에 담아 올립니다.
     """
     consent = reserve_consent(live=live)
-    if journey.is_transfer:
-        return client.reserve_transfer(
-            journey.legs,
+    if not books_as_one_reservation(journey):
+        return _reserve_each_leg(
+            client,
+            journey,
             consent=consent,
             passengers=passengers,
-            seat_classes=[seat_class] * len(journey.legs),
+            seat_class=seat_class,
         )
-    return client.reserve(
-        journey.first,
-        consent=consent,
-        passengers=passengers,
-        seat_class=seat_class,
-        job_type=KorailReservationJobType.IMMEDIATE,
-    )
+    if journey.is_transfer:
+        return [
+            client.reserve_transfer(
+                journey.legs,
+                consent=consent,
+                passengers=passengers,
+                seat_classes=[seat_class] * len(journey.legs),
+            )
+        ]
+    return [
+        client.reserve(
+            journey.first,
+            consent=consent,
+            passengers=passengers,
+            seat_class=seat_class,
+            job_type=KorailReservationJobType.IMMEDIATE,
+        )
+    ]
+
+
+class PartialTransferError(RuntimeError):
+    """구간을 따로 사다가 뒤 구간에서 막혔습니다. **앞 구간은 잡혀 있습니다.**
+
+    그냥 예외를 올리면 앞 구간이 잡혔다는 사실이 사라지고, 사람은 아무것도
+    안 됐다고 생각한 채 결제 기한을 넘깁니다. 그래서 잡힌 것을 함께 싣습니다.
+    """
+
+    def __init__(
+        self,
+        held: Sequence[MutationPreview | ReservationHoldResponse],
+        leg_number: int,
+        reason: str,
+    ) -> None:
+        self.held = tuple(held)
+        self.leg_number = leg_number
+        self.reason = reason
+        super().__init__(
+            f"{leg_number}구간에서 막혔습니다({reason}). "
+            f"앞 {len(self.held)}개 구간은 이미 잡혀 있습니다 — "
+            "코레일 앱에서 확인해 취소하거나 결제하세요."
+        )
+
+
+def _reserve_each_leg(
+    client: KorailClient,
+    journey: Journey,
+    *,
+    consent: MutationConsent,
+    passengers: KorailPassengerCounts,
+    seat_class: KorailSeatClass,
+) -> list[MutationPreview | ReservationHoldResponse]:
+    """구간마다 따로 예약합니다. 각 구간은 그냥 직통 열차 한 편입니다."""
+    done: list[MutationPreview | ReservationHoldResponse] = []
+    for number, leg in enumerate(journey.legs, start=1):
+        try:
+            done.append(
+                client.reserve(
+                    leg,
+                    consent=consent,
+                    passengers=passengers,
+                    seat_class=seat_class,
+                    job_type=KorailReservationJobType.IMMEDIATE,
+                )
+            )
+        except Exception as exc:
+            if not done:
+                raise
+            raise PartialTransferError(
+                done, number, f"{type(exc).__name__}: {exc}"
+            ) from exc
+    return done
 
 
 class AutoBooker:
@@ -250,9 +327,15 @@ class AutoBooker:
         #: 화면이 목록을 만들려면 그 짝이 필요합니다.
         self._on_hold = on_hold
         self._relogins = 0
-        #: 방향마다 하나씩만 잡습니다. 잡힌 방향은 여기 들어가고 더는 보지
+        #: 방향마다 한 여정만 잡습니다. 잡힌 방향은 여기 들어가고 더는 보지
         #: 않습니다 — 같은 방향을 두 번 잡으면 중복 예약입니다.
-        self._settled: dict[tuple[str, str, str], ReservationHoldResponse | None] = {}
+        #:
+        #: 값이 **묶음**인 것은 직접 조합 환승 때문입니다. 서버가 검증하지 않은
+        #: 조합은 구간마다 따로 사므로 한 방향에 예약이 둘이 됩니다. 빈 묶음은
+        #: "미리보기라 아무것도 보내지 않았다" 는 뜻입니다.
+        self._settled: dict[
+            tuple[str, str, str], tuple[ReservationHoldResponse, ...]
+        ] = {}
         #: 예약 폼 자체가 만들어지지 않는 대상. 되풀이해도 달라지지 않으므로
         #: 한 번 걸리면 빼고 갑니다(서버가 그 행에 필요한 값을 안 준 경우).
         self._unusable: set[tuple[tuple[str, str, str, str], ...]] = set()
@@ -422,7 +505,7 @@ class AutoBooker:
             remaining = len(self.directions) - len(self._settled)
             self.say(f"    남은 방향 {remaining}개를 계속 지켜봅니다")
             return None
-        holds = tuple(hold for hold in self._settled.values() if hold is not None)
+        holds = tuple(hold for group in self._settled.values() for hold in group)
         if not holds:
             return BookingResult(
                 Outcome.PREVIEW,
@@ -456,24 +539,31 @@ class AutoBooker:
         seat_class: KorailSeatClass,
     ) -> BookingResult | None:
         label = "특실" if seat_class is KorailSeatClass.SPECIAL else "일반실"
-        self.say(f"    자리가 열렸습니다 — {target.describe()} {label} 예약 시도")
-        consent = reserve_consent(live=self.options.live)
+        # 다시 조회한 여정에는 **이번 조회의** 출처가 붙어 있습니다. 사는 방법은
+        # 사람이 담을 때 본 것을 따릅니다 — 확인 창이 "구간마다 따로 삽니다" 라고
+        # 말해 놓고 한 건으로 사면 약속이 깨집니다. 구간의 값은 방금 받은 것을
+        # 그대로 씁니다(좌석 코드가 바뀌어 있을 수 있습니다).
+        journey = replace(journey, source=target.journey.source)
+        one_go = books_as_one_reservation(journey)
+        how = "" if one_go else " (구간마다 따로)"
+        self.say(
+            f"    자리가 열렸습니다 — {target.describe()} {label} 예약 시도{how}"
+        )
+        if not one_go:
+            self.say(
+                "    서버가 검증한 환승 조합이 아니라 한 건으로 사지 않습니다 — "
+                "구간마다 예약이 따로 생기고 결제도 따로입니다."
+            )
         try:
-            if journey.is_transfer:
-                result = self.client.reserve_transfer(
-                    journey.legs,
-                    consent=consent,
-                    passengers=target.request.passengers,
-                    seat_classes=[seat_class] * len(journey.legs),
-                )
-            else:
-                result = self.client.reserve(
-                    journey.first,
-                    consent=consent,
-                    passengers=target.request.passengers,
-                    seat_class=seat_class,
-                    job_type=KorailReservationJobType.IMMEDIATE,
-                )
+            results = reserve_once(
+                self.client,
+                journey,
+                passengers=target.request.passengers,
+                seat_class=seat_class,
+                live=self.options.live,
+            )
+        except PartialTransferError as exc:
+            return self._settle_partial(target, journey, exc)
         except (KorailSeatUnavailableError, KorailSoldOutError) as exc:
             self.say(f"    놓쳤습니다({exc.code}). 계속 지켜봅니다")
             return None
@@ -484,7 +574,47 @@ class AutoBooker:
             # 서버가 이 행에 예약에 필요한 값을 주지 않았습니다. 자리가 열려도
             # 폼이 만들어지지 않으므로 되풀이할 이유가 없습니다.
             return self._drop_unusable(target, str(exc))
-        return self._settle(result, target, journey, kind="좌석 예약")
+        except KorailAppError as exc:
+            # 서버가 이 조합 자체를 거절했습니다(예: ERR911193 환승최소허용시간
+            # 미달). 되풀이해도 답이 달라지지 않으므로 감시에서 뺍니다.
+            return self._drop_unusable(target, f"{exc.code}: {exc.message}")
+        return self._settle(
+            results,
+            target,
+            journey,
+            kind="좌석 예약" if one_go else "좌석 예약(구간별)",
+        )
+
+    def _settle_partial(
+        self,
+        target: Target,
+        journey: Journey,
+        exc: PartialTransferError,
+    ) -> BookingResult | None:
+        """앞 구간만 잡히고 뒤 구간에서 막혔습니다.
+
+        **다시 시도하지 않습니다.** 다음 회차에 또 돌면 이미 잡아 둔 앞 구간을
+        한 번 더 잡습니다 — 그것이 중복 예약입니다. 그래서 이 방향은 여기서
+        끝내고, 무슨 일이 있었는지 크게 알립니다. 앞 구간을 취소할지 다른 뒤
+        구간을 잡을지는 사람이 코레일 앱에서 정할 일입니다 — 이 프로그램은
+        취소 권한을 아예 열지 않습니다.
+        """
+        held = tuple(h for h in exc.held if isinstance(h, ReservationHoldResponse))
+        self._settled[target.direction] = held
+        for hold in held:
+            if self._on_hold is not None:
+                self._on_hold(target.label, journey.summary(), "좌석 예약(구간별)", hold)
+        pnrs = ", ".join((hold.pnr_no or "?") for hold in held) or "(없음)"
+        self.announce(
+            "⚠️ 환승 일부만 잡혔습니다\n"
+            f"{target.describe()}\n"
+            f"잡힌 구간의 PNR {pnrs}\n"
+            f"{exc.leg_number}구간 실패: {exc.reason}\n"
+            "서버가 검증한 조합이 아니라 구간마다 따로 샀기 때문에 한쪽만 "
+            "남았습니다. 코레일 앱에서 잡힌 구간을 결제하거나 취소하세요 — "
+            "이 프로그램은 취소를 하지 않습니다."
+        )
+        return self._finish("좌석 예약(구간별)")
 
     def _drop_unusable(self, target: Target, reason: str) -> BookingResult | None:
         self._unusable.add(target.journey.key())
@@ -519,7 +649,7 @@ class AutoBooker:
         except KorailProtocolError as exc:
             self.say(f"    예약대기 조건이 아닙니다: {exc}")
             return None
-        settled = self._settle(result, target, journey, kind="예약대기")
+        settled = self._settle([result], target, journey, kind="예약대기")
         if isinstance(result, ReservationHoldResponse):
             self._confirm_standby(result)
         return settled
@@ -544,34 +674,53 @@ class AutoBooker:
 
     def _settle(
         self,
-        result: MutationPreview | BaseKorailResponse,
+        results: Sequence[MutationPreview | BaseKorailResponse],
         target: Target,
         journey: Journey,
         *,
         kind: str,
     ) -> BookingResult | None:
-        """한 방향이 끝났습니다. 남은 방향이 있으면 계속 지켜봅니다."""
-        if isinstance(result, MutationPreview):
-            self._settled[target.direction] = None
+        """한 방향이 끝났습니다. 남은 방향이 있으면 계속 지켜봅니다.
+
+        ``results`` 가 여럿인 것은 구간마다 따로 산 경우입니다 — 그때는 예약이
+        구간 수만큼 생기고, 결제 기한도 저마다 따로입니다.
+        """
+        previews = [item for item in results if isinstance(item, MutationPreview)]
+        if previews:
+            self._settled[target.direction] = ()
+            routes = ", ".join(preview.route for preview in previews)
             self.say(
                 f"{kind} 가능 — 하지만 아무것도 보내지 않았습니다(미리보기).\n"
-                f"{target.describe()}\n보낼 곳: {result.route}"
+                f"{target.describe()}\n보낼 곳: {routes}"
             )
             return self._finish(kind)
-        hold = result if isinstance(result, ReservationHoldResponse) else None
-        pnr = (hold.pnr_no if hold else None) or "(응답에 PNR 이 없습니다)"
-        self._settled[target.direction] = hold
-        if hold is not None and self._on_hold is not None:
-            self._on_hold(target.label, journey.summary(), kind, hold)
-        self.announce(
-            f"🚆 {kind} 성공 (아직 결제 전)\n"
-            f"{target.describe()}\n"
-            f"PNR {pnr}\n"
-            f"금액 {fare_text(hold)}\n"
-            f"결제 기한 {payment_deadline_text(hold)}\n"
-            f"소요 {format_duration(journey.total_minutes)}\n"
-            "결제는 코레일 앱에서 기한 안에 하세요."
+        holds = tuple(
+            item for item in results if isinstance(item, ReservationHoldResponse)
         )
+        self._settled[target.direction] = holds
+        if not holds:
+            self.say(f"{kind} 응답에 예약이 없습니다 — 코레일 앱에서 확인하세요")
+            return self._finish(kind)
+        split = len(holds) > 1
+        for number, hold in enumerate(holds, start=1):
+            if self._on_hold is not None:
+                self._on_hold(target.label, journey.summary(), kind, hold)
+            where = f" [{number}구간]" if split else ""
+            self.announce(
+                f"🚆 {kind} 성공{where} (아직 결제 전)\n"
+                f"{target.describe()}\n"
+                f"PNR {hold.pnr_no or '(응답에 PNR 이 없습니다)'}\n"
+                f"금액 {fare_text(hold)}\n"
+                f"결제 기한 {payment_deadline_text(hold)}\n"
+                f"소요 {format_duration(journey.total_minutes)}\n"
+                + (
+                    "구간마다 따로 산 예약입니다 — 예약도 결제도 구간 수만큼 "
+                    "따로입니다.\n"
+                    if split
+                    else ""
+                )
+                + "결제는 코레일 앱에서 기한 안에 하세요."
+            )
         finished = self._finish(kind)
         if finished is not None:
             return replace(finished, journey=journey)

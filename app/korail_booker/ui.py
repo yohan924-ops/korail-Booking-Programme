@@ -40,6 +40,7 @@ from .autobook import (
     BookingResult,
     BookingSession,
     Outcome,
+    PartialTransferError,
     Target,
     fare_text,
     payment_deadline_text,
@@ -47,12 +48,15 @@ from .autobook import (
 )
 from .holds import Held, parse_deadline, remaining_text
 from .journeys import (
+    TIGHT_TRANSFER_MINUTES,
     Journey,
     JourneySource,
     SeatPreference,
+    books_as_one_reservation,
     format_clock,
     format_duration,
     group_by_first_leg,
+    is_tight_transfer,
     normalize_clock,
     one_line,
     unbookable_detail,
@@ -146,6 +150,23 @@ TARGET_LAYOUT = (
     ("남은 감시", 110, "center"),
 )
 TARGET_COLUMNS = tuple(name for name, _width, _anchor in TARGET_LAYOUT)
+#: 촉박한 환승 앞에 붙는 표. 색만으로는 매진(빨강)과 구별되지 않습니다.
+TIGHT_MARK = "\u26a0 "
+
+
+def _transfer_text(station: str, journey: Journey, *, suffix: str = "") -> str:
+    """환승 대기 칸의 글. 촉박하면 표를 답니다.
+
+    ttk 의 표는 **칸 하나만 따로 물들일 수 없습니다** — 색은 줄 단위입니다.
+    그래서 색은 줄에 걸고(``tight`` 태그), 어느 칸 때문인지는 이 표가
+    말해 줍니다.
+    """
+    body = f"{station} {format_duration(journey.transfer_minutes)}{suffix}"
+    if not is_tight_transfer(journey):
+        return body
+    return f"{TIGHT_MARK}{body} — 촉박"
+
+
 #: 로그인 상태 글자색. 가장 자주 확인하는 것이라 색으로 먼저 말합니다.
 LOGIN_OK_COLOUR = "#1a7f37"
 LOGIN_BAD_COLOUR = "#b3261e"
@@ -493,7 +514,6 @@ class BookerApp:
         self._build_query(body)
         self._build_results(body)
         self._build_targets(body)
-        self._build_booking(body)
         self._build_holds(body)
         self._build_log(body)
         # 묶음을 다 붙인 뒤라야 최소 높이를 잴 수 있고, 그 합을 알아야 스크롤
@@ -913,14 +933,29 @@ class BookerApp:
             adder, text="빼기", width=5, command=self.remove_transfer_station
         )
         self.transfer_remove_button.pack(side="left")
+        # 목록 전체에 걸리는 단추는 아랫줄로 뗍니다. 한 줄에 다섯을 늘어놓으면
+        # 이 칸이 옆으로 부풀어 조회 묶음이 오른쪽으로 삐져나갑니다.
+        listwide = ttk.Frame(right)
+        listwide.pack(anchor="w", pady=(4, 0))
         self.transfer_load_button = ttk.Button(
-            adder, text="구간 후보 갱신", command=self.on_load_transfer_stations
+            listwide, text="구간 후보 갱신", width=14,
+            command=self.on_load_transfer_stations
         )
-        self.transfer_load_button.pack(side="left", padx=4)
+        self.transfer_load_button.pack(side="left")
+        # 갱신이 더는 지우지 않으므로, 처음부터 다시 하려면 지우는 단추가
+        # 따로 있어야 합니다.
+        self.transfer_clear_button = ttk.Button(
+            listwide, text="목록 비우기", width=12,
+            command=self.clear_transfer_stations
+        )
+        self.transfer_clear_button.pack(side="left", padx=(4, 0))
         ttk.Label(
             right,
-            text="코레일이 이 구간에 답한 역입니다(qry.chtnStn.do). "
-            "직접 지정 모드에서는 없는 역도 [추가] 됩니다.",
+            text="코레일이 이 구간에 답한 역입니다(qry.chtnStn.do) — 목록에서 "
+            "(검증) 이 붙습니다. [구간 후보 갱신] 은 서버 후보를 목록에 "
+            "더할 뿐, 있던 역을 지우지 않습니다. 지우려면 [빼기] 나 "
+            "[목록 비우기]. 직접 지정 모드에서는 서버 후보에 없는 역도 "
+            "[추가] 됩니다.",
             foreground="#666666",
             wraplength=260,
             justify="left",
@@ -1070,6 +1105,9 @@ class BookerApp:
         tree.tag_configure("open", foreground="#1a7f37")
         tree.tag_configure("soldout", foreground="#b42318")
         tree.tag_configure("unbookable", foreground="#8a8a8a")
+        # 환승 대기가 짧으면 빨갛게. 서버가 그런 조합을 거절하는 일이 있고
+        # (ERR911193), 실제로 갈아타지 못할 수도 있습니다.
+        tree.tag_configure("tight", foreground="#d1242f")
         # 묶음의 부모 줄은 여정이 아닙니다 — 1구간을 알려 주는 머리글입니다.
         tree.tag_configure("group", foreground="#1f6feb")
         # 두 번 누르면 담깁니다. 고르고 단추를 찾는 것보다 빠릅니다.
@@ -1140,7 +1178,16 @@ class BookerApp:
             frame.columnconfigure(1, weight=0)
 
     def _build_targets(self, parent: tk.PanedWindow) -> None:
-        frame = ttk.LabelFrame(parent, text="4. 예매 대상 (여기 담긴 것만 노립니다)")
+        """담아 둔 열차와, 그것을 노리는 조건을 **한 묶음**에 둡니다.
+
+        예전에는 목록이 4번, 조건과 [시작] 이 5번으로 나뉘어 있었습니다. 그런데
+        그 둘은 늘 함께 씁니다 — 담고, 주기를 정하고, 시작합니다. 사이에 묶음
+        머리가 하나 더 있으면 그 몸짓이 두 번 끊기고, 세로 자리도 그만큼
+        먹습니다. 합치면 표에 줄 자리가 그만큼 늘어납니다.
+        """
+        frame = ttk.LabelFrame(
+            parent, text="4. 예매 대상과 자동예매 (여기 담긴 것만 노립니다)"
+        )
         # 재서 씁니다. 96 으로 적어 뒀다가 [담기]·[빼기]·[비우기] 가 잘렸습니다.
         self._add_pane(parent, frame, stretch="always")
         frame.columnconfigure(0, weight=1)
@@ -1172,6 +1219,7 @@ class BookerApp:
         # 여러 줄이 섞였을 때 한눈에 안 들어옵니다.
         self.target_list.tag_configure("watching", foreground="#1a7f37")
         self.target_list.tag_configure("idle", foreground="#666666")
+        self.target_list.tag_configure("tight", foreground="#d1242f")
         buttons = ttk.Frame(frame)
         buttons.grid(row=0, column=2, sticky="n", padx=6, pady=4)
         # 예약은 **담은 것** 중에서 합니다. 조회 결과에 두면 담기 전 줄까지
@@ -1191,15 +1239,7 @@ class BookerApp:
         ttk.Button(
             buttons, text="조건 바꿔 재시작", width=14, command=self.restart_selected
         ).pack(pady=(10, 0))
-        ttk.Label(
-            frame,
-            text="위 표에서 고르고 [담기](줄을 두 번 눌러도 담깁니다). 여기서 "
-            "두 번 누르면 빠집니다. 왕복이면 가는 편·오는 편을 각각 담으세요 — "
-            "방향마다 한 건씩 잡고 멈춥니다.\n"
-            "조회 주기·감시 시간은 시작할 때 읽습니다. 도는 중에 바꾸려면 "
-            "그 줄을 고르고 [조건 바꿔 재시작].",
-            foreground="#666666",
-        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=4, pady=(0, 6))
+        self._build_booking_controls(frame)
 
     def clear_results(self) -> None:
         """열차 표를 비웁니다. **예매 대상과 감시는 건드리지 않습니다.**
@@ -1286,7 +1326,8 @@ class BookerApp:
         if not messagebox.askyesno(
             "바로 예약",
             f"아래 {len(plan)}편을 지금 잡습니다 (결제 전 홀드).\n\n"
-            f"{lines}{skipped}\n\n"
+            f"{lines}{skipped}\n"
+            f"{self._split_warning([target for target, _seat in plan])}\n"
             "결제는 하지 않습니다 — 잡은 뒤 기한 안에 코레일 앱에서 결제하거나 "
             "취소해야 합니다.\n\n계속할까요?",
         ):
@@ -1306,6 +1347,13 @@ class BookerApp:
                         passengers=target.request.passengers,
                         seat_class=seat_class,
                     )
+                except PartialTransferError as exc:
+                    # 앞 구간은 이미 잡혔습니다. 그 사실을 잃으면 사람이
+                    # 아무것도 안 됐다고 믿은 채 기한을 넘깁니다.
+                    self.events.put(
+                        lambda t=target, e=exc: self._reserve_now_partial(t, e)
+                    )
+                    continue
                 except KorailApiError as exc:
                     # 하나가 실패해도 나머지는 계속합니다. 여럿을 골랐다면
                     # 그중 되는 것은 잡히는 편이 낫습니다.
@@ -1326,29 +1374,95 @@ class BookerApp:
     def _reserve_now_finished(self) -> None:
         self.reserve_now_button.configure(state="normal")
 
+    def _split_warning(self, targets: Sequence[Target]) -> str:
+        """구간마다 따로 사는 것이 섞여 있으면 그렇다고 말합니다.
+
+        예약이 하나가 아니라 둘이 되고, 한쪽만 잡힐 수도 있습니다. 그것을
+        모르고 누르면 안 됩니다.
+        """
+        split = [t for t in targets if not books_as_one_reservation(t.journey)]
+        if not split:
+            return ""
+        names = "\n".join(f"· {t.describe()}" for t in split)
+        return (
+            f"\n[구간별 예약] 아래 {len(split)}편은 코레일이 검증한 환승 조합이 "
+            "아니라, 한 건이 아니라 구간마다 따로 삽니다.\n"
+            f"{names}\n"
+            "· 예약도 결제도 구간 수만큼 따로 생깁니다.\n"
+            "· 앞 구간만 잡히고 뒤 구간을 놓칠 수 있습니다. 그러면 잡힌 것을 "
+            "코레일 앱에서 취소하거나 결제해야 합니다 — 이 프로그램은 취소를 "
+            "하지 않습니다.\n"
+        )
+
     def _reserve_now_done(
         self,
         target: Target,
-        result: MutationPreview | ReservationHoldResponse,
+        results: Sequence[MutationPreview | ReservationHoldResponse],
     ) -> None:
-        if not isinstance(result, ReservationHoldResponse):
+        """잡힌 것을 목록에 넣고 알립니다. **여럿일 수 있습니다.**
+
+        직접 조합 환승은 구간마다 따로 사므로 예약이 구간 수만큼 나옵니다.
+        """
+        holds = [item for item in results if isinstance(item, ReservationHoldResponse)]
+        if not holds:
             self._write_log("바로 예약: 미리보기라 아무것도 보내지 않았습니다.", "warn")
             return
-        held = self._held_from(
-            target.label, target.journey.summary(), "좌석 예약", result
-        )
-        self.remember_hold(held)
-        self._write_log(
-            f"예약했습니다 — {held.summary}\nPNR {held.pnr}\n"
-            f"운임 {held.fare}\n결제 기한 {held.deadline_text}",
-            "good",
+        split = len(holds) > 1
+        lines = []
+        for number, result in enumerate(holds, start=1):
+            kind = f"좌석 예약({number}구간)" if split else "좌석 예약"
+            held = self._held_from(
+                target.label, target.journey.summary(), kind, result
+            )
+            self.remember_hold(held)
+            self._write_log(
+                f"예약했습니다 — {kind} {held.summary}\nPNR {held.pnr}\n"
+                f"운임 {held.fare}\n결제 기한 {held.deadline_text}",
+                "good",
+            )
+            lines.append(
+                f"{kind}\nPNR {held.pnr}\n운임 {held.fare}\n"
+                f"결제 기한 {held.deadline_text}"
+            )
+        note = (
+            "\n\n구간마다 따로 산 예약입니다 — 결제도 따로 하셔야 합니다.\n"
+            if split
+            else "\n\n"
         )
         messagebox.showinfo(
             "예약했습니다 (아직 결제 전)",
-            f"{held.summary}\n\nPNR {held.pnr}\n운임 {held.fare}\n"
-            f"결제 기한 {held.deadline_text}\n\n"
-            "6번 '잡은 예약' 에 남은 시간이 셉니다. 기한 안에 코레일 앱에서 "
+            f"{target.journey.summary()}\n\n"
+            + "\n\n".join(lines)
+            + note
+            + "5번 '잡은 예약' 에 남은 시간이 셉니다. 기한 안에 코레일 앱에서 "
             "결제하세요.",
+        )
+
+    def _reserve_now_partial(self, target: Target, exc: PartialTransferError) -> None:
+        """앞 구간만 잡히고 뒤 구간에서 막혔습니다. 크게 알립니다."""
+        holds = [h for h in exc.held if isinstance(h, ReservationHoldResponse)]
+        for number, hold in enumerate(holds, start=1):
+            held = self._held_from(
+                target.label,
+                target.journey.summary(),
+                f"좌석 예약({number}구간)",
+                hold,
+            )
+            self.remember_hold(held)
+        pnrs = ", ".join(h.pnr_no or "?" for h in holds) or "(없음)"
+        self._write_log(
+            f"환승 일부만 잡혔습니다 — {target.describe()}\n"
+            f"잡힌 PNR {pnrs}\n{exc.leg_number}구간 실패: {exc.reason}",
+            "bad",
+        )
+        messagebox.showwarning(
+            "환승 일부만 잡혔습니다",
+            f"{target.journey.summary()}\n\n"
+            f"잡힌 구간의 PNR: {pnrs}\n"
+            f"{exc.leg_number}구간 실패: {exc.reason}\n\n"
+            "코레일이 검증한 환승 조합이 아니라 구간마다 따로 샀기 때문에 "
+            "한쪽만 남았습니다. 코레일 앱에서 잡힌 구간을 결제하거나 "
+            "취소하세요 — 이 프로그램은 취소를 하지 않습니다.",
         )
 
 
@@ -1386,7 +1500,7 @@ class BookerApp:
         한 줄로만 알리면 그 줄은 곧 위로 밀려 올라가고, 그러면 아무도 보지
         않습니다.
         """
-        frame = ttk.LabelFrame(parent, text="6. 잡은 예약 (기한 안에 코레일 앱에서 결제하세요)")
+        frame = ttk.LabelFrame(parent, text="5. 잡은 예약 (기한 안에 코레일 앱에서 결제하세요)")
         self._add_pane(parent, frame, stretch="always")
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
@@ -1481,15 +1595,21 @@ class BookerApp:
         self._hold_items[len(self.holds) - 1] = item
         self.hold_tree.see(item)
 
-    def _build_booking(self, parent: tk.PanedWindow) -> None:
-        frame = ttk.LabelFrame(parent, text="5. 자동예매 (만석이면 취소표를 계속 노립니다)")
-        self._add_pane(parent, frame, stretch="never")
+    def _build_booking_controls(self, frame: ttk.LabelFrame) -> None:
+        """자동예매 조건과 [시작]. 예매 대상 표 **바로 아래**에 붙습니다.
+
+        따로 묶음을 두지 않습니다 — 담은 것과 그것을 노리는 조건은 한 가지
+        일입니다.
+        """
         self.poll_interval = tk.StringVar(value=f"{DEFAULT_POLL_INTERVAL_S:g}")
         self.watch_minutes = tk.StringVar(value="60")
         self.allow_standby = tk.BooleanVar(value=False)
         self.notify_enabled = tk.BooleanVar(value=True)
+        ttk.Separator(frame, orient="horizontal").grid(
+            row=1, column=0, columnspan=3, sticky="ew", padx=4, pady=(2, 0)
+        )
         row = ttk.Frame(frame)
-        row.grid(row=0, column=0, sticky="w", padx=4, pady=6)
+        row.grid(row=2, column=0, columnspan=3, sticky="w", padx=4, pady=6)
         ttk.Label(row, text=f"조회 주기({POLL_HINT})").pack(side="left")
         ttk.Entry(row, textvariable=self.poll_interval, width=5).pack(side="left", padx=2)
         ttk.Label(row, text="초    감시 시간").pack(side="left")
@@ -1502,7 +1622,7 @@ class BookerApp:
             side="left"
         )
         row2 = ttk.Frame(frame)
-        row2.grid(row=1, column=0, sticky="w", padx=4, pady=(0, 6))
+        row2.grid(row=3, column=0, columnspan=3, sticky="w", padx=4, pady=(0, 6))
         ttk.Button(row2, text="텔레그램 설정", command=self.on_telegram_settings).pack(
             side="left", padx=12
         )
@@ -1531,9 +1651,14 @@ class BookerApp:
         ).pack(side="left", padx=12)
         ttk.Label(
             frame,
-            text="결제는 하지 않습니다. 잡은 뒤 코레일 앱에서 기한 안에 결제하세요.",
+            text="위 표(3.)에서 고르고 [담기](줄을 두 번 눌러도 담깁니다). 이 표에서 "
+            "두 번 누르면 빠집니다. 왕복이면 가는 편·오는 편을 각각 담으세요 — "
+            "방향마다 한 건씩 잡고 멈춥니다.\n"
+            "조회 주기·감시 시간은 시작할 때 읽습니다. 도는 중에 바꾸려면 그 줄을 "
+            "고르고 [조건 바꿔 재시작]. 결제는 하지 않습니다 — 잡은 뒤 코레일 "
+            "앱에서 기한 안에 결제하세요.",
             foreground="#666666",
-        ).grid(row=2, column=0, sticky="w", padx=4, pady=(0, 6))
+        ).grid(row=4, column=0, columnspan=3, sticky="w", padx=4, pady=(0, 6))
 
     def _build_log(self, parent: tk.PanedWindow) -> None:
         """기록을 둘로 나눕니다 — 조회 쪽과 자동예매 쪽.
@@ -1701,6 +1826,7 @@ class BookerApp:
             self.min_transfer_entry,
             self.max_transfer_entry,
             self.transfer_load_button,
+            self.transfer_clear_button,
         ):
             widget.configure(state=state)
         # 역을 손으로 넣는 것은 직접 지정 모드에서만 뜻이 있습니다 — 서버 추천
@@ -1730,22 +1856,26 @@ class BookerApp:
         return tuple(name for name in picked if name)
 
     def _server_candidates_loaded(self, route: tuple[str, str], names: list[str]) -> None:
-        """조회하면서 받아 온 서버 후보. **직접 지정 목록을 덮지 않습니다.**
+        """조회하면서 받아 온 서버 후보. **사람이 만든 목록을 덮지 않습니다.**
 
-        직접 지정은 사람이 고른 역이 곧 조회 대상입니다. 목록을 비우고 원하는
-        역을 넣었는데 조회할 때 서버 후보로 되돌아가면, 넣은 역은 한 번도
-        쓰이지 않고 사라집니다 — 실제로 그랬습니다.
+        모드를 가리지 않습니다. 두 모드 모두에서 목록은 사람이 손댄 것입니다 —
+        직접 지정에서는 고른 역이 곧 조회 대상이고, 서버 추천에서는 고른 역이
+        결과를 거르는 필터입니다. 어느 쪽이든 [조회] 를 눌렀다고 목록이 서버
+        후보 전체로 되돌아가면, 빼 둔 역이 조용히 되살아납니다 — 실제로
+        그랬습니다.
 
         그래도 받아 온 것은 버리지 않습니다. 어느 역이 서버도 인정하는
-        역인지를 목록에 ``(검증)`` 으로 붙여 주는 데 씁니다.
+        역인지를 목록에 ``(검증)`` 으로 붙여 주는 데 씁니다. 목록이 아직
+        비어 있을 때만 채웁니다 — 그때는 잃을 것이 없습니다.
         """
         self._server_stations = set(names)
-        if self.transfer_mode.get() == TRANSFER_CUSTOM and self.transfer_names():
-            # 손으로 고른 것이 있으면 그대로 두고 표시만 다시 그립니다.
+        if self.transfer_names():
+            # 이미 목록이 있으면 그대로 두고 표시만 다시 그립니다.
             self._redraw_transfer_marks()
             self._write_log(
                 f"{route[0]}→{route[1]} 서버 환승역 후보 {len(names)}개를 "
-                "받았습니다. 직접 지정 목록은 그대로 둡니다."
+                "받아 (검증) 표시를 새로 달았습니다. 목록 자체는 그대로 "
+                "둡니다 — 서버 후보를 목록에 더하려면 [구간 후보 갱신] 을 누르세요."
             )
             return
         self._transfer_stations_loaded(names)
@@ -1793,11 +1923,7 @@ class BookerApp:
         self.sync_transfer_state()
 
     def remove_transfer_station(self) -> None:
-        """고른 환승역을 목록에서 뺍니다.
-
-        [이 구간 후보 다시 불러오기] 는 서버가 준 것으로 통째로 되돌립니다 —
-        손으로 넣은 역 하나를 지우려고 그것을 누르면 나머지도 다 날아갑니다.
-        """
+        """고른 환승역을 목록에서 뺍니다. 통째로 지우려면 [목록 비우기]."""
         chosen = self.transfer_list.curselection()
         if not chosen:
             messagebox.showinfo("환승역", "뺄 역을 목록에서 고르세요")
@@ -1846,17 +1972,41 @@ class BookerApp:
         self._in_thread(work, "korail-transfer-stations")
 
     def _transfer_stations_loaded(self, names: list[str]) -> None:
+        """[구간 후보 갱신] 의 결과. **손으로 넣은 역을 지우지 않습니다.**
+
+        예전에는 목록을 통째로 서버가 준 것으로 되돌렸습니다. 그런데 직접
+        지정 모드에서 그것은 사람이 방금 만든 목록을 지우는 일입니다 — 서버
+        후보에 없는 역을 넣을 수 있게 해 놓고, 후보를 한 번 더 불러오면
+        그 역이 사라졌습니다.
+
+        그래서 **합칩니다**: 목록에 있던 것은 그대로 두고, 서버가 준 것 중
+        없던 것만 뒤에 붙입니다. 처음부터 다시 하고 싶으면 [목록 비우기] 가
+        있습니다 — 지우는 일은 지우는 단추가 합니다.
+        """
         self.transfer_load_button.configure(state="normal")
-        # 손으로 누른 [구간 후보 갱신] 은 서버가 준 것으로 되돌리는 것이
-        # 맞습니다 — 그러라고 누른 단추입니다.
         self._server_stations = set(names)
-        self._fill_transfer_stations(names)
+        existing = list(self.transfer_names())
+        added = [name for name in names if name not in existing]
+        merged = existing + added
+        # 새로 붙은 것은 골라 둡니다. 직접 지정에서는 고른 것이 곧 조회
+        # 대상이고, 서버 추천에서는 고른 것이 필터입니다 — 어느 쪽이든
+        # 방금 불러온 후보를 꺼 둔 채로 두면 불러온 뜻이 없습니다.
+        keep = set(self.selected_transfer_stations()) | set(added)
+        self._fill_transfer_stations(merged, select_all=not existing, keep=keep)
+        if not names:
+            self._write_log("이 구간에는 서버가 알려 주는 환승역이 없습니다.")
+            return
         self._write_log(
-            f"{self.departure.get()}→{self.arrival.get()} 환승역 {len(names)}개를 "
-            "불러왔습니다."
-            if names
-            else "이 구간에는 서버가 알려 주는 환승역이 없습니다."
+            f"{self.departure.get()}→{self.arrival.get()} 서버 환승역 "
+            f"{len(names)}개를 불러왔습니다 — 새로 붙은 것 {len(added)}개, "
+            f"원래 있던 {len(existing)}개는 그대로입니다."
         )
+
+    def clear_transfer_stations(self) -> None:
+        """환승역 목록을 통째로 비웁니다. 지우는 일은 이 단추가 합니다."""
+        self._fill_transfer_stations([], select_all=False, keep=set())
+        self.mark_stale()
+        self._write_log("환승역 목록을 비웠습니다.")
 
     def _remember(self, request: SearchRequest) -> None:
         self.settings = replace(
@@ -2419,7 +2569,7 @@ class BookerApp:
             format_clock(normalize_clock(second.departure_time)),
             format_clock(normalize_clock(second.arrival_time)),
             format_duration(journey.total_minutes),
-            f"{station} {format_duration(journey.transfer_minutes)} 대기",
+            _transfer_text(station, journey, suffix=" 대기"),
             journey.seat_text(KorailSeatClass.GENERAL),
             journey.seat_text(KorailSeatClass.SPECIAL),
             "예매 불가" if unbookable_reason(journey) else (" · ".join(journey.extras()) or "-"),
@@ -2434,7 +2584,7 @@ class BookerApp:
                 else "환승(직접)"
             )
             station = journey.transfer_station_name or "환승역 다름"
-            transfer = f"{station} {format_duration(journey.transfer_minutes)}"
+            transfer = _transfer_text(station, journey)
         else:
             kind = "직통"
             transfer = "-"
@@ -2455,6 +2605,11 @@ class BookerApp:
     def _row_tags(self, journey: Journey) -> tuple[str, ...]:
         if unbookable_reason(journey) is not None:
             return ("unbookable",)
+        # 촉박한 환승이 색을 먼저 가져갑니다. 매진은 글로도 보이지만("매진"),
+        # 6분 뒤 갈아탄다는 것은 숫자를 읽어야 보입니다 — 그리고 그것 때문에
+        # 서버가 예약을 거절하기도 합니다(ERR911193).
+        if is_tight_transfer(journey):
+            return ("tight",)
         if journey.source is JourneySource.CUSTOM_TRANSFER:
             return ("custom",)
         if journey.bookable_seat_class(SeatPreference.ANY) is not None:
@@ -2652,20 +2807,39 @@ class BookerApp:
                 "end",
                 values=(
                     f"▶ 감시 중 [{watch.tag}]" if watch else "○ 대기",
-                    target.describe(),
+                    self._target_summary(target),
                     target.journey.seat_text(KorailSeatClass.GENERAL),
                     target.journey.seat_text(KorailSeatClass.SPECIAL),
                     " · ".join(target.journey.extras()) or "-",
                     f"{watch.options.poll_interval_s:g}초" if watch else "-",
                     watch.remaining(now) if watch else "-",
                 ),
-                tags=("watching" if watch else "idle",),
+                # 촉박한 환승은 도는지 안 도는지보다 먼저 보여야 합니다.
+                tags=(
+                    "tight"
+                    if is_tight_transfer(target.journey)
+                    else ("watching" if watch else "idle"),
+                ),
             )
             self._target_items[index] = item
         for item in chosen:
             if item is not None and item in self.target_list.get_children():
                 self.target_list.selection_add(item)
         self.stop_button.configure(state="normal" if self.any_running() else "disabled")
+
+    def _target_summary(self, target: Target) -> str:
+        """예매 대상 표의 여정 칸. 조회 결과와 같은 경고를 답니다.
+
+        담고 나면 위 표를 다시 보지 않습니다. 촉박한 환승이라는 사실이 담는
+        순간 사라지면 경고를 한 셈이 되지 않습니다.
+        """
+        text = target.describe()
+        journey = target.journey
+        if is_tight_transfer(journey):
+            text = f"{TIGHT_MARK}{text}  ← 환승 {format_duration(journey.transfer_minutes)}, 촉박"
+        if not books_as_one_reservation(journey):
+            text = f"{text}  [구간별 예약]"
+        return text
 
     def selected_indices(self) -> list[int]:
         """표에서 고른 줄의 번호. Treeview 는 항목 id 로 말하므로 되짚습니다."""
@@ -2762,13 +2936,22 @@ class BookerApp:
         standby = "\n· 좌석이 안 열리면 예약대기도 시도합니다(직통·일반실)." if (
             options.allow_standby
         ) else ""
+        tight = [t for t in targets if is_tight_transfer(t.journey)]
+        tight_note = (
+            f"\n환승 대기가 {TIGHT_TRANSFER_MINUTES}분 미만인 것이 "
+            f"{len(tight)}편 있습니다. 실제로 갈아타지 못할 수 있고, 서버가 "
+            "그런 조합의 예약을 거절하기도 합니다.\n"
+            if tight
+            else ""
+        )
         return messagebox.askyesno(
             "실제 예약을 만듭니다",
             f"아래 {len(targets)}편을 {options.poll_interval_s:g}초마다 다시 "
             f"조회하며 {window} 지켜봅니다.\n"
             "자리가 열리면 방향마다 한 건씩 진짜 예약(결제 전 홀드)을 만들고 "
             f"멈춥니다.{standby}\n\n"
-            f"{lines}\n\n"
+            f"{lines}\n"
+            f"{self._split_warning(targets)}{tight_note}\n"
             "결제는 하지 않습니다. 잡은 뒤에는 기한 안에 코레일 앱에서 "
             "결제하거나 취소해야 합니다.\n\n"
             "계속할까요?",

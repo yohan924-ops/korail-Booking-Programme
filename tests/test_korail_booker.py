@@ -45,6 +45,7 @@ from korail_booker.autobook import (
     AutoBooker,
     BookingOptions,
     Outcome,
+    PartialTransferError,
     Target,
     is_standby_available,
     payment_deadline_text,
@@ -1540,24 +1541,38 @@ def test_the_booker_waits_for_both_legs_instead_of_grabbing_one():
 
 
 def test_a_search_never_overwrites_hand_picked_transfer_stations():
-    """직접 지정은 사람이 고른 역이 곧 조회 대상입니다.
+    """목록은 두 모드 모두에서 사람이 손댄 것입니다.
 
-    목록을 비우고 원하는 역을 넣었는데 조회할 때 서버 후보로 되돌아가면, 넣은
-    역은 한 번도 쓰이지 않고 사라집니다 — 실제로 그랬습니다.
+    직접 지정에서는 고른 역이 곧 조회 대상이고, 서버 추천에서는 고른 역이
+    결과를 거르는 필터입니다. 어느 쪽이든 [조회] 를 눌렀다고 목록이 서버 후보
+    전체로 되돌아가면 빼 둔 역이 조용히 되살아납니다 — 실제로 그랬습니다.
     """
     body = _ui_function("_server_candidates_loaded")
 
-    assert "self.transfer_mode.get() == TRANSFER_CUSTOM" in body
-    assert "self.transfer_names()" in body
+    # 모드를 가리지 않습니다. 목록이 있으면 그것으로 끝입니다.
+    assert "TRANSFER_CUSTOM" not in body
+    assert "if self.transfer_names():" in body
     # 그래도 받아 온 것은 (검증) 표시에 씁니다.
     assert "self._server_stations = set(names)" in body
     assert "self._redraw_transfer_marks()" in body
 
 
-def test_the_manual_refresh_button_still_replaces_the_list():
-    """[구간 후보 갱신] 은 서버가 준 것으로 되돌리라고 누르는 단추입니다."""
+def test_the_manual_refresh_button_adds_and_never_deletes():
+    """[구간 후보 갱신] 이 손으로 넣은 역을 지우면 안 됩니다.
+
+    서버 후보에 없는 역을 넣을 수 있게 해 놓고, 후보를 한 번 더 불러오면 그
+    역이 사라졌습니다. 이제는 **합칩니다** — 있던 것은 그대로 두고 없던 것만
+    붙입니다. 지우는 일은 [빼기] 와 [목록 비우기] 가 합니다.
+    """
     body = _ui_function("_transfer_stations_loaded")
-    assert "self._fill_transfer_stations(names)" in body
+    assert "existing = list(self.transfer_names())" in body
+    assert "added = [name for name in names if name not in existing]" in body
+    assert "merged = existing + added" in body
+
+    source = _ui_source()
+    assert 'text="목록 비우기"' in source
+    clear = _ui_function("clear_transfer_stations")
+    assert "self._fill_transfer_stations([], select_all=False, keep=set())" in clear
 
 
 def test_a_station_the_server_also_offers_is_marked():
@@ -2275,7 +2290,7 @@ def test_reserve_now_sends_nothing_unless_it_is_live():
     )
 
     assert recorder.count(RESERVE) == 0
-    assert result.category == "reserve"
+    assert [item.category for item in result] == ["reserve"]
 
 
 def test_the_screen_learns_about_every_hold_the_booker_makes():
@@ -2311,8 +2326,13 @@ def test_every_section_is_a_pane_the_user_can_resize():
     }
 
     for name in ("_build_login", "_build_query", "_build_results",
-                 "_build_targets", "_build_booking", "_build_log"):
+                 "_build_targets", "_build_holds", "_build_log"):
         assert "_add_pane(parent" in builders[name], name
+    # 자동예매 조건은 제 묶음이 아니라 예매 대상 묶음 안에 붙습니다 — 담는
+    # 것과 그것을 노리는 조건은 한 가지 일이고, 묶음 머리 하나를 아끼면
+    # 그만큼 표에 줄이 늘어납니다.
+    assert "_build_booking" not in builders
+    assert "self._build_booking_controls(frame)" in builders["_build_targets"]
 
 
 def test_the_query_section_uses_its_right_hand_space():
@@ -2348,7 +2368,7 @@ def test_a_pane_with_buttons_measures_its_own_minimum():
     }
 
     # 단추가 잘릴 수 있는 묶음은 재서 씁니다.
-    for name in ("_build_login", "_build_query", "_build_targets", "_build_booking"):
+    for name in ("_build_login", "_build_query", "_build_targets"):
         assert "minsize=" not in builders[name], name
     # 줄여도 줄 수만 줄어드는 묶음만 숫자를 적습니다.
     for name in ("_build_results", "_build_log"):
@@ -2710,3 +2730,244 @@ def test_saving_clears_the_one_time_value():
     forget = _ui_function("forget")
     assert "telegram_token=''" in forget
     assert "self._telegram_once = None" in forget
+
+
+# --- 검증되지 않은 환승은 구간마다 따로 삽니다 ----------------------------------
+
+
+def _custom_transfer(gap_minutes: int = 6) -> J.Journey:
+    """직접 조합 환승 하나. 두 구간 다 자리가 있습니다."""
+    second = 628 + gap_minutes // 60 * 100 + gap_minutes % 60
+    return _journey(
+        _summary(train_no="00301", departure_time="054700", arrival_time="062800",
+                 general="11", special="11"),
+        _summary(train_no="00003", departure_time=f"{second:04d}00",
+                 arrival_time="072200", general="11", special="11"),
+        source=J.JourneySource.CUSTOM_TRANSFER,
+    )
+
+
+def test_only_a_server_checked_transfer_is_bought_as_one_reservation():
+    """서버가 짝지어 준 조합만 한 건(PNR 하나)입니다.
+
+    직접 조합을 환승 예약으로 보내면 서버가 거절하는 일이 있습니다 —
+    ``ERR911193 환승최소허용시간 미달`` 을 실제로 받았습니다.
+    """
+    direct = _journey(_summary())
+    server = _journey(
+        _summary(train_no="00301"),
+        _summary(train_no="00003"),
+        source=J.JourneySource.SERVER_TRANSFER,
+    )
+    assert J.books_as_one_reservation(direct)
+    assert J.books_as_one_reservation(server)
+    assert not J.books_as_one_reservation(_custom_transfer())
+
+
+def test_a_custom_combination_is_reserved_one_leg_at_a_time():
+    """한 요청이 아니라 두 요청입니다. 각 구간은 그냥 직통 열차 한 편입니다."""
+    recorder = _Recorder({RESERVE: _reserve_reply()})
+
+    results = reserve_once(
+        _client(recorder),
+        _custom_transfer(),
+        passengers=KorailPassengerCounts(adult=1),
+        seat_class=KorailSeatClass.GENERAL,
+        live=True,
+    )
+
+    assert recorder.count(RESERVE) == 2
+    assert len(results) == 2
+
+
+def test_a_server_checked_transfer_still_goes_in_one_request():
+    """묶어 사도 되는 것까지 쪼개면 PNR 이 둘로 늘어납니다."""
+    recorder = _Recorder({RESERVE: _reserve_reply(h_jrny_cnt="2")})
+
+    results = reserve_once(
+        _client(recorder),
+        _journey(
+            _summary(train_no="00301", departure_time="054700",
+                     arrival_time="062800", general="11", special="11"),
+            _summary(train_no="00003", departure_time="063400",
+                     arrival_time="072200", general="11", special="11"),
+            source=J.JourneySource.SERVER_TRANSFER,
+        ),
+        passengers=KorailPassengerCounts(adult=1),
+        seat_class=KorailSeatClass.GENERAL,
+        live=True,
+    )
+
+    assert recorder.count(RESERVE) == 1
+    assert len(results) == 1
+
+
+def test_a_leg_that_fails_never_hides_the_leg_that_was_already_held():
+    """앞 구간이 잡힌 사실이 사라지면, 사람은 기한을 모른 채 표를 잃습니다."""
+    recorder = _Recorder(
+        sequences={
+            RESERVE: [
+                _reserve_reply(),
+                _fail("ERR911193", "환승최소허용시간 미달"),
+            ]
+        }
+    )
+
+    with pytest.raises(PartialTransferError) as caught:
+        reserve_once(
+            _client(recorder),
+            _custom_transfer(),
+            passengers=KorailPassengerCounts(adult=1),
+            seat_class=KorailSeatClass.GENERAL,
+            live=True,
+        )
+
+    assert caught.value.leg_number == 2
+    assert len(caught.value.held) == 1
+    assert "이미 잡혀" in str(caught.value)
+
+
+def test_the_watcher_stops_after_a_partial_hold_instead_of_trying_again():
+    """다시 돌면 이미 잡아 둔 앞 구간을 한 번 더 잡습니다 — 중복 예약입니다."""
+    body = _ui_source()
+    assert "PartialTransferError" in body
+    booker = (APP_DIR / "korail_booker" / "autobook.py").read_text(encoding="utf-8")
+    assert "def _settle_partial" in booker
+    tree = ast.parse(booker)
+    settle = next(
+        ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_settle_partial"
+    )
+    # 이 방향은 여기서 끝냅니다. 계속 지켜보면 앞 구간을 또 잡습니다.
+    assert "self._settled[target.direction] = held" in settle
+    assert "self._finish(" in settle
+
+
+def test_the_screen_says_when_a_target_will_be_bought_leg_by_leg():
+    """예약이 하나가 아니라 둘이 됩니다. 모르고 누르면 안 됩니다."""
+    warning = _ui_function("_split_warning")
+    assert "books_as_one_reservation" in warning
+    assert "구간마다 따로" in warning
+    source = _ui_source()
+    # 확인 창 둘 다 이 경고를 싣습니다 — 바로 예약과 자동예매.
+    assert source.count("self._split_warning(") == 2
+
+
+# --- 촉박한 환승 경고 -----------------------------------------------------------
+
+
+def test_a_short_connection_is_flagged_but_a_long_one_is_not():
+    assert J.is_tight_transfer(_custom_transfer(gap_minutes=6))
+    assert J.is_tight_transfer(_custom_transfer(gap_minutes=9))
+    assert not J.is_tight_transfer(_custom_transfer(gap_minutes=10))
+    assert not J.is_tight_transfer(_custom_transfer(gap_minutes=44))
+
+
+def test_a_direct_train_is_never_a_tight_transfer():
+    """환승이 없으면 환승 대기도 없습니다. 모르는 것을 경고로 바꾸지 않습니다."""
+    assert not J.is_tight_transfer(_journey(_summary()))
+
+
+def test_the_threshold_is_ours_and_says_so():
+    """코레일의 최소 환승 허용 시간은 확인하지 못했습니다."""
+    source = (APP_DIR / "korail_booker" / "journeys.py").read_text(encoding="utf-8")
+    assert "TIGHT_TRANSFER_MINUTES = 10" in source
+    assert "확인하지 못했습니다" in source
+    assert "ERR911193" in source
+
+
+def test_a_tight_connection_is_red_in_both_tables():
+    """색은 줄 단위입니다 — 칸 하나만 물들일 수 없어서 표도 함께 답니다."""
+    source = _ui_source()
+    assert 'tree.tag_configure("tight", foreground="#d1242f")' in source
+    assert 'self.target_list.tag_configure("tight", foreground="#d1242f")' in source
+    tags = _ui_function("_row_tags")
+    assert "if is_tight_transfer(journey):" in tags
+    assert "return ('tight',)" in tags
+    # 담고 나면 위 표를 다시 보지 않습니다. 경고가 함께 따라와야 합니다.
+    summary = _ui_function("_target_summary")
+    assert "is_tight_transfer(journey)" in summary
+    assert "TIGHT_MARK" in summary
+
+
+def test_the_watcher_buys_a_custom_combination_one_leg_at_a_time():
+    """서버가 검증하지 않은 조합은 한 요청이 아니라 구간 수만큼입니다."""
+    first = _row("00009", arrival="대전", arrival_code="0010", arrival_time="091500",
+                 general="11")
+    second = _row("00503", departure="대전", departure_code="0010",
+                  departure_time="093700", arrival_time="110500", general="11")
+    recorder = _Recorder({SEARCH: _search_reply([first, second]),
+                          RESERVE: _reserve_reply()})
+    journey = _journey(
+        TrainSummary.from_raw(first),
+        TrainSummary.from_raw(second),
+        source=J.JourneySource.CUSTOM_TRANSFER,
+    )
+    made: list[str] = []
+    booker = AutoBooker(
+        _client(recorder),
+        [_target(journey, _request(include_direct=False, include_transfer=True))],
+        BookingOptions(poll_interval_s=10.0, live=True),
+        log=lambda message: None,
+        on_hold=lambda label, summary, kind, hold: made.append(kind),
+    )
+
+    result = booker.run(threading.Event())
+
+    assert result.outcome is Outcome.HELD
+    assert recorder.count(RESERVE) == 2
+    # 두 구간이 각각 예약이 됩니다 — 잡은 예약 목록에도 둘로 들어갑니다.
+    assert made == ["좌석 예약(구간별)", "좌석 예약(구간별)"]
+    assert len(result.holds) == 2
+
+
+def test_a_half_finished_custom_combination_stops_instead_of_retrying():
+    """다음 회차에 또 돌면 이미 잡은 앞 구간을 한 번 더 잡습니다."""
+    first = _row("00009", arrival="대전", arrival_code="0010", arrival_time="091500",
+                 general="11")
+    second = _row("00503", departure="대전", departure_code="0010",
+                  departure_time="093700", arrival_time="110500", general="11")
+    recorder = _Recorder(
+        replies={SEARCH: _search_reply([first, second])},
+        sequences={RESERVE: [_reserve_reply(),
+                             _fail("ERR911193", "환승최소허용시간 미달")]},
+    )
+    journey = _journey(
+        TrainSummary.from_raw(first),
+        TrainSummary.from_raw(second),
+        source=J.JourneySource.CUSTOM_TRANSFER,
+    )
+    told: list[str] = []
+    booker = AutoBooker(
+        _client(recorder),
+        [_target(journey, _request(include_direct=False, include_transfer=True))],
+        BookingOptions(poll_interval_s=10.0, live=True),
+        log=told.append,
+        notify=told.append,
+    )
+
+    result = booker.run(threading.Event())
+
+    # 두 번만 나갑니다 — 1구간 성공, 2구간 실패. 되풀이하지 않습니다.
+    assert recorder.count(RESERVE) == 2
+    assert result.outcome is Outcome.HELD
+    assert any("일부만 잡혔습니다" in line for line in told)
+    assert any("ERR911193" in line for line in told)
+
+
+def test_how_a_target_is_bought_follows_what_the_user_agreed_to():
+    """다시 조회한 여정의 출처가 아니라, 담을 때 본 것을 따릅니다.
+
+    확인 창이 "구간마다 따로 삽니다" 라고 말해 놓고 한 건으로 사면 약속이
+    깨집니다. 구간의 값(좌석 코드 등)은 방금 받은 것을 그대로 씁니다.
+    """
+    booker = (APP_DIR / "korail_booker" / "autobook.py").read_text(encoding="utf-8")
+    tree = ast.parse(booker)
+    body = next(
+        ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_try_reserve"
+    )
+    assert "journey = replace(journey, source=target.journey.source)" in body
+    assert "one_go = books_as_one_reservation(journey)" in body
