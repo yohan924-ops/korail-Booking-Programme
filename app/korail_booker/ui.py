@@ -368,6 +368,8 @@ class BookerApp:
         self._transfer_route: tuple[str, str] | None = None
         #: 전국 역 이름. 자동완성과 환승역 추가가 이것을 씁니다.
         self.station_names: tuple[str, ...] = ()
+        #: 떠 있는 로그인 팝업. 없으면 ``None``.
+        self._login_window: tk.Toplevel | None = None
         #: 잡아 둔 예약들. 결제 기한 카운트다운이 이것을 봅니다.
         self.holds: list[Held] = []
         self._hold_items: dict[int, str] = {}
@@ -465,13 +467,13 @@ class BookerApp:
         # 영역을 정할 수 있다 — 창이 그보다 작으면 굴려서 본다.
         self._settle_panes()
         fit(canvas.winfo_width(), canvas.winfo_height())
-        # Enter 는 **칸마다** 답니다. 창 전체에 걸면 아이디를 치다 Enter 를
-        # 눌러도 조회가 돌았습니다 — 눈이 가 있는 칸이 무엇을 뜻하는지가
-        # 사람의 기대입니다. 로그인 칸에서는 로그인, 조회 칸에서는 조회.
-        for widget in self.login_fields:
-            widget.bind("<Return>", lambda _event: self.on_login())
+        # Enter 는 칸마다 답니다. 창 전체에 걸면 어느 칸에 있든 조회가
+        # 돌았습니다 — 눈이 가 있는 칸이 무엇을 뜻하는지가 사람의 기대입니다.
+        # 로그인 칸의 Enter 는 팝업 안에서 따로 답니다.
         for widget in self.query_fields:
             widget.bind("<Return>", lambda _event: self.on_search())
+        # 켜자마자 로그인부터 묻습니다. 본 창은 그동안 눌리지 않습니다.
+        self.root.after(300, self.open_login)
 
     def _add_pane(
         self,
@@ -535,36 +537,123 @@ class BookerApp:
         self.canvas.yview_scroll(step, "units")
 
     def _build_login(self, parent: tk.PanedWindow) -> None:
-        frame = ttk.LabelFrame(parent, text="1. 로그인 (아이디·휴대폰번호·회원번호)")
+        """로그인 **상태**만 보이는 줄. 입력은 팝업이 받습니다.
+
+        아이디와 비밀번호 칸을 여기 두면, 프로그램을 켠 사람이 그 칸을 못 보고
+        조회부터 눌렀다가 "예약이 왜 안 되지" 로 갑니다. 켜자마자 팝업이
+        뜨면 로그인할지 조회만 할지를 먼저 정하게 됩니다.
+        """
+        frame = ttk.LabelFrame(parent, text="1. 로그인")
         self._add_pane(parent, frame, stretch="never")
         self.login_id = tk.StringVar()
-        self.login_pw = tk.StringVar()
         self.login_state = tk.StringVar(value="로그인하지 않았습니다 — 조회만 됩니다")
-        ttk.Label(frame, text="아이디").grid(row=0, column=0, padx=4, pady=6)
-        id_entry = ttk.Entry(frame, textvariable=self.login_id, width=18)
-        id_entry.grid(row=0, column=1)
-        ttk.Label(frame, text="비밀번호").grid(row=0, column=2, padx=4)
-        pw_entry = ttk.Entry(frame, textvariable=self.login_pw, show="*", width=18)
-        pw_entry.grid(row=0, column=3)
-        #: 이 칸들에서 Enter 를 누르면 로그인합니다.
-        self.login_fields = (id_entry, pw_entry)
-        self.login_button = ttk.Button(frame, text="로그인", command=self.on_login)
-        self.login_button.grid(row=0, column=4, padx=(8, 2))
-        self.logout_button = ttk.Button(
-            frame, text="로그아웃", command=self.on_logout, state="disabled"
-        )
-        self.logout_button.grid(row=0, column=5, padx=2)
-        # 로그인했는지 아닌지는 이 프로그램에서 가장 자주 확인하는 것입니다.
-        # 색으로 말하면 읽지 않아도 압니다.
         self.login_label = ttk.Label(
             frame, textvariable=self.login_state, foreground=LOGIN_OFF_COLOUR
         )
-        self.login_label.grid(row=0, column=6, padx=8, sticky="w")
+        self.login_label.grid(row=0, column=0, padx=(8, 12), pady=8, sticky="w")
+        self.login_button = ttk.Button(frame, text="로그인", command=self.open_login)
+        self.login_button.grid(row=0, column=1, padx=2)
+        self.logout_button = ttk.Button(
+            frame, text="로그아웃", command=self.on_logout
+        )
+        self.logout_button.grid(row=0, column=2, padx=2)
         ttk.Label(
             frame,
             text="비밀번호는 저장하지 않습니다. 비회원 예매는 지원하지 않습니다.",
             foreground="#666666",
-        ).grid(row=1, column=0, columnspan=7, sticky="w", padx=4, pady=(0, 6))
+        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 6))
+        self.sync_login_buttons()
+
+    def sync_login_buttons(self) -> None:
+        """단추를 지금 상태에 맞춥니다.
+
+        로그인했으면 [다른 아이디로 로그인] 과 [로그아웃], 아니면 [로그인]
+        하나뿐입니다 — 로그아웃할 것이 없는데 단추가 있으면 눌러 보게 됩니다.
+        """
+        if self.logged_in:
+            self.login_button.configure(text="다른 아이디로 로그인")
+            self.logout_button.grid()
+        else:
+            self.login_button.configure(text="로그인")
+            self.logout_button.grid_remove()
+
+    def open_login(self) -> None:
+        """로그인 팝업. 떠 있는 동안 **본 창은 눌리지 않습니다.**
+
+        ``grab_set`` 이 입력을 이 창으로 모읍니다. 뒤에서 조회를 눌러 놓고
+        로그인 창을 찾는 일이 없게 하려는 것입니다. 창을 닫거나 [조회만
+        하기] 를 누르면 비로그인 상태로 그냥 씁니다.
+        """
+        window = tk.Toplevel(self.root)
+        self._login_window = window
+        window.title("코레일 로그인")
+        window.transient(self.root)
+        window.resizable(False, False)
+        password = tk.StringVar()
+        note = tk.StringVar(value="")
+
+        ttk.Label(
+            window,
+            text="아이디·휴대폰번호·회원번호 중 아무거나 됩니다.\n"
+            "로그인하지 않아도 열차 조회는 됩니다 — 예약만 못 합니다.",
+            justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(12, 8))
+        ttk.Label(window, text="아이디").grid(row=1, column=0, sticky="e", padx=(12, 4))
+        id_entry = ttk.Entry(window, textvariable=self.login_id, width=24)
+        id_entry.grid(row=1, column=1, sticky="w", padx=(0, 12), pady=2)
+        ttk.Label(window, text="비밀번호").grid(row=2, column=0, sticky="e", padx=(12, 4))
+        pw_entry = ttk.Entry(window, textvariable=password, show="*", width=24)
+        pw_entry.grid(row=2, column=1, sticky="w", padx=(0, 12), pady=2)
+        ttk.Label(window, textvariable=note, foreground=LOGIN_BAD_COLOUR).grid(
+            row=3, column=0, columnspan=2, sticky="w", padx=12, pady=(6, 0)
+        )
+
+        buttons = ttk.Frame(window)
+        buttons.grid(row=4, column=0, columnspan=2, sticky="e", padx=12, pady=12)
+
+        def close() -> None:
+            self._login_window = None
+            password.set("")
+            window.grab_release()
+            window.destroy()
+            self.sync_login_buttons()
+
+        def skip() -> None:
+            self._write_log("로그인하지 않고 시작합니다 — 조회만 됩니다.")
+            close()
+
+        def attempt() -> None:
+            member_no = self.login_id.get().strip()
+            secret = password.get()
+            if not member_no or not secret:
+                note.set("아이디와 비밀번호를 입력하세요")
+                return
+            login_button.configure(state="disabled")
+            skip_button.configure(state="disabled")
+            note.set("")
+            self._set_login_state("로그인 중…", LOGIN_OFF_COLOUR)
+
+            def done(message: str | None) -> None:
+                if message is None:
+                    close()
+                    return
+                # 실패하면 창을 닫지 않습니다 — 다시 치게 해야 합니다.
+                note.set(message)
+                login_button.configure(state="normal")
+                skip_button.configure(state="normal")
+
+            self._start_login(member_no, secret, done)
+
+        login_button = ttk.Button(buttons, text="로그인", command=attempt)
+        login_button.pack(side="left", padx=(0, 6))
+        skip_button = ttk.Button(buttons, text="조회만 하기", command=skip)
+        skip_button.pack(side="left")
+
+        for field in (id_entry, pw_entry):
+            field.bind("<Return>", lambda _event: attempt())
+        window.protocol("WM_DELETE_WINDOW", skip)
+        window.grab_set()
+        (pw_entry if self.login_id.get().strip() else id_entry).focus_set()
 
     def _build_query(self, parent: tk.PanedWindow) -> None:
         frame = ttk.LabelFrame(parent, text="2. 열차 조회")
@@ -1738,14 +1827,17 @@ class BookerApp:
 
     # -- 동작: 로그인 --------------------------------------------------------
 
-    def on_login(self) -> None:
-        member_no = self.login_id.get().strip()
-        password = self.login_pw.get()
-        if not member_no or not password:
-            messagebox.showwarning("로그인", "아이디와 비밀번호를 입력하세요")
-            return
-        self.login_button.configure(state="disabled")
-        self._set_login_state("로그인 중…", LOGIN_OFF_COLOUR)
+    def _start_login(
+        self,
+        member_no: str,
+        password: str,
+        done: Callable[[str | None], None],
+    ) -> None:
+        """작업 스레드에서 로그인하고, 끝나면 ``done`` 을 부릅니다.
+
+        ``done(None)`` 이 성공이고, 문구가 오면 실패입니다. 팝업이 그것을
+        보고 닫을지 다시 치게 할지 정합니다.
+        """
 
         def work() -> None:
             try:
@@ -1755,10 +1847,10 @@ class BookerApp:
                 # 문구를 지금 붙잡습니다. except 블록을 벗어나면 파이썬이
                 # 예외 이름을 지우므로, 나중에 도는 람다 안에서는 못 읽습니다.
                 message = str(exc)
-                self.events.put(lambda: self._login_failed(message))
+                self.events.put(lambda: self._login_failed(message, done))
                 return
             self._credentials = (member_no, password)
-            self.events.put(self._login_succeeded)
+            self.events.put(lambda: self._login_succeeded(done))
 
         self._in_thread(work, "korail-login")
 
@@ -1766,22 +1858,30 @@ class BookerApp:
         self.login_state.set(text)
         self.login_label.configure(foreground=colour)
 
-    def _login_succeeded(self) -> None:
+    def _login_succeeded(self, done: Callable[[str | None], None] | None = None) -> None:
         self.logged_in = True
-        self._set_login_state("로그인됨", LOGIN_OK_COLOUR)
-        self.login_button.configure(state="normal")
-        self.logout_button.configure(state="normal")
+        who = self.login_id.get().strip()
+        self._set_login_state(f"로그인됨 ({who})" if who else "로그인됨", LOGIN_OK_COLOUR)
         self._write_log("로그인했습니다.", "good")
-        self.settings = replace(self.settings, login_id=self.login_id.get().strip())
+        self.settings = replace(self.settings, login_id=who)
         settings_module.save(self.settings)
+        self.sync_login_buttons()
+        if done is not None:
+            done(None)
 
-    def _login_failed(self, message: str) -> None:
+    def _login_failed(
+        self,
+        message: str,
+        done: Callable[[str | None], None] | None = None,
+    ) -> None:
         self.logged_in = False
         self._set_login_state("로그인 실패", LOGIN_BAD_COLOUR)
-        self.login_button.configure(state="normal")
-        self.logout_button.configure(state="disabled")
         self._write_log(f"로그인 실패: {message}", "bad")
-        messagebox.showerror("로그인 실패", message)
+        self.sync_login_buttons()
+        if done is not None:
+            done(message)
+        else:
+            messagebox.showerror("로그인 실패", message)
 
     def on_logout(self) -> None:
         """세션을 버립니다. 자동예매가 도는 중이면 먼저 막습니다.
@@ -1798,9 +1898,8 @@ class BookerApp:
         self.client = None
         self.logged_in = False
         self._credentials = None
-        self.login_pw.set("")
         self._set_login_state("로그아웃했습니다 — 조회만 됩니다", LOGIN_OFF_COLOUR)
-        self.logout_button.configure(state="disabled")
+        self.sync_login_buttons()
         self._write_log(
             "로그아웃했습니다. 이 프로그램의 세션만 버립니다 — 코레일 앱은 "
             "그대로입니다."

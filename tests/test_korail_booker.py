@@ -1532,6 +1532,53 @@ def test_the_booker_waits_for_both_legs_instead_of_grabbing_one():
     assert recorder.count(RESERVE) == 0
 
 
+# --- 로그인 팝업 ----------------------------------------------------------------
+
+
+def test_the_program_asks_to_log_in_before_anything_else():
+    """켜자마자 물어야, 조회부터 눌렀다가 "예약이 왜 안 되지" 로 가지 않습니다."""
+    source = _ui_source()
+    assert "self.root.after(300, self.open_login)" in source
+
+
+def test_the_login_popup_blocks_the_main_window():
+    """뒤에서 조회를 눌러 놓고 로그인 창을 찾는 일이 없어야 합니다."""
+    body = _ui_function("open_login")
+    assert "window.grab_set()" in body
+    assert "window.transient(self.root)" in body
+    # 닫아도 프로그램은 굴러갑니다 — 조회만 되는 상태로.
+    assert "window.protocol('WM_DELETE_WINDOW', skip)" in body
+    assert "조회만 하기" in body
+
+
+def test_a_failed_login_keeps_the_popup_open():
+    """실패했는데 창이 닫히면 다시 칠 곳이 없습니다."""
+    body = _ui_function("open_login")
+    assert "note.set(message)" in body
+    assert "login_button.configure(state='normal')" in body
+
+
+def test_the_login_row_has_no_password_box():
+    """비밀번호 칸은 팝업에만 있습니다. 본 화면에 남겨 두면 두 곳이 됩니다."""
+    body = _ui_function("_build_login")
+    assert "show='*'" not in body
+    assert "self.login_pw" not in body
+
+
+def test_the_buttons_match_the_login_state():
+    """로그아웃할 것이 없는데 단추가 있으면 눌러 보게 됩니다."""
+    body = _ui_function("sync_login_buttons")
+
+    assert "'다른 아이디로 로그인'" in body
+    assert "'로그인'" in body
+    assert "self.logout_button.grid_remove()" in body
+    assert "self.logout_button.grid()" in body
+
+    # 상태가 바뀌는 세 곳이 모두 단추를 다시 맞춥니다.
+    for name in ("_login_succeeded", "_login_failed", "on_logout"):
+        assert "self.sync_login_buttons()" in _ui_function(name), name
+
+
 # --- 화면 글과 손놀림 -----------------------------------------------------------
 
 
@@ -1591,8 +1638,9 @@ def test_enter_is_bound_per_field_not_to_the_whole_window():
     source = _ui_source()
 
     assert 'self.root.bind("<Return>"' not in source
-    assert "for widget in self.login_fields:" in source
     assert "for widget in self.query_fields:" in source
+    # 로그인 칸의 Enter 는 팝업 안에서 답니다.
+    assert 'field.bind("<Return>", lambda _event: attempt())' in source
 
 
 def test_the_add_button_sits_with_the_results_and_reserve_with_the_targets():
@@ -1933,7 +1981,7 @@ def test_the_login_state_speaks_in_colour():
     """가장 자주 확인하는 것입니다. 색으로 말하면 읽지 않아도 압니다."""
     source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
 
-    assert '_set_login_state("로그인됨", LOGIN_OK_COLOUR)' in source
+    assert "LOGIN_OK_COLOUR" in _ui_function("_login_succeeded")
     assert '_set_login_state("로그인 실패", LOGIN_BAD_COLOUR)' in source
     # 초록/빨강이 실제로 초록/빨강이어야 합니다.
     assert 'LOGIN_OK_COLOUR = "#1a7f37"' in source
@@ -1942,18 +1990,14 @@ def test_the_login_state_speaks_in_colour():
 
 def test_logging_out_drops_the_session_and_the_password():
     """세션과 비밀번호를 다 버립니다. 자동예매 중에는 막습니다."""
-    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    body = next(
-        ast.unparse(node)
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "on_logout"
-    )
+    source = _ui_source()
+    body = _ui_function("on_logout")
 
     assert "self.client = None" in body
     assert "self.logged_in = False" in body
     assert "self._credentials = None" in body
-    assert "self.login_pw.set('')" in body
+    # 비밀번호는 팝업 안에만 있었고 창이 닫히며 사라집니다.
+    assert "self.login_pw" not in source
     # 돌고 있는데 세션을 버리면 자동예매가 도중에 죽습니다.
     assert "self.any_running()" in body
 
