@@ -1532,6 +1532,42 @@ def test_the_booker_waits_for_both_legs_instead_of_grabbing_one():
     assert recorder.count(RESERVE) == 0
 
 
+# --- 작은 단추들 ----------------------------------------------------------------
+
+
+def test_selecting_all_train_kinds_turns_every_one_on():
+    """하나만 빼고 보려면 전부 켜고 하나만 끄는 편이 빠릅니다."""
+    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    body = next(
+        ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "select_all_train_kinds"
+    )
+
+    assert "var.set(True)" in body
+    assert "self.sync_train_kinds()" in body
+    assert 'text="모두 선택"' in source
+
+
+def test_clearing_the_results_leaves_the_targets_alone():
+    """담아 둔 것까지 사라지면 곤란합니다. 표만 비웁니다."""
+    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    body = next(
+        ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "clear_results"
+    )
+
+    assert "tree.delete(*tree.get_children())" in body
+    assert "self.results = []" in body
+    assert "self.item_journeys.clear()" in body
+    # 예매 대상과 감시는 건드리지 않습니다.
+    assert "self.targets" not in body
+    assert "self.watches" not in body
+
+
 # --- 감시 여럿 따로 돌리기 ------------------------------------------------------
 
 

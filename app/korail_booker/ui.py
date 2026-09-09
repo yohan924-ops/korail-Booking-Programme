@@ -633,6 +633,9 @@ class BookerApp:
             row=0, column=half, rowspan=2, sticky="w", padx=(10, 0)
         )
         tail = self._section(frame, 6, "")
+        ttk.Button(tail, text="모두 선택", command=self.select_all_train_kinds).pack(
+            side="left", padx=(0, 4)
+        )
         ttk.Button(tail, text="모두 지우기", command=self.clear_train_kinds).pack(
             side="left", padx=(0, 6)
         )
@@ -936,10 +939,15 @@ class BookerApp:
         self.results_label.grid(row=2, column=0, sticky="w", padx=4)
         # 이미 자리가 있는 열차는 기다릴 이유가 없습니다. 자동예매에 담고
         # 돌리는 세 단계 대신 여기서 한 번에 잡습니다.
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=2, column=1, sticky="e", padx=6, pady=(0, 4))
         self.reserve_now_button = ttk.Button(
-            frame, text="바로 예약", width=10, command=self.on_reserve_now
+            buttons, text="바로 예약", width=10, command=self.on_reserve_now
         )
-        self.reserve_now_button.grid(row=2, column=1, sticky="e", padx=6, pady=(0, 4))
+        self.reserve_now_button.pack(side="left")
+        ttk.Button(
+            buttons, text="결과 비우기", width=10, command=self.clear_results
+        ).pack(side="left", padx=(6, 0))
 
     def sync_round_trip_panes(self) -> None:
         """왕복이면 표를 좌우로 나눕니다. 편도면 왼쪽 하나만 씁니다."""
@@ -983,6 +991,21 @@ class BookerApp:
             "담으세요 — 방향마다 한 건씩 잡고 멈춥니다.",
             foreground="#666666",
         ).grid(row=1, column=0, columnspan=3, sticky="w", padx=4, pady=(0, 6))
+
+    def clear_results(self) -> None:
+        """열차 표를 비웁니다. **예매 대상과 감시는 건드리지 않습니다.**
+
+        표에 지난 조회 결과가 남아 있으면 지금 조건의 것인지 헷갈립니다.
+        담아 둔 것까지 사라지면 곤란하므로 표만 비웁니다.
+        """
+        for tree in (self.tree, self.return_tree):
+            tree.delete(*tree.get_children())
+        self.results = []
+        self.journeys = []
+        self.item_journeys.clear()
+        self.results_status.set("결과를 비웠습니다. 조건을 정하고 [조회] 를 누르세요.")
+        self.results_label.configure(foreground="")
+        self._write_log("열차 목록을 비웠습니다 (예매 대상은 그대로입니다).")
 
     def on_reserve_now(self) -> None:
         """고른 열차 하나를 지금 잡습니다. 자동예매를 거치지 않습니다."""
@@ -1343,6 +1366,17 @@ class BookerApp:
         # 짧게 씁니다. 이 글이 길면 줄이 넓어지고, 줄이 넓어지면 오른쪽 환승
         # 조건이 옆에 못 서서 묶음이 세로로 길어집니다.
         self.train_kind_label.set("전체" if not picked else f"{len(picked)}종")
+
+    def select_all_train_kinds(self) -> None:
+        """여덟 종을 다 켭니다.
+
+        아무것도 고르지 않은 것과 전부 고른 것은 **거르는 결과가 같습니다.**
+        그래도 단추를 둡니다 — 하나만 빼고 보고 싶을 때 여덟 번 누르는 대신
+        전부 켜고 하나만 끄면 되기 때문입니다.
+        """
+        for var in self.train_kind_vars.values():
+            var.set(True)
+        self.sync_train_kinds()
 
     def clear_train_kinds(self) -> None:
         for var in self.train_kind_vars.values():
