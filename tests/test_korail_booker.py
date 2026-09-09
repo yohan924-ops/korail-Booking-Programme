@@ -610,6 +610,16 @@ def test_a_route_with_no_transfer_station_is_an_empty_answer():
     assert S.transfer_station_candidates(_client(recorder), "서울", "용산") == []
 
 
+def test_station_search_puts_prefix_matches_first():
+    """사람은 이름 앞을 칩니다 — "동" 은 동대구가 광주송정보다 먼저입니다."""
+    names = ["서울", "동대구", "광주송정", "동해", "대전"]
+    assert S.filter_station_names(names, "동") == ["동대구", "동해"]
+    assert S.filter_station_names(names, "대") == ["대전", "동대구"]
+    assert S.filter_station_names(names, "") == names
+    assert S.filter_station_names(names, "없는역") == []
+    assert S.filter_station_names(names, "대", limit=1) == ["대전"]
+
+
 def test_station_codes_pass_through_and_unknown_names_are_refused():
     index = {"서울": "0001", "부산": "0020"}
     assert S.resolve_station_code("서울", index) == "0001"

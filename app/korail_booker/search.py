@@ -115,6 +115,31 @@ def station_code_index(client: KorailClient) -> dict[str, str]:
     }
 
 
+def filter_station_names(
+    names: Iterable[str],
+    query: str,
+    *,
+    limit: int = 30,
+) -> list[str]:
+    """친 글자로 역 이름을 좁힙니다. 앞에서 맞는 것을 먼저 놓습니다.
+
+    ``"동"`` 이면 ``동대구`` 가 ``광주송정`` 보다 먼저 옵니다 — 사람은 대개
+    이름의 앞을 치기 때문입니다. 빈 질의는 전부를 그대로 돌려줍니다.
+    """
+    needle = query.strip().casefold()
+    if not needle:
+        return list(names)[:limit]
+    starts: list[str] = []
+    contains: list[str] = []
+    for name in names:
+        folded = name.casefold()
+        if folded.startswith(needle):
+            starts.append(name)
+        elif needle in folded:
+            contains.append(name)
+    return (starts + contains)[:limit]
+
+
 def resolve_station_code(
     reference: str,
     index: Mapping[str, str],

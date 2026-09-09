@@ -12,12 +12,14 @@
 
 from __future__ import annotations
 
+import calendar
 import queue
 import threading
 import time
 import tkinter as tk
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
+from datetime import date
 from tkinter import messagebox, ttk
 
 from korail_mobile_api import (
@@ -49,6 +51,7 @@ from .search import (
     TRANSFER_CUSTOM,
     TRANSFER_SERVER,
     SearchRequest,
+    filter_station_names,
     search_journeys,
     transfer_station_candidates,
 )
@@ -80,6 +83,14 @@ CLOCK_CHOICES = (
 DEFAULT_MIN_TRANSFER_MINUTES = 0
 DEFAULT_MAX_TRANSFER_MINUTES = 30
 POLL_HINT = f"{MIN_POLL_INTERVAL_S:g}초 이상"
+WEEKDAY_NAMES = ("월", "화", "수", "목", "금", "토", "일")
+#: 자동완성이 무시하는 키. 방향키와 기능키로는 목록을 다시 좁히지 않습니다.
+_NAVIGATION_KEYS = frozenset(
+    {
+        "Up", "Down", "Left", "Right", "Return", "Escape", "Tab",
+        "Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R",
+    }
+)
 
 
 def parse_clock_field(text: str, *, label: str) -> str:
@@ -115,6 +126,102 @@ def parse_int_field(text: str, *, label: str, minimum: int = 0) -> int:
     return value
 
 
+class AutocompleteCombobox(ttk.Combobox):
+    """치는 대로 목록이 좁혀지는 콤보. 직접 입력도 그대로 됩니다.
+
+    드롭다운을 **스스로 펼치지는 않습니다.** 한글 입력기가 글자를 조합하는
+    도중에 목록을 펼치면 조합이 끊어집니다. 목록만 좁혀 두고, 펼치는 것은
+    아래 화살표나 ``Down`` 키에 맡깁니다.
+    """
+
+    def __init__(self, master: tk.Misc, **kwargs: object) -> None:
+        super().__init__(master, **kwargs)  # type: ignore[arg-type]
+        self._completions: tuple[str, ...] = ()
+        self.bind("<KeyRelease>", self._on_key_release)
+
+    def set_completions(self, names: Sequence[str]) -> None:
+        self._completions = tuple(names)
+        self.configure(values=list(self._completions))
+
+    def _on_key_release(self, event: tk.Event) -> None:
+        if not self._completions or event.keysym in _NAVIGATION_KEYS:
+            return
+        matches = filter_station_names(self._completions, self.get())
+        self.configure(values=matches or list(self._completions))
+
+
+class DatePicker(tk.Toplevel):
+    """달 달력 하나. 고른 날짜를 ``YYYY-MM-DD`` 로 돌려줍니다.
+
+    tkcalendar 같은 것을 새로 들이지 않으려고 직접 그립니다 — 이 프로그램의
+    의존성은 라이브러리와 같아야 합니다(``httpx``, ``cryptography``).
+    """
+
+    def __init__(self, master: tk.Misc, initial: date, on_pick: Callable[[date], None]):
+        super().__init__(master)
+        self.title("날짜 고르기")
+        self.transient(master.winfo_toplevel())
+        self.resizable(False, False)
+        self._on_pick = on_pick
+        self._today = date.today()
+        self._shown = initial.replace(day=1)
+        self._header = tk.StringVar()
+        top = ttk.Frame(self)
+        top.grid(row=0, column=0, padx=8, pady=(8, 4), sticky="ew")
+        ttk.Button(top, text="◀", width=3, command=lambda: self._shift(-1)).pack(
+            side="left"
+        )
+        ttk.Label(top, textvariable=self._header, width=14, anchor="center").pack(
+            side="left", padx=6
+        )
+        ttk.Button(top, text="▶", width=3, command=lambda: self._shift(1)).pack(
+            side="left"
+        )
+        ttk.Button(top, text="오늘", command=lambda: self._choose(self._today)).pack(
+            side="left", padx=(10, 0)
+        )
+        self._grid = ttk.Frame(self)
+        self._grid.grid(row=1, column=0, padx=8, pady=(0, 8))
+        self._draw()
+
+    def _shift(self, months: int) -> None:
+        month = self._shown.month + months
+        year = self._shown.year + (month - 1) // 12
+        self._shown = date(year, (month - 1) % 12 + 1, 1)
+        self._draw()
+
+    def _choose(self, chosen: date) -> None:
+        self._on_pick(chosen)
+        self.destroy()
+
+    def _draw(self) -> None:
+        for child in self._grid.winfo_children():
+            child.destroy()
+        self._header.set(f"{self._shown.year}년 {self._shown.month}월")
+        for column, name in enumerate(WEEKDAY_NAMES):
+            colour = "#b42318" if column == 6 else ("#1f6feb" if column == 5 else "#000")
+            ttk.Label(self._grid, text=name, width=4, anchor="center",
+                      foreground=colour).grid(row=0, column=column, padx=1, pady=2)
+        weeks = calendar.Calendar(firstweekday=0).monthdayscalendar(
+            self._shown.year, self._shown.month
+        )
+        for row, week in enumerate(weeks, start=1):
+            for column, day in enumerate(week):
+                if day == 0:
+                    continue
+                current = date(self._shown.year, self._shown.month, day)
+                button = ttk.Button(
+                    self._grid,
+                    text=str(day),
+                    width=4,
+                    command=lambda picked=current: self._choose(picked),
+                )
+                # 지난 날짜는 조회할 수 없습니다 — 서버가 주지 않습니다.
+                if current < self._today:
+                    button.state(["disabled"])
+                button.grid(row=row, column=column, padx=1, pady=1)
+
+
 class BookerApp:
     """창 하나에 로그인·조회·자동예매가 다 들어간 화면."""
 
@@ -131,6 +238,8 @@ class BookerApp:
         self._credentials: tuple[str, str] | None = None
         #: 환승역 목록이 어느 구간 것인지. 같은 구간이면 다시 묻지 않습니다.
         self._transfer_route: tuple[str, str] | None = None
+        #: 전국 역 이름. 자동완성과 환승역 추가가 이것을 씁니다.
+        self.station_names: tuple[str, ...] = ()
         self._build()
         self._restore()
         self._watch_for_changes(
@@ -145,16 +254,20 @@ class BookerApp:
             *self.passenger_vars.values(),
         )
         self.root.after(120, self._drain)
+        # 역 목록은 로그인 없이도 받을 수 있습니다. 켜자마자 받아 두면 자동완성이
+        # 처음부터 돕니다 — 단추를 눌러야 채워지는 이유를 아무도 모릅니다.
+        self.root.after(200, self.on_load_stations)
 
     # -- 화면 만들기 ---------------------------------------------------------
 
     def _build(self) -> None:
         self.root.title("코레일 예매 도우미")
-        self.root.geometry("1180x800")
+        self.root.geometry("1180x900")
         self.root.minsize(980, 620)
         self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(2, weight=5)
-        self.root.rowconfigure(4, weight=1)
+        # minsize 가 없으면 위쪽 조건이 커질 때 표가 몇 줄로 눌립니다.
+        self.root.rowconfigure(2, weight=5, minsize=240)
+        self.root.rowconfigure(4, weight=1, minsize=120)
         self._build_login()
         self._build_query()
         self._build_results()
@@ -214,13 +327,20 @@ class BookerApp:
         row = ttk.Frame(frame)
         row.grid(row=0, column=0, sticky="w", padx=4, pady=4)
         ttk.Label(row, text="출발").pack(side="left")
-        self.departure_box = ttk.Combobox(row, textvariable=self.departure, width=10)
+        self.departure_box = AutocompleteCombobox(
+            row, textvariable=self.departure, width=12
+        )
         self.departure_box.pack(side="left", padx=(2, 8))
         ttk.Label(row, text="도착").pack(side="left")
-        self.arrival_box = ttk.Combobox(row, textvariable=self.arrival, width=10)
+        self.arrival_box = AutocompleteCombobox(
+            row, textvariable=self.arrival, width=12
+        )
         self.arrival_box.pack(side="left", padx=(2, 8))
         ttk.Label(row, text="날짜").pack(side="left")
-        ttk.Entry(row, textvariable=self.date, width=12).pack(side="left", padx=(2, 8))
+        ttk.Entry(row, textvariable=self.date, width=12).pack(side="left", padx=(2, 2))
+        ttk.Button(row, text="달력", width=5, command=self.pick_date).pack(
+            side="left", padx=(0, 8)
+        )
         # 시각은 고르는 것입니다. 손으로 치면 형식을 틀리기 쉽고, 틀린 값은
         # 조회 전에 경고창으로만 돌아옵니다.
         ttk.Label(row, text="시간").pack(side="left")
@@ -239,8 +359,12 @@ class BookerApp:
             width=7,
             state="readonly",
         ).pack(side="left", padx=2)
-        ttk.Button(row, text="역 목록 불러오기", command=self.on_load_stations).pack(
-            side="left", padx=8
+        self.station_state = tk.StringVar(value="역 목록을 불러오는 중…")
+        ttk.Label(row, textvariable=self.station_state, foreground="#666666").pack(
+            side="left", padx=(4, 4)
+        )
+        ttk.Button(row, text="새로고침", width=8, command=self.on_load_stations).pack(
+            side="left"
         )
 
         # 종별은 체크박스를 한 줄에 늘어놓습니다. 체크 메뉴는 하나 고를 때마다
@@ -293,9 +417,7 @@ class BookerApp:
             ttk.Entry(row2, textvariable=self.passenger_vars[key], width=3).pack(
                 side="left"
             )
-        self.search_button = ttk.Button(row2, text="조회", command=self.on_search)
-        self.search_button.pack(side="left", padx=16)
-        ttk.Label(row2, text="(Enter)", foreground="#666666").pack(side="left")
+
 
         # 환승 조건은 환승을 켰을 때만 만질 수 있습니다. 꺼져 있으면 아무 효과도
         # 없는 칸이라 켜 두면 헷갈리기만 합니다.
@@ -303,6 +425,7 @@ class BookerApp:
             frame, text="환승 조건 (직통 열차에는 영향을 주지 않습니다)"
         )
         self.transfer_frame.grid(row=3, column=0, sticky="ew", padx=4, pady=(2, 6))
+        self._build_search_button(frame)
         left = ttk.Frame(self.transfer_frame)
         left.grid(row=0, column=0, sticky="nw", padx=4, pady=4)
         self.server_radio = ttk.Radiobutton(
@@ -358,20 +481,62 @@ class BookerApp:
         )
         self.transfer_list.configure(yscrollcommand=list_scroll.set)
         list_scroll.pack(side="left", fill="y")
+        adder = ttk.Frame(right)
+        adder.pack(anchor="w", pady=(4, 0))
+        # 서버가 준 후보에 없는 역으로도 갈아탈 수 있습니다. 직접 지정 모드는
+        # 어차피 두 구간을 따로 조회하는 것이라, 역 이름만 알면 됩니다.
+        self.transfer_query = tk.StringVar()
+        self.transfer_entry = AutocompleteCombobox(
+            adder, textvariable=self.transfer_query, width=14
+        )
+        self.transfer_entry.pack(side="left")
+        self.transfer_entry.bind("<Return>", lambda _event: self.add_transfer_station())
+        self.transfer_add_button = ttk.Button(
+            adder, text="추가", width=5, command=self.add_transfer_station
+        )
+        self.transfer_add_button.pack(side="left", padx=4)
         self.transfer_load_button = ttk.Button(
-            right,
-            text="이 구간의 환승역 불러오기",
+            adder,
+            text="이 구간 후보 다시 불러오기",
             command=self.on_load_transfer_stations,
         )
-        self.transfer_load_button.pack(anchor="w", pady=(4, 0))
+        self.transfer_load_button.pack(side="left", padx=4)
         ttk.Label(
             right,
-            text="목록은 코레일이 이 구간에 대해 답한 환승역입니다"
-            "(qry.chtnStn.do). 전국 역 목록이 아닙니다.",
+            text="목록은 코레일이 이 구간에 대해 답한 환승역(qry.chtnStn.do)입니다. "
+            "직접 지정 모드에서는 여기 없는 역도 위 칸에서 찾아 [추가] 하면 됩니다.",
             foreground="#666666",
-            wraplength=320,
+            wraplength=560,
             justify="left",
-        ).pack(anchor="w")
+        ).pack(anchor="w", pady=(2, 0))
+
+    def _build_search_button(self, frame: ttk.LabelFrame) -> None:
+        """조회 단추는 조건 **아래**에 크게 둡니다.
+
+        조건을 고치고 나서 누르는 것이라, 조건 줄 사이에 끼어 있으면 눈이
+        찾지 못합니다. 환승역을 바꾼 뒤 다시 누르는 일이 잦습니다.
+        """
+        bar = ttk.Frame(frame)
+        bar.grid(row=4, column=0, sticky="ew", padx=4, pady=(0, 8))
+        style = ttk.Style(self.root)
+        style.configure("Search.TButton", font=("", 11, "bold"), padding=(24, 8))
+        self.search_button = ttk.Button(
+            bar, text="조회", style="Search.TButton", command=self.on_search
+        )
+        self.search_button.pack(side="left")
+        ttk.Label(
+            bar,
+            text="조건을 바꾼 뒤에는 다시 눌러야 합니다 (Enter 로도 됩니다).",
+            foreground="#666666",
+        ).pack(side="left", padx=10)
+
+    def pick_date(self) -> None:
+        """달력에서 고릅니다. 칸에 직접 쳐 넣어도 그대로 됩니다."""
+        try:
+            current = date.fromisoformat(self.date.get().strip())
+        except ValueError:
+            current = date.today()
+        DatePicker(self.root, current, lambda picked: self.date.set(picked.isoformat()))
 
     def _build_results(self) -> None:
         frame = ttk.LabelFrame(self.root, text="3. 열차 (여러 개 고르면 먼저 열리는 것을 잡습니다)")
@@ -381,7 +546,12 @@ class BookerApp:
         columns = ("kind", "train", "departure", "arrival", "duration", "transfer",
                    "general", "special", "extras")
         self.tree = ttk.Treeview(
-            frame, columns=columns, show="tree headings", selectmode="extended"
+            frame,
+            columns=columns,
+            show="tree headings",
+            selectmode="extended",
+            # 최소 높이입니다. 없으면 위쪽 조건이 커질 때 표가 0줄로 눌립니다.
+            height=9,
         )
         headings = {
             "kind": ("구분", 90),
@@ -464,7 +634,7 @@ class BookerApp:
         frame.grid(row=4, column=0, sticky="nsew", padx=8, pady=(4, 8))
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
-        self.log_text = tk.Text(frame, height=7, wrap="word", state="disabled")
+        self.log_text = tk.Text(frame, height=6, wrap="word", state="disabled")
         self.log_text.grid(row=0, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(frame, orient="vertical", command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=scroll.set)
@@ -569,6 +739,16 @@ class BookerApp:
             self.transfer_load_button,
         ):
             widget.configure(state=state)
+        # 역을 손으로 넣는 것은 직접 지정 모드에서만 뜻이 있습니다 — 서버 추천
+        # 모드에서 없는 역을 넣으면 결과를 0편으로 만드는 필터가 될 뿐입니다.
+        adding = (
+            "normal"
+            if self.include_transfer.get()
+            and self.transfer_mode.get() == TRANSFER_CUSTOM
+            else "disabled"
+        )
+        self.transfer_entry.configure(state=adding)
+        self.transfer_add_button.configure(state=adding)
         self.transfer_list.configure(state=state)
 
     def selected_transfer_stations(self) -> tuple[str, ...]:
@@ -598,6 +778,29 @@ class BookerApp:
             if select_all or name in keep:
                 self.transfer_list.selection_set(index)
         self.sync_transfer_state()
+
+    def add_transfer_station(self) -> None:
+        """친 역을 목록에 넣고 고릅니다. 서버 후보에 없어도 됩니다."""
+        name = self.transfer_query.get().strip()
+        if not name:
+            return
+        if self.station_names and name not in self.station_names:
+            messagebox.showwarning(
+                "환승역",
+                f"'{name}' 은 역 목록에 없습니다. 이름을 확인하세요 "
+                "(예: '동대구', '서대전').",
+            )
+            return
+        existing = list(self.transfer_list.get(0, "end"))
+        if name not in existing:
+            existing.append(name)
+        self._fill_transfer_stations(existing, select_all=False)
+        for index, item in enumerate(self.transfer_list.get(0, "end")):
+            if item == name:
+                self.transfer_list.selection_set(index)
+        self.transfer_query.set("")
+        self.mark_stale()
+        self._write_log(f"환승역 후보에 {name} 을 넣었습니다.")
 
     def on_load_transfer_stations(self) -> None:
         """이 구간에서 갈아탈 수 있는 역만 불러옵니다. 전국 역 목록이 아닙니다."""
@@ -674,6 +877,9 @@ class BookerApp:
             except Exception as exc:
                 self._write_log(f"화면 갱신 오류: {type(exc).__name__}: {exc}")
         self.root.after(120, self._drain)
+        # 역 목록은 로그인 없이도 받을 수 있습니다. 켜자마자 받아 두면 자동완성이
+        # 처음부터 돕니다 — 단추를 눌러야 채워지는 이유를 아무도 모릅니다.
+        self.root.after(200, self.on_load_stations)
 
     def _in_thread(self, work: Callable[[], None], name: str) -> None:
         """작업 스레드 하나. 무슨 예외가 나든 조용히 죽지 않습니다.
@@ -773,6 +979,7 @@ class BookerApp:
                 stations = client.get_station_data().stations
             except KorailApiError as exc:
                 self.log(f"역 목록을 불러오지 못했습니다: {exc}")
+                self.events.put(lambda: self.station_state.set("역 목록 없음"))
                 return
             names = sorted({station.name for station in stations if station.name})
             self.events.put(lambda: self._fill_stations(names))
@@ -780,9 +987,11 @@ class BookerApp:
         self._in_thread(work, "korail-stations")
 
     def _fill_stations(self, names: list[str]) -> None:
-        self.departure_box.configure(values=names)
-        self.arrival_box.configure(values=names)
-        self._write_log(f"역 {len(names)}개를 불러왔습니다.")
+        self.station_names = tuple(names)
+        for box in (self.departure_box, self.arrival_box, self.transfer_entry):
+            box.set_completions(names)
+        self.station_state.set(f"역 {len(names)}곳")
+        self._write_log(f"역 {len(names)}개를 불러왔습니다. 칸에 치면 좁혀집니다.")
 
     # -- 동작: 조회 ----------------------------------------------------------
 
