@@ -69,7 +69,6 @@ class Settings:
     poll_interval_s: float = 30.0
     watch_minutes: int = 60
     allow_standby: bool = False
-    add_to_cart: bool = False
     adult: int = 1
     teenager: int = 0
     child: int = 0

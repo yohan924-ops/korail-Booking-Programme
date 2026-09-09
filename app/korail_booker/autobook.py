@@ -6,8 +6,8 @@
 지키는 것은 CLI 쪽(``scripts/watch_and_reserve.py``)과 같습니다.
 
 * 잡으면 그 자리에서 끝납니다. 재시도한 예약은 중복 예약입니다.
-* 만드는 consent 는 한 번에 한 범주입니다 — 예약은 ``reserve``, 장바구니는
-  ``cart``. 결제·환불·취소 범주는 이 파일 어디에서도 열지 않습니다.
+* 만드는 consent 는 ``reserve`` 하나뿐입니다. 결제·환불·취소·장바구니
+  범주는 이 파일 어디에서도 열지 않습니다.
 * ``live`` 가 거짓이면 ``dry_run=True`` 라 아무것도 나가지 않고 미리보기만
   돌아옵니다.
 * 주기에 흔들림을 줍니다. 정확히 일정한 간격은 그 자체로 자동화 신호입니다.
@@ -25,7 +25,6 @@ from enum import Enum
 from korail_mobile_api import (
     KORAIL_STANDBY_HOLD_MESSAGE_CODE,
     BaseKorailResponse,
-    CartAddRequest,
     KorailAppError,
     KorailClient,
     KorailProtocolError,
@@ -78,9 +77,11 @@ class BookingOptions:
     watch_minutes: int = 60
     #: 좌석이 안 열리면 예약대기(``1102``)도 시도합니다. 직통·일반실 전용.
     allow_standby: bool = False
-    #: 홀드를 잡은 뒤 장바구니에도 담습니다.
-    add_to_cart: bool = False
-    #: 거짓이면 예약 요청을 보내지 않고 미리보기만 받습니다.
+    #: 거짓이면 ``dry_run=True`` 라 예약 요청을 보내지 않고 미리보기만 받습니다.
+    #:
+    #: 화면에는 이 스위치가 없습니다 — 켜는 것을 잊고 미리보기를 진짜로 믿는
+    #: 일이 생겨서 걷어냈고, 지금 화면은 늘 참으로 부릅니다. 여기 남겨 두는
+    #: 것은 시험이 "아무것도 보내지 않았다" 를 증명하는 데 쓰기 때문입니다.
     live: bool = False
 
     def __post_init__(self) -> None:
@@ -135,14 +136,6 @@ def reserve_consent(*, live: bool) -> MutationConsent:
     assert not consent.allow_payment
     assert not consent.allow_cancel
     assert not consent.allow_refund
-    return consent
-
-
-def cart_consent(*, live: bool) -> MutationConsent:
-    """장바구니 하나만 여는 consent. 예약 consent 와 섞지 않습니다."""
-    consent = MutationConsent(allow_cart=True, dry_run=not live)
-    assert not consent.allow_reserve
-    assert not consent.allow_payment
     return consent
 
 
@@ -483,8 +476,6 @@ class AutoBooker:
             return self._finish(kind)
         hold = result if isinstance(result, ReservationHoldResponse) else None
         pnr = (hold.pnr_no if hold else None) or "(응답에 PNR 이 없습니다)"
-        if hold is not None and self.options.add_to_cart:
-            self._add_to_cart(hold)
         self._settled[target.direction] = hold
         self.announce(
             f"🚆 {kind} 성공 (아직 결제 전)\n"
@@ -499,23 +490,6 @@ class AutoBooker:
         if finished is not None:
             return replace(finished, journey=journey)
         return None
-
-    def _add_to_cart(self, hold: ReservationHoldResponse) -> None:
-        pnr = (hold.pnr_no or "").strip()
-        if not pnr:
-            self.say("    PNR 이 없어 장바구니에 담지 못했습니다")
-            return
-        try:
-            self.client.add_to_cart(
-                CartAddRequest(pnr_no=pnr),
-                consent=cart_consent(live=self.options.live),
-            )
-        except KorailAppError as exc:
-            self.say(f"    장바구니 담기 실패({exc.code}). 홀드는 그대로입니다")
-            return
-        self.say("    장바구니에도 담았습니다")
-
-    # -- 곁가지 --------------------------------------------------------------
 
     def _try_relogin(self) -> bool:
         if self._relogin is None:

@@ -44,7 +44,6 @@ from korail_booker.autobook import (
     BookingOptions,
     Outcome,
     Target,
-    cart_consent,
     is_standby_available,
     payment_deadline_text,
     reserve_consent,
@@ -698,9 +697,6 @@ def test_the_program_opens_one_category_at_a_time():
         reserve = reserve_consent(live=live)
         assert reserve.allow_reserve and not reserve.allow_cart
         assert not (reserve.allow_payment or reserve.allow_refund or reserve.allow_cancel)
-        cart = cart_consent(live=live)
-        assert cart.allow_cart and not cart.allow_reserve
-        assert not (cart.allow_payment or cart.allow_refund or cart.allow_cancel)
     assert reserve_consent(live=False).dry_run is True
     assert reserve_consent(live=True).dry_run is False
 
@@ -984,23 +980,23 @@ def test_standby_without_the_confirmation_code_leaves_the_hold_alone():
     assert recorder.count(STANDBY_ROUTE) == 0
 
 
-def test_the_cart_is_only_touched_when_asked():
+def test_the_cart_is_never_touched():
+    """장바구니 경로를 걷어냈습니다.
+
+    예약을 잡으면 결제 기한 안에 결제해야 하는 것은 담든 안 담든 같습니다.
+    담아서 무엇이 좋아지는지는 이 저장소가 확인한 적이 없고, 확인하지 못한
+    것을 위해 요청을 하나 더 내보낼 이유가 없습니다.
+    """
     recorder = _Recorder(
         {SEARCH: _search_reply([_row("00101", general="11")]), RESERVE: _reserve_reply()}
     )
-    target = _journey(_summary(general="11"))
-    _booker(recorder, [target], live=True).run(threading.Event())
-    assert recorder.count(CART) == 0
-
-    recorder = _Recorder(
-        {
-            SEARCH: _search_reply([_row("00101", general="11")]),
-            RESERVE: _reserve_reply(),
-            CART: _ok(),
-        }
+    _booker(recorder, [_journey(_summary(general="11"))], live=True).run(
+        threading.Event()
     )
-    _booker(recorder, [target], live=True, add_to_cart=True).run(threading.Event())
-    assert recorder.count(CART) == 1
+
+    assert recorder.count(CART) == 0
+    for path in sorted(APP_DIR.rglob("*.py")):
+        assert "allow_cart=True" not in path.read_text(encoding="utf-8"), path
 
 
 def test_an_expired_session_logs_in_again():
@@ -1285,24 +1281,26 @@ def test_a_preview_run_says_out_loud_that_nothing_was_sent():
     assert "showinfo" in body
 
 
-def test_real_reservations_are_on_by_default_but_still_gated():
-    """기본이 켬입니다 — 이 프로그램을 켜는 이유가 진짜 예약이기 때문입니다.
+def test_the_program_always_reserves_for_real_and_still_gates_it():
+    """미리보기 스위치를 없앴습니다 — 늘 진짜로 보냅니다.
 
-    대신 켜져 있어도 그냥 나가지는 않습니다. 시작하면 확인 창이 뜨고,
-    로그인하지 않았으면 시작 자체가 막힙니다. 셋 중 하나라도 사라지면
-    실수 한 번이 진짜 예약이 되므로 함께 고정합니다.
+    켜는 것을 잊고 미리보기를 진짜라고 믿는 일이 실제로 생겼고, 이 프로그램을
+    켜는 이유가 진짜 예약입니다. 대신 시작할 때 확인 창이 뜨고, 로그인하지
+    않았으면 시작 자체가 막힙니다. 둘 중 하나라도 사라지면 실수 한 번이 진짜
+    예약이 되므로 함께 고정합니다.
     """
     source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
 
-    assert "self.live_mode = tk.BooleanVar(value=True)" in source
-    assert "if options.live and not self._confirm_live(targets):" in source
-    assert "if options.live and not self.logged_in:" in source
+    assert "live=True," in source
+    assert "self.live_mode" not in source
+    assert "if not self._confirm_live(targets):" in source
+    assert "if not self.logged_in:" in source
 
 
-def test_the_live_switch_is_never_written_to_the_settings_file():
-    """실제 예약은 켤 때마다 사람이 켜야 합니다. 저장해 두면 다음에 몰래 켜집니다."""
+def test_the_settings_file_stores_neither_the_live_switch_nor_the_cart():
+    """둘 다 화면에서 사라졌습니다. 남은 필드는 되살아날 자리가 됩니다."""
     stored = dataclasses.asdict(ST.Settings())
-    assert not [name for name in stored if "live" in name]
+    assert not [name for name in stored if "live" in name or "cart" in name]
 
 
 # --- 페이지 끝까지 훑기 --------------------------------------------------------
@@ -1553,20 +1551,34 @@ def test_every_section_is_a_pane_the_user_can_resize():
 
     for name in ("_build_login", "_build_query", "_build_results",
                  "_build_targets", "_build_booking", "_build_log"):
-        body = builders[name]
-        assert "_add_pane(parent" in body or "parent.add(" in body, name
-        assert "minsize=" in body, name
+        assert "_add_pane(parent" in builders[name], name
 
 
-def test_the_query_pane_cannot_be_shrunk_past_its_search_button():
-    """줄일 수 있게 하면 맨 아래 [조회] 가 잘리고, 그러면 조회할 방법이 없습니다.
+def test_a_pane_with_buttons_measures_its_own_minimum():
+    """손으로 적어 둔 최소 높이는 반드시 어긋납니다.
 
-    472 는 그 묶음이 스스로 요구하는 높이를 재서 넣은 값입니다.
+    예매 대상 묶음의 최소 높이를 96 으로 적어 뒀다가 [담기]·[빼기]·[비우기] 가
+    창이 조금만 작아져도 잘렸습니다. 조회 묶음의 [조회] 도 같은 위험입니다.
+    이제 그 묶음들은 ``minsize`` 를 주지 않고, 제 요구 높이를 재서 씁니다.
     """
     source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
-    assert "minsize=472" in source
-    # 모든 묶음의 최소 높이를 더한 것보다 본문이 높아야 눌리지 않습니다.
-    assert "BODY_HEIGHT = 1200" in source
+    tree = ast.parse(source)
+    builders = {
+        node.name: ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("_build_")
+    }
+
+    # 단추가 잘릴 수 있는 묶음은 재서 씁니다.
+    for name in ("_build_login", "_build_query", "_build_targets", "_build_booking"):
+        assert "minsize=" not in builders[name], name
+    # 줄여도 줄 수만 줄어드는 묶음만 숫자를 적습니다.
+    for name in ("_build_results", "_build_log"):
+        assert "minsize=" in builders[name], name
+
+    # 본문 높이도 상수가 아니라 그 최소 높이들의 합입니다.
+    assert "BODY_HEIGHT" not in source
+    assert "sum(self._pane_minimums)" in source
 
 
 # --- 배포용 실행기 --------------------------------------------------------------

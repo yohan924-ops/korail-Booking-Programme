@@ -104,10 +104,13 @@ TREE_COLUMNS = {
 }
 
 WEEKDAY_NAMES = ("월", "화", "수", "목", "금", "토", "일")
-#: 여섯 묶음이 눌리지 않고 다 들어가는 높이. 창이 이보다 작으면 스크롤이
-#: 생깁니다 — 묶음을 몇 픽셀로 찌부러뜨리는 것보다 굴려 보는 편이 낫습니다.
-#: 각 묶음이 스스로 요구하는 높이를 재서 정했습니다(77+472+256+146+113+129).
-BODY_HEIGHT = 1200
+#: 달력 바탕. 뒤쪽 창(대개 #f0f0f0)보다 **살짝** 어둡습니다. 많이
+#: 어두우면 글씨가 안 읽히고, 같으면 어디까지가 달력인지 안 보입니다.
+CALENDAR_BG = "#e2e2e2"
+#: 달력 테두리. 바탕보다 확실히 진해야 경계가 섭니다.
+CALENDAR_BORDER = "#7a7a7a"
+#: 칸 하나가 최소 높이 말고도 먹는 몫 — 손잡이와 위아래 여백.
+PANE_CHROME = 13
 #: 스스로 굴러가는 위젯. 이 위에서는 휠을 그쪽에 양보합니다.
 SELF_SCROLLING = frozenset({"Text", "Treeview", "Listbox"})
 #: 자동완성이 무시하는 키. 방향키와 기능키로는 목록을 다시 좁히지 않습니다.
@@ -176,29 +179,42 @@ class AutocompleteCombobox(ttk.Combobox):
         self.configure(values=matches or list(self._completions))
 
 
-class CalendarPanel(ttk.LabelFrame):
-    """같은 창 안에 붙는 달 달력. 팝업이 아닙니다.
+class CalendarPanel(tk.Frame):
+    """같은 창 안에 겹쳐 뜨는 달 달력. 팝업이 아닙니다.
 
     tkcalendar 같은 것을 새로 들이지 않으려고 직접 그립니다 — 이 프로그램의
     의존성은 라이브러리와 같아야 합니다(``httpx``, ``cryptography``).
+
+    ttk 가 아니라 tk 위젯으로 짭니다. 겹쳐 뜨는 것이라 **뒤쪽 창과 색이 같으면
+    어디까지가 달력인지 보이지 않는데**, ttk 는 테마에 따라 배경색 지정을
+    무시합니다. 고전 위젯은 어느 테마에서든 지정한 색 그대로 칠합니다.
     """
 
     def __init__(self, master: tk.Misc, on_pick: Callable[[date], None]):
-        super().__init__(master, text="날짜 고르기")
+        super().__init__(
+            master,
+            background=CALENDAR_BG,
+            # 테두리를 두 겹으로 둡니다 — 바깥은 진한 선, 안쪽은 살짝 도드라지게.
+            highlightbackground=CALENDAR_BORDER,
+            highlightcolor=CALENDAR_BORDER,
+            highlightthickness=2,
+            relief="raised",
+            borderwidth=1,
+        )
         self._on_pick = on_pick
         self._today = date.today()
         self._shown = self._today.replace(day=1)
         self._header = tk.StringVar()
         self._title = tk.StringVar(value="가는 날")
-        top = ttk.Frame(self)
+        top = tk.Frame(self, background=CALENDAR_BG)
         top.grid(row=0, column=0, padx=8, pady=(6, 2), sticky="ew")
-        ttk.Label(top, textvariable=self._title, foreground="#1f6feb").pack(side="left")
+        tk.Label(top, textvariable=self._title, foreground="#1f6feb",
+                 background=CALENDAR_BG).pack(side="left")
         ttk.Button(top, text="◀", width=3, command=lambda: self._shift(-1)).pack(
             side="left", padx=(10, 0)
         )
-        ttk.Label(top, textvariable=self._header, width=12, anchor="center").pack(
-            side="left"
-        )
+        tk.Label(top, textvariable=self._header, width=12, anchor="center",
+                 background=CALENDAR_BG).pack(side="left")
         ttk.Button(top, text="▶", width=3, command=lambda: self._shift(1)).pack(
             side="left"
         )
@@ -206,8 +222,8 @@ class CalendarPanel(ttk.LabelFrame):
             side="left", padx=(8, 0)
         )
         ttk.Button(top, text="닫기", width=5, command=self.hide).pack(side="left", padx=4)
-        self._grid = ttk.Frame(self)
-        self._grid.grid(row=1, column=0, padx=8, pady=(0, 6))
+        self._grid = tk.Frame(self, background=CALENDAR_BG)
+        self._grid.grid(row=1, column=0, padx=8, pady=(0, 8))
         self._draw()
 
     def open_for(self, title: str, current: date, *, over: tk.Misc, x: int, y: int) -> None:
@@ -242,8 +258,10 @@ class CalendarPanel(ttk.LabelFrame):
         self._header.set(f"{self._shown.year}년 {self._shown.month}월")
         for column, name in enumerate(WEEKDAY_NAMES):
             colour = "#b42318" if column == 6 else ("#1f6feb" if column == 5 else "#000")
-            ttk.Label(self._grid, text=name, width=4, anchor="center",
-                      foreground=colour).grid(row=0, column=column, padx=1, pady=2)
+            tk.Label(self._grid, text=name, width=4, anchor="center",
+                     foreground=colour, background=CALENDAR_BG).grid(
+                row=0, column=column, padx=1, pady=2
+            )
         weeks = calendar.Calendar(firstweekday=0).monthdayscalendar(
             self._shown.year, self._shown.month
         )
@@ -283,6 +301,10 @@ class BookerApp:
         self._transfer_route: tuple[str, str] | None = None
         #: 전국 역 이름. 자동완성과 환승역 추가가 이것을 씁니다.
         self.station_names: tuple[str, ...] = ()
+        #: 붙인 칸들 — (담은 PanedWindow, 묶음, 지정된 최소 높이 또는 None).
+        self._panes: list[tuple[tk.PanedWindow, ttk.Widget, int | None]] = []
+        #: 각 칸의 최소 높이. 본문 높이를 여기서 더해 냅니다.
+        self._pane_minimums: list[int] = []
         #: 달력이 지금 어느 칸을 고치는 중인지.
         self._calendar_for_return = False
         #: 조회 결과와, 자동예매에 담아 둔 것.
@@ -343,15 +365,15 @@ class BookerApp:
         )
         window = canvas.create_window((0, 0), window=body, anchor="nw")
 
-        def fit(event: tk.Event) -> None:
-            # 안쪽은 창보다 좁아지지 않고, BODY_HEIGHT 보다 낮아지지도
-            # 않습니다. 낮아지면 PanedWindow 가 묶음을 몇 픽셀로 눌러 버리고,
-            # 그때 스크롤로 볼 것도 남지 않습니다.
-            height = max(BODY_HEIGHT, event.height)
-            canvas.itemconfigure(window, width=event.width, height=height)
-            canvas.configure(scrollregion=(0, 0, event.width, height))
+        def fit(width: int, visible: int) -> None:
+            # 안쪽은 창보다 좁아지지 않고, 묶음들의 최소 높이 합보다 낮아지지도
+            # 않습니다. 낮아지면 PanedWindow 가 묶음을 눌러 버리고, 그때는
+            # 스크롤로 볼 것도 남지 않습니다.
+            height = max(self._body_height(), visible)
+            canvas.itemconfigure(window, width=width, height=height)
+            canvas.configure(scrollregion=(0, 0, width, height))
 
-        canvas.bind("<Configure>", fit)
+        canvas.bind("<Configure>", lambda event: fit(event.width, event.height))
         # 휠은 창 어디서 굴려도 듣습니다. 다만 스스로 굴러가는 위젯 위에서는
         # 그쪽에 양보합니다 — 표를 굴리려는데 창이 굴러가면 못 씁니다.
         canvas.bind_all("<MouseWheel>", self._on_wheel)
@@ -364,26 +386,60 @@ class BookerApp:
         self._build_targets(body)
         self._build_booking(body)
         self._build_log(body)
+        # 묶음을 다 붙인 뒤라야 최소 높이를 잴 수 있고, 그 합을 알아야 스크롤
+        # 영역을 정할 수 있다 — 창이 그보다 작으면 굴려서 본다.
+        self._settle_panes()
+        fit(canvas.winfo_width(), canvas.winfo_height())
         # 조건을 고치고 Enter — 조회 단추를 찾아 누르지 않아도 됩니다.
         self.root.bind("<Return>", lambda _event: self.on_search())
 
     def _add_pane(
         self,
         parent: tk.PanedWindow,
-        frame: ttk.LabelFrame,
+        frame: ttk.Widget,
         *,
-        minsize: int,
         stretch: str,
+        minsize: int | None = None,
     ) -> None:
         """묶음 하나를 칸으로 붙입니다.
 
-        ``minsize`` 는 손잡이를 아무리 끌어도 이보다 작아지지 않는 높이이고,
-        ``stretch`` 는 창이 커질 때 남는 자리를 받을지입니다. 서식 묶음
-        (로그인·조회·자동예매)은 ``"never"`` 입니다 — 늘려 봐야 빈칸만
-        늘어납니다.
+        ``minsize`` 를 주지 않으면 **그 묶음이 스스로 요구하는 높이를 재서**
+        씁니다. 손으로 적어 두면 반드시 어긋납니다 — 실제로 예매 대상 묶음의
+        최소 높이를 96 으로 적어 두는 바람에 [담기]·[빼기]·[비우기] 가 창이
+        조금만 작아져도 잘려 나갔습니다. 위젯을 더 붙일수록 그 값은 더
+        틀려집니다.
+
+        줄여도 되는 묶음(표·기록처럼 줄이면 줄 수만 줄어드는 것)만 숫자를
+        적습니다. ``stretch`` 는 창이 커질 때 남는 자리를 받을지입니다 —
+        서식 묶음은 ``"never"`` 입니다. 늘려 봐야 빈칸만 늘어납니다.
         """
-        parent.add(frame, minsize=minsize, stretch=stretch, sticky="nsew",
+        # 지금 재면 1 이 나옵니다 — 이 함수는 묶음을 **만들자마자** 불리고,
+        # 안의 위젯은 그 뒤에 붙기 때문입니다. 그래서 여기서는 자리만 잡고,
+        # 실제 최소 높이는 :meth:`_settle_panes` 가 다 지은 뒤에 정합니다.
+        parent.add(frame, minsize=minsize or 1, stretch=stretch, sticky="nsew",
                    padx=8, pady=3)
+        self._panes.append((parent, frame, minsize))
+
+    def _settle_panes(self) -> None:
+        """다 지은 뒤에 각 칸의 최소 높이를 정합니다.
+
+        ``minsize`` 를 주지 않은 칸은 **제가 요구하는 높이**를 씁니다. 그래야
+        안에 있는 단추가 잘리지 않습니다.
+        """
+        self.root.update_idletasks()
+        self._pane_minimums = []
+        for parent, frame, given in self._panes:
+            minsize = given if given is not None else frame.winfo_reqheight()
+            parent.paneconfigure(frame, minsize=minsize)
+            self._pane_minimums.append(minsize)
+
+    def _body_height(self) -> int:
+        """묶음들이 눌리지 않는 최소 본문 높이.
+
+        상수로 적어 두면 위젯을 붙일 때마다 틀려집니다. 각 칸의 최소 높이를
+        더하고, 손잡이와 여백 몫을 얹습니다.
+        """
+        return sum(self._pane_minimums) + PANE_CHROME * len(self._pane_minimums)
 
     def _on_wheel(self, event: tk.Event) -> None:
         widget = event.widget
@@ -400,7 +456,7 @@ class BookerApp:
 
     def _build_login(self, parent: tk.PanedWindow) -> None:
         frame = ttk.LabelFrame(parent, text="1. 로그인 (아이디·휴대폰번호·회원번호)")
-        self._add_pane(parent, frame, minsize=78, stretch="never")
+        self._add_pane(parent, frame, stretch="never")
         self.login_id = tk.StringVar()
         self.login_pw = tk.StringVar()
         self.login_state = tk.StringVar(value="로그인하지 않았습니다 — 조회만 됩니다")
@@ -423,10 +479,10 @@ class BookerApp:
 
     def _build_query(self, parent: tk.PanedWindow) -> None:
         frame = ttk.LabelFrame(parent, text="2. 열차 조회")
-        # 조회 묶음의 최소 높이는 **제 요구 높이 그대로**입니다. 더 줄일 수 있게
-        # 하면 맨 아래 [조회] 단추가 잘려 나가고, 그러면 조회할 방법이
-        # 없어집니다. 좁은 화면에서는 줄이는 대신 스크롤합니다.
-        self._add_pane(parent, frame, minsize=472, stretch="never")
+        # 최소 높이를 재서 씁니다. 줄일 수 있게 하면 맨 아래 [조회] 단추가
+        # 잘려 나가고, 그러면 조회할 방법이 없어집니다. 좁은 화면에서는 줄이는
+        # 대신 스크롤합니다.
+        self._add_pane(parent, frame, stretch="never")
         self.departure = tk.StringVar()
         self.arrival = tk.StringVar()
         self.date = tk.StringVar(value=time.strftime("%Y-%m-%d"))
@@ -762,7 +818,9 @@ class BookerApp:
     def _build_results(self, parent: tk.PanedWindow) -> None:
         frame = ttk.LabelFrame(parent, text="3. 열차 (고른 것을 [담기] 로 예매 대상에 넣습니다)")
         self.results_frame = frame
-        self._add_pane(parent, frame, minsize=140, stretch="always")
+        # 표는 줄여도 됩니다 — 보이는 줄 수만 줄어듭니다. 머리글과 상태 줄이
+        # 남는 높이입니다.
+        self._add_pane(parent, frame, minsize=110, stretch="always")
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(1, weight=1)
         self.outbound_title = ttk.Label(frame, text="가는 편", foreground="#1f6feb")
@@ -803,7 +861,8 @@ class BookerApp:
 
     def _build_targets(self, parent: tk.PanedWindow) -> None:
         frame = ttk.LabelFrame(parent, text="4. 예매 대상 (여기 담긴 것만 노립니다)")
-        self._add_pane(parent, frame, minsize=96, stretch="always")
+        # 재서 씁니다. 96 으로 적어 뒀다가 [담기]·[빼기]·[비우기] 가 잘렸습니다.
+        self._add_pane(parent, frame, stretch="always")
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
         self.target_list = tk.Listbox(
@@ -831,18 +890,10 @@ class BookerApp:
 
     def _build_booking(self, parent: tk.PanedWindow) -> None:
         frame = ttk.LabelFrame(parent, text="5. 자동예매 (만석이면 취소표를 계속 노립니다)")
-        self._add_pane(parent, frame, minsize=115, stretch="never")
+        self._add_pane(parent, frame, stretch="never")
         self.poll_interval = tk.StringVar(value=f"{DEFAULT_POLL_INTERVAL_S:g}")
         self.watch_minutes = tk.StringVar(value="60")
         self.allow_standby = tk.BooleanVar(value=False)
-        self.add_to_cart = tk.BooleanVar(value=False)
-        # 기본이 켬입니다. 이 프로그램을 켜는 이유가 진짜 예약이기 때문입니다 —
-        # 매번 켜야 하면 켜는 것을 잊고 미리보기를 진짜라고 믿게 됩니다(실제로
-        # 그랬습니다). 대신 [자동예매 시작] 을 누르면 확인 창이 한 번 뜨고,
-        # 로그인하지 않았으면 시작 자체가 막히며, 지금 어느 쪽인지는 단추 옆에
-        # 계속 적혀 있습니다. 이 값은 설정 파일에 저장하지 않습니다.
-        self.live_mode = tk.BooleanVar(value=True)
-        self.mode_text = tk.StringVar(value="")
         self.notify_enabled = tk.BooleanVar(value=True)
         row = ttk.Frame(frame)
         row.grid(row=0, column=0, sticky="w", padx=4, pady=6)
@@ -854,20 +905,11 @@ class BookerApp:
         ttk.Checkbutton(row, text="예약대기도 시도(직통·일반실)", variable=self.allow_standby).pack(
             side="left"
         )
-        ttk.Checkbutton(row, text="잡으면 장바구니에도", variable=self.add_to_cart).pack(
-            side="left", padx=8
-        )
         ttk.Checkbutton(row, text="텔레그램 알림", variable=self.notify_enabled).pack(
             side="left"
         )
         row2 = ttk.Frame(frame)
         row2.grid(row=1, column=0, sticky="w", padx=4, pady=(0, 6))
-        ttk.Checkbutton(
-            row2,
-            text="실제 예약(홀드) 만들기 — 끄면 미리보기만",
-            variable=self.live_mode,
-            command=self._live_mode_changed,
-        ).pack(side="left")
         ttk.Button(row2, text="텔레그램 설정", command=self.on_telegram_settings).pack(
             side="left", padx=12
         )
@@ -877,12 +919,15 @@ class BookerApp:
             row2, text="중지", command=self.on_stop, state="disabled"
         )
         self.stop_button.pack(side="left")
-        # 체크 하나로 "진짜 잡는다" 와 "아무것도 안 보낸다" 가 갈립니다. 체크박스
-        # 하나만 두면 그것을 못 보고 미리보기를 진짜라고 믿게 됩니다 — 실제로
-        # 그랬습니다. 그래서 지금 어느 쪽인지 단추 옆에 계속 띄웁니다.
-        self.mode_label = ttk.Label(row2, textvariable=self.mode_text)
-        self.mode_label.pack(side="left", padx=12)
-        self._live_mode_changed()
+        # 미리보기 스위치는 없앴습니다. 켜는 것을 잊고 미리보기를 진짜라고
+        # 믿는 일이 실제로 생겼고, 이 프로그램을 켜는 이유가 진짜 예약이기
+        # 때문입니다. 대신 시작할 때 확인 창이 뜨고, 로그인하지 않았으면
+        # 시작 자체가 막힙니다.
+        ttk.Label(
+            row2,
+            text="누르면 진짜 예약을 만듭니다 (결제는 하지 않음)",
+            foreground="#a11",
+        ).pack(side="left", padx=12)
         ttk.Label(
             frame,
             text="결제는 하지 않습니다. 잡은 뒤 코레일 앱에서 기한 안에 결제하세요.",
@@ -897,9 +942,9 @@ class BookerApp:
         버립니다. 가운데 손잡이를 끌어 폭을 정할 수 있습니다.
         """
         paned = ttk.PanedWindow(parent, orient="horizontal")
-        # pady 는 tk.PanedWindow 에서 숫자 하나만 받습니다(튜플은 거절).
-        parent.add(paned, minsize=110, stretch="always", sticky="nsew",
-                   padx=8, pady=3)
+        # 기록도 줄여도 됩니다. pady 는 tk.PanedWindow 에서 숫자 하나만
+        # 받습니다(튜플은 거절).
+        self._add_pane(parent, paned, minsize=110, stretch="always")
         self.log_text = self._log_pane(
             paned, "기록 (로그인·조회)", self.clear_log, weight=3
         )
@@ -971,7 +1016,6 @@ class BookerApp:
         self.poll_interval.set(f"{stored.poll_interval_s:g}")
         self.watch_minutes.set(str(stored.watch_minutes))
         self.allow_standby.set(stored.allow_standby)
-        self.add_to_cart.set(stored.add_to_cart)
         self.notify_enabled.set(stored.notify_enabled)
         for key, var in self.passenger_vars.items():
             var.set(str(getattr(stored, key)))
@@ -1683,8 +1727,8 @@ class BookerApp:
             poll_interval_s=interval_s,
             watch_minutes=parse_int_field(self.watch_minutes.get(), label="감시 시간"),
             allow_standby=self.allow_standby.get(),
-            add_to_cart=self.add_to_cart.get(),
-            live=self.live_mode.get(),
+            # 화면에 스위치가 없습니다 — 늘 진짜로 보냅니다.
+            live=True,
         )
 
     def on_start(self) -> None:
@@ -1702,10 +1746,10 @@ class BookerApp:
         except (ValueError, TypeError) as exc:
             messagebox.showwarning("자동예매", str(exc))
             return
-        if options.live and not self.logged_in:
+        if not self.logged_in:
             messagebox.showwarning("자동예매", "실제 예약을 하려면 먼저 로그인하세요")
             return
-        if options.live and not self._confirm_live(targets):
+        if not self._confirm_live(targets):
             return
         custom = [
             target
@@ -1729,24 +1773,13 @@ class BookerApp:
         self.session = BookingSession(booker)
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
-        mode = "실제 예약" if options.live else "미리보기(아무것도 보내지 않음)"
         directions = len({target.direction for target in targets})
         self._write_booking(
-            f"자동예매 시작 — {len(targets)}편 감시, 방향 {directions}개, {mode}",
-            "warn" if not options.live else "info",
+            f"자동예매 시작 — {len(targets)}편 감시, 방향 {directions}개"
         )
         self.session.start(on_done=lambda result: self.events.put(
             lambda: self._booking_done(result)
         ))
-
-    def _live_mode_changed(self) -> None:
-        """지금이 실제인지 미리보기인지를 단추 옆에 적습니다."""
-        if self.live_mode.get():
-            self.mode_text.set("실제 예약을 만듭니다 (결제는 하지 않음)")
-            self.mode_label.configure(foreground="#a11")
-        else:
-            self.mode_text.set("지금은 미리보기 — 아무 요청도 보내지 않습니다")
-            self.mode_label.configure(foreground="#a15c00")
 
     def _confirm_live(self, targets: list[Target]) -> bool:
         lines = "\n".join(f"· {target.describe()}" for target in targets[:5])
