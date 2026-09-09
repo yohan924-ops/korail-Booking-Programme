@@ -206,6 +206,49 @@ def accepts(journey: Journey, request: SearchRequest) -> bool:
     )
 
 
+def rejection_lines(
+    journeys: Iterable[Journey],
+    request: SearchRequest,
+    *,
+    samples: int = 3,
+) -> list[str]:
+    """무엇이 몇 편을 걸러 냈는지, 그리고 걸러진 열차 몇 개의 실물.
+
+    "조건이 전부 걸러 냈습니다" 만으로는 어느 칸을 고쳐야 할지 알 수 없습니다.
+    조건별로 세고, 실제로 걸러진 열차를 몇 개 보여 줍니다 — 서버가 준 열차의
+    출발 시각과 종별을 보면 대개 어느 조건이 문제인지 바로 보입니다.
+    """
+    rejected: list[tuple[Journey, list[str]]] = []
+    counts = {"시간대": 0, "열차 종류": 0, "환승 조건": 0}
+    for journey in journeys:
+        failed: list[str] = []
+        if not _matches_window(journey, request):
+            failed.append("시간대")
+        if not _matches_train_name(journey, request):
+            failed.append("열차 종류")
+        if not _matches_transfer(journey, request):
+            failed.append("환승 조건")
+        if failed:
+            rejected.append((journey, failed))
+            for name in failed:
+                counts[name] += 1
+    if not rejected:
+        return []
+    tally = ", ".join(f"{name} {count}편" for name, count in counts.items() if count)
+    lines = [f"걸러진 이유: {tally}"]
+    for journey, failed in rejected[:samples]:
+        names = " ".join(dict.fromkeys(name for name in journey.train_names() if name))
+        numbers = "+".join(journey.train_numbers())
+        lines.append(
+            f"  · {names} {numbers} "
+            f"{journey.departure_clock[:2]}:{journey.departure_clock[2:4]}"
+            f" 출발 — {', '.join(failed)} 때문에 빠짐"
+        )
+    if len(rejected) > samples:
+        lines.append(f"  · 그 밖 {len(rejected) - samples}편")
+    return lines
+
+
 def _direct_pages(
     client: KorailClient,
     query: TrainSearchQuery,
@@ -471,12 +514,11 @@ def search_journeys(
             log(f"환승 {len(found)}편")
     unique = deduplicate(journeys)
     kept = [journey for journey in unique if accepts(journey, request)]
-    if log and unique and not kept:
-        # 서버는 열차를 줬는데 화면이 비는 경우입니다. 조건 탓이라고 말해 주지
-        # 않으면 프로그램이 고장 난 것처럼 보입니다.
-        log(
-            f"서버는 {len(unique)}편을 줬지만 조회 조건(시간대·열차 종류·"
-            "환승시간)이 전부 걸러 냈습니다."
-        )
+    if log and unique and len(kept) < len(unique):
+        # 서버는 열차를 줬는데 화면에 덜 나오는 경우입니다. 어느 조건이 몇 편을
+        # 걸렀는지 말해 주지 않으면 어느 칸을 고쳐야 할지 알 수 없습니다.
+        log(f"서버가 준 {len(unique)}편 중 {len(kept)}편이 조건에 맞습니다.")
+        for line in rejection_lines(unique, request):
+            log(line)
     kept.sort(key=sort_key)
     return kept

@@ -63,11 +63,10 @@ TRAIN_KINDS = (
     "KTX",
     "KTX-산천",
     "KTX-이음",
-    "ITX",
     "ITX-새마을",
     "ITX-마음",
-    "새마을",
     "무궁화",
+    "새마을",
     "누리로",
 )
 SEAT_CHOICES = (("무관", SeatPreference.ANY), ("일반실", SeatPreference.GENERAL),
@@ -244,25 +243,27 @@ class BookerApp:
             side="left", padx=8
         )
 
-        row2 = ttk.Frame(frame)
-        row2.grid(row=1, column=0, sticky="w", padx=4, pady=4)
-        ttk.Label(row2, text="열차 종류").pack(side="left")
-        # 여러 개를 고를 수 있어야 합니다. 콤보는 하나뿐이라 체크 메뉴로 바꿉니다.
-        # 거르는 방식이 부분일치라 "KTX" 는 KTX-산천·KTX-이음까지 함께 잡습니다.
-        self.train_kind_button = ttk.Menubutton(
-            row2, textvariable=self.train_kind_label, width=16
-        )
-        kind_menu = tk.Menu(self.train_kind_button, tearoff=False)
+        # 종별은 체크박스를 한 줄에 늘어놓습니다. 체크 메뉴는 하나 고를 때마다
+        # 닫혀서, 세 종류를 고르려면 메뉴를 세 번 열어야 했습니다.
+        kinds = ttk.Frame(frame)
+        kinds.grid(row=1, column=0, sticky="w", padx=4, pady=(4, 0))
+        ttk.Label(kinds, text="열차 종류").pack(side="left", padx=(0, 6))
         for kind in TRAIN_KINDS:
-            kind_menu.add_checkbutton(
-                label=kind,
+            ttk.Checkbutton(
+                kinds,
+                text=kind,
                 variable=self.train_kind_vars[kind],
                 command=self.sync_train_kinds,
-            )
-        kind_menu.add_separator()
-        kind_menu.add_command(label="모두 지우기 (전체 보기)", command=self.clear_train_kinds)
-        self.train_kind_button.configure(menu=kind_menu)
-        self.train_kind_button.pack(side="left", padx=(2, 8))
+            ).pack(side="left", padx=(0, 6))
+        ttk.Button(kinds, text="모두 지우기", command=self.clear_train_kinds).pack(
+            side="left", padx=(6, 6)
+        )
+        ttk.Label(kinds, textvariable=self.train_kind_label, foreground="#1f6feb").pack(
+            side="left"
+        )
+
+        row2 = ttk.Frame(frame)
+        row2.grid(row=2, column=0, sticky="w", padx=4, pady=4)
         ttk.Label(row2, text="좌석").pack(side="left")
         ttk.Combobox(
             row2,
@@ -301,7 +302,7 @@ class BookerApp:
         self.transfer_frame = ttk.LabelFrame(
             frame, text="환승 조건 (직통 열차에는 영향을 주지 않습니다)"
         )
-        self.transfer_frame.grid(row=2, column=0, sticky="ew", padx=4, pady=(2, 6))
+        self.transfer_frame.grid(row=3, column=0, sticky="ew", padx=4, pady=(2, 6))
         left = ttk.Frame(self.transfer_frame)
         left.grid(row=0, column=0, sticky="nw", padx=4, pady=4)
         self.server_radio = ttk.Radiobutton(
@@ -527,12 +528,9 @@ class BookerApp:
     def sync_train_kinds(self) -> None:
         self.mark_stale()
         picked = self.selected_train_kinds()
-        if not picked:
-            self.train_kind_label.set("전체")
-        elif len(picked) <= 2:
-            self.train_kind_label.set(", ".join(picked))
-        else:
-            self.train_kind_label.set(f"{picked[0]} 외 {len(picked) - 1}종")
+        self.train_kind_label.set(
+            "전체 (아무것도 고르지 않음)" if not picked else f"{len(picked)}종 선택"
+        )
 
     def clear_train_kinds(self) -> None:
         for var in self.train_kind_vars.values():
@@ -851,6 +849,7 @@ class BookerApp:
         self.results_status.set("조회 중…")
         self.results_label.configure(foreground="#1f6feb")
         self.log(f"조회: {request.departure}→{request.arrival} {request.date}")
+        self._note_if_today(request)
 
         def work() -> None:
             try:
@@ -864,6 +863,24 @@ class BookerApp:
             self.events.put(lambda: self._show_journeys(journeys))
 
         self._in_thread(work, "korail-search")
+
+    def _note_if_today(self, request: SearchRequest) -> None:
+        """오늘 조회면 서버가 지금 이후 열차만 준다는 것을 적어 둡니다.
+
+        시작 시각을 아침으로 두고 오후에 조회하면 "왜 이 열차가 없지" 가
+        됩니다. 이미 떠난 열차는 서버가 주지 않습니다.
+        """
+        if request.date != time.strftime("%Y%m%d"):
+            return
+        now = time.strftime("%H%M%S")
+        started = request.depart_after or "000000"
+        if started >= now:
+            return
+        self.log(
+            f"오늘 조회입니다 — 이미 떠난 열차는 서버가 주지 않습니다. "
+            f"지금은 {now[:2]}:{now[2:4]} 이고 시작 시각은 "
+            f"{started[:2]}:{started[2:4]} 입니다."
+        )
 
     def _refresh_transfer_stations(
         self,
@@ -933,8 +950,10 @@ class BookerApp:
             messagebox.showinfo(
                 "조회 결과 없음",
                 "조건에 맞는 열차가 없습니다.\n\n"
-                "아래 기록 창에 서버가 뭐라고 답했는지 찍혀 있습니다. "
-                "역 이름(예: '서울', '동대구')과 날짜를 먼저 확인해 보세요.",
+                "아래 기록 창에 어느 조건이 몇 편을 걸러 냈는지, 걸러진 열차가 "
+                "무엇이었는지 찍혀 있습니다.\n\n"
+                "자주 걸리는 것: 오늘 날짜로 조회하면 이미 떠난 열차는 서버가 "
+                "주지 않습니다. 시간대를 넓히거나 열차 종류 선택을 지워 보세요.",
             )
 
     def _row_values(self, journey: Journey) -> tuple[str, ...]:

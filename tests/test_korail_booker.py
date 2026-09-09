@@ -402,6 +402,35 @@ def test_a_named_transfer_station_filters_server_itineraries():
     assert S.accepts(_transfer_journey(20, station="동대구"), request)
 
 
+def test_the_log_says_which_condition_dropped_which_train():
+    """0편이면 왜 0편인지 말해야 합니다 — 어느 칸을 고칠지 알 수 있게."""
+    late = _journey(_summary(train_no="00777", departure_time="193000", name="무궁화호"))
+    request = _request(depart_before="120000", train_names=("KTX",))
+    lines = S.rejection_lines([late], request)
+    assert "시간대 1편" in lines[0]
+    assert "열차 종류 1편" in lines[0]
+    assert "무궁화호 00777 19:30 출발" in lines[1]
+    assert "시간대, 열차 종류 때문에 빠짐" in lines[1]
+    assert S.rejection_lines([_journey(_summary())], _request()) == []
+
+
+def test_a_partly_filtered_result_is_reported_too():
+    """전부 걸러졌을 때만이 아니라, 줄어들었을 때도 말합니다."""
+    recorder = _Recorder(
+        {SEARCH: _search_reply([
+            _row("00101", departure_time="080000"),
+            _row("00103", departure_time="200000"),
+        ])}
+    )
+    lines: list[str] = []
+    found = S.search_journeys(
+        _client(recorder), _request(depart_before="120000"), log=lines.append
+    )
+    assert [j.train_numbers()[0] for j in found] == ["00101"]
+    assert any("2편 중 1편이 조건에 맞습니다" in line for line in lines)
+    assert any("시간대 1편" in line for line in lines)
+
+
 # --- 조회 ---------------------------------------------------------------------
 
 
