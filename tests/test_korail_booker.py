@@ -1526,6 +1526,49 @@ def test_the_booker_waits_for_both_legs_instead_of_grabbing_one():
     assert recorder.count(RESERVE) == 0
 
 
+# --- 창 크기 ------------------------------------------------------------------
+
+
+def test_the_whole_window_scrolls():
+    """기능이 늘면서 어떤 화면에서도 다 보이지는 않게 됐습니다."""
+    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+
+    assert "tk.Canvas(self.root" in source
+    assert 'canvas.configure(yscrollcommand=scroll.set)' in source
+    # 휠은 창 어디서 굴려도 듣되, 스스로 굴러가는 위젯에는 양보합니다.
+    assert 'canvas.bind_all("<MouseWheel>", self._on_wheel)' in source
+    assert 'canvas.bind_all("<Button-4>", self._on_wheel)' in source
+    assert "SELF_SCROLLING" in source
+
+
+def test_every_section_is_a_pane_the_user_can_resize():
+    """1~5 묶음과 기록이 서로 크기를 나눌 수 있어야 합니다."""
+    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    builders = {
+        node.name: ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("_build_")
+    }
+
+    for name in ("_build_login", "_build_query", "_build_results",
+                 "_build_targets", "_build_booking", "_build_log"):
+        body = builders[name]
+        assert "_add_pane(parent" in body or "parent.add(" in body, name
+        assert "minsize=" in body, name
+
+
+def test_the_query_pane_cannot_be_shrunk_past_its_search_button():
+    """줄일 수 있게 하면 맨 아래 [조회] 가 잘리고, 그러면 조회할 방법이 없습니다.
+
+    472 는 그 묶음이 스스로 요구하는 높이를 재서 넣은 값입니다.
+    """
+    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+    assert "minsize=472" in source
+    # 모든 묶음의 최소 높이를 더한 것보다 본문이 높아야 눌리지 않습니다.
+    assert "BODY_HEIGHT = 1200" in source
+
+
 # --- 배포용 실행기 --------------------------------------------------------------
 
 

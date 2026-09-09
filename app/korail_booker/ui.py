@@ -104,6 +104,12 @@ TREE_COLUMNS = {
 }
 
 WEEKDAY_NAMES = ("월", "화", "수", "목", "금", "토", "일")
+#: 여섯 묶음이 눌리지 않고 다 들어가는 높이. 창이 이보다 작으면 스크롤이
+#: 생깁니다 — 묶음을 몇 픽셀로 찌부러뜨리는 것보다 굴려 보는 편이 낫습니다.
+#: 각 묶음이 스스로 요구하는 높이를 재서 정했습니다(77+472+256+146+113+129).
+BODY_HEIGHT = 1200
+#: 스스로 굴러가는 위젯. 이 위에서는 휠을 그쪽에 양보합니다.
+SELF_SCROLLING = frozenset({"Text", "Treeview", "Listbox"})
 #: 자동완성이 무시하는 키. 방향키와 기능키로는 목록을 다시 좁히지 않습니다.
 _NAVIGATION_KEYS = frozenset(
     {
@@ -303,30 +309,98 @@ class BookerApp:
     # -- 화면 만들기 ---------------------------------------------------------
 
     def _build(self) -> None:
+        """창 하나를 통째로 굴러가게 짓습니다.
+
+        기능이 늘면서 어떤 화면에서도 다 보이지는 않게 됐습니다. 그래서 두
+        가지를 함께 둡니다 — **창 전체가 세로로 스크롤**되고, 그 안의 여섯
+        묶음은 **PanedWindow 로 서로 크기를 나눕니다.** 손잡이를 끌면 목록을
+        키우고 조회 칸을 줄일 수 있습니다.
+        """
         self.root.title("코레일 예매 도우미")
-        # 조회 칸과 자동예매 칸은 높이가 정해진 서식이라, 늘어날 자리는 목록과
-        # 기록입니다. 처음 크기를 넉넉히 잡아 그 둘이 눌린 채로 뜨지 않게 합니다.
-        self.root.geometry("1240x1040")
-        self.root.minsize(1000, 700)
+        self.root.geometry("1240x1000")
+        # 스크롤이 있으므로 최소 크기를 크게 잡을 이유가 없습니다. 작은
+        # 노트북에서도 창이 화면 밖으로 나가지 않아야 합니다.
+        self.root.minsize(900, 480)
         self.root.columnconfigure(0, weight=1)
-        # 늘어나는 자리는 두 곳입니다 — 목록 묶음과 기록 묶음. 그 안의 나눔은
-        # PanedWindow 가 맡아, 손잡이를 끌어 사용자가 직접 정합니다.
-        self.root.rowconfigure(2, weight=3, minsize=260)
-        self.root.rowconfigure(4, weight=2, minsize=140)
-        self._build_login()
-        self._build_query()
-        middle = ttk.PanedWindow(self.root, orient="vertical")
-        middle.grid(row=2, column=0, sticky="nsew", padx=8, pady=4)
-        self._build_results(middle)
-        self._build_targets(middle)
-        self._build_booking()
-        self._build_log()
+        self.root.rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(self.root, highlightthickness=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(self.root, orient="vertical", command=canvas.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=scroll.set)
+        self.canvas = canvas
+
+        # ttk 가 아니라 tk 의 PanedWindow 입니다. ttk 쪽은 칸마다 **최소 높이를
+        # 줄 수 없어서**, 처음 뜰 때 로그인·조회 묶음이 0 픽셀로 눌렸습니다.
+        body = tk.PanedWindow(
+            canvas,
+            orient="vertical",
+            sashwidth=7,
+            sashrelief="raised",
+            borderwidth=0,
+            background="#d9d9d9",
+        )
+        window = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def fit(event: tk.Event) -> None:
+            # 안쪽은 창보다 좁아지지 않고, BODY_HEIGHT 보다 낮아지지도
+            # 않습니다. 낮아지면 PanedWindow 가 묶음을 몇 픽셀로 눌러 버리고,
+            # 그때 스크롤로 볼 것도 남지 않습니다.
+            height = max(BODY_HEIGHT, event.height)
+            canvas.itemconfigure(window, width=event.width, height=height)
+            canvas.configure(scrollregion=(0, 0, event.width, height))
+
+        canvas.bind("<Configure>", fit)
+        # 휠은 창 어디서 굴려도 듣습니다. 다만 스스로 굴러가는 위젯 위에서는
+        # 그쪽에 양보합니다 — 표를 굴리려는데 창이 굴러가면 못 씁니다.
+        canvas.bind_all("<MouseWheel>", self._on_wheel)
+        canvas.bind_all("<Button-4>", self._on_wheel)
+        canvas.bind_all("<Button-5>", self._on_wheel)
+
+        self._build_login(body)
+        self._build_query(body)
+        self._build_results(body)
+        self._build_targets(body)
+        self._build_booking(body)
+        self._build_log(body)
         # 조건을 고치고 Enter — 조회 단추를 찾아 누르지 않아도 됩니다.
         self.root.bind("<Return>", lambda _event: self.on_search())
 
-    def _build_login(self) -> None:
-        frame = ttk.LabelFrame(self.root, text="1. 로그인 (아이디·휴대폰번호·회원번호)")
-        frame.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
+    def _add_pane(
+        self,
+        parent: tk.PanedWindow,
+        frame: ttk.LabelFrame,
+        *,
+        minsize: int,
+        stretch: str,
+    ) -> None:
+        """묶음 하나를 칸으로 붙입니다.
+
+        ``minsize`` 는 손잡이를 아무리 끌어도 이보다 작아지지 않는 높이이고,
+        ``stretch`` 는 창이 커질 때 남는 자리를 받을지입니다. 서식 묶음
+        (로그인·조회·자동예매)은 ``"never"`` 입니다 — 늘려 봐야 빈칸만
+        늘어납니다.
+        """
+        parent.add(frame, minsize=minsize, stretch=stretch, sticky="nsew",
+                   padx=8, pady=3)
+
+    def _on_wheel(self, event: tk.Event) -> None:
+        widget = event.widget
+        if not isinstance(widget, str) and widget.winfo_class() in SELF_SCROLLING:
+            return
+        # Windows/macOS 는 delta, X11 은 단추 4/5 로 옵니다.
+        if getattr(event, "num", 0) == 4:
+            step = -1
+        elif getattr(event, "num", 0) == 5:
+            step = 1
+        else:
+            step = -1 if event.delta > 0 else 1
+        self.canvas.yview_scroll(step, "units")
+
+    def _build_login(self, parent: tk.PanedWindow) -> None:
+        frame = ttk.LabelFrame(parent, text="1. 로그인 (아이디·휴대폰번호·회원번호)")
+        self._add_pane(parent, frame, minsize=78, stretch="never")
         self.login_id = tk.StringVar()
         self.login_pw = tk.StringVar()
         self.login_state = tk.StringVar(value="로그인하지 않았습니다 — 조회만 됩니다")
@@ -347,9 +421,12 @@ class BookerApp:
             foreground="#666666",
         ).grid(row=1, column=0, columnspan=6, sticky="w", padx=4, pady=(0, 6))
 
-    def _build_query(self) -> None:
-        frame = ttk.LabelFrame(self.root, text="2. 열차 조회")
-        frame.grid(row=1, column=0, sticky="ew", padx=8, pady=4)
+    def _build_query(self, parent: tk.PanedWindow) -> None:
+        frame = ttk.LabelFrame(parent, text="2. 열차 조회")
+        # 조회 묶음의 최소 높이는 **제 요구 높이 그대로**입니다. 더 줄일 수 있게
+        # 하면 맨 아래 [조회] 단추가 잘려 나가고, 그러면 조회할 방법이
+        # 없어집니다. 좁은 화면에서는 줄이는 대신 스크롤합니다.
+        self._add_pane(parent, frame, minsize=472, stretch="never")
         self.departure = tk.StringVar()
         self.arrival = tk.StringVar()
         self.date = tk.StringVar(value=time.strftime("%Y-%m-%d"))
@@ -682,10 +759,10 @@ class BookerApp:
         tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
         return tree
 
-    def _build_results(self, parent: ttk.PanedWindow) -> None:
+    def _build_results(self, parent: tk.PanedWindow) -> None:
         frame = ttk.LabelFrame(parent, text="3. 열차 (고른 것을 [담기] 로 예매 대상에 넣습니다)")
         self.results_frame = frame
-        parent.add(frame, weight=3)
+        self._add_pane(parent, frame, minsize=140, stretch="always")
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(1, weight=1)
         self.outbound_title = ttk.Label(frame, text="가는 편", foreground="#1f6feb")
@@ -724,9 +801,9 @@ class BookerApp:
             self.inbound_pane.grid_remove()
             frame.columnconfigure(1, weight=0)
 
-    def _build_targets(self, parent: ttk.PanedWindow) -> None:
+    def _build_targets(self, parent: tk.PanedWindow) -> None:
         frame = ttk.LabelFrame(parent, text="4. 예매 대상 (여기 담긴 것만 노립니다)")
-        parent.add(frame, weight=1)
+        self._add_pane(parent, frame, minsize=96, stretch="always")
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
         self.target_list = tk.Listbox(
@@ -752,9 +829,9 @@ class BookerApp:
             foreground="#666666",
         ).grid(row=1, column=0, columnspan=3, sticky="w", padx=4, pady=(0, 6))
 
-    def _build_booking(self) -> None:
-        frame = ttk.LabelFrame(self.root, text="5. 자동예매 (만석이면 취소표를 계속 노립니다)")
-        frame.grid(row=3, column=0, sticky="ew", padx=8, pady=4)
+    def _build_booking(self, parent: tk.PanedWindow) -> None:
+        frame = ttk.LabelFrame(parent, text="5. 자동예매 (만석이면 취소표를 계속 노립니다)")
+        self._add_pane(parent, frame, minsize=115, stretch="never")
         self.poll_interval = tk.StringVar(value=f"{DEFAULT_POLL_INTERVAL_S:g}")
         self.watch_minutes = tk.StringVar(value="60")
         self.allow_standby = tk.BooleanVar(value=False)
@@ -812,15 +889,17 @@ class BookerApp:
             foreground="#666666",
         ).grid(row=2, column=0, sticky="w", padx=4, pady=(0, 6))
 
-    def _build_log(self) -> None:
+    def _build_log(self, parent: tk.PanedWindow) -> None:
         """기록을 둘로 나눕니다 — 조회 쪽과 자동예매 쪽.
 
         한 창에 섞어 두면 자동예매가 도는 동안 회차 기록이 조회 기록을 밀어
         올려, 정작 보고 싶은 "지금 몇 번째 조회에서 무엇이 매진인지" 가 흘러가
         버립니다. 가운데 손잡이를 끌어 폭을 정할 수 있습니다.
         """
-        paned = ttk.PanedWindow(self.root, orient="horizontal")
-        paned.grid(row=4, column=0, sticky="nsew", padx=8, pady=(4, 8))
+        paned = ttk.PanedWindow(parent, orient="horizontal")
+        # pady 는 tk.PanedWindow 에서 숫자 하나만 받습니다(튜플은 거절).
+        parent.add(paned, minsize=110, stretch="always", sticky="nsew",
+                   padx=8, pady=3)
         self.log_text = self._log_pane(
             paned, "기록 (로그인·조회)", self.clear_log, weight=3
         )
@@ -830,7 +909,7 @@ class BookerApp:
 
     def _log_pane(
         self,
-        parent: ttk.PanedWindow,
+        parent: tk.PanedWindow,
         title: str,
         clear: Callable[[], None],
         *,
