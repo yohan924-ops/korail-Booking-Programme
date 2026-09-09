@@ -14,8 +14,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from korail_mobile_api import KorailSeatClass, TrainSummary
+from korail_mobile_api import KorailProtocolError, KorailSeatClass, TrainSummary
 from korail_mobile_api.constants import KORAIL_STANDBY_WAIT_FLAG as STANDBY_WAIT_FLAG
+
+# 예약 폼이 요구하는 열여섯 필드의 모양을 정하는 곳. 밑줄로 시작하지만 이
+# 저장소 안의 프로그램이라 규칙을 베끼는 대신 그대로 부릅니다.
+from korail_mobile_api.mutation_payloads import _journey_fields
 
 
 #: "이 객실에 예매 가능한 자리가 있다"는 유일한 값. 라이브러리의 예약 폼도 같은
@@ -108,6 +112,26 @@ def format_duration(minutes: int | None) -> str:
     if hours:
         return f"{hours}시간"
     return f"{rest}분"
+
+
+def unbookable_reason(journey: Journey) -> str | None:
+    """예약 폼을 **만들 수 있는지** 미리 봅니다. 못 만들면 그 이유.
+
+    좌석이 있느냐와는 다른 이야기입니다. 서버가 검색 행에 예약에 필요한 값을
+    채워 주지 않으면(``h_trn_clsf_cd`` 같은 것) 자리가 열려도 폼 자체가 만들어
+    지지 않습니다. 수서 출발처럼 KORAIL 예매 대상이 아닌 열차가 그렇게 옵니다.
+
+    규칙을 여기서 다시 쓰지 않고 라이브러리의 검사를 그대로 부릅니다 — 열여섯
+    필드의 모양을 두 곳에서 관리하면 반드시 어긋납니다.
+    """
+    for train in journey.legs:
+        try:
+            _journey_fields(train)
+        except KorailProtocolError as exc:
+            return str(exc)
+        except Exception:
+            return None
+    return None
 
 
 @dataclass(frozen=True)

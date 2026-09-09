@@ -46,6 +46,7 @@ from .journeys import (
     SeatPreference,
     format_clock,
     format_duration,
+    unbookable_reason,
 )
 from .notify import TelegramConfig, TelegramNotifier
 from .search import (
@@ -633,6 +634,7 @@ class BookerApp:
         # 자동예매가 노리는 것은 매진입니다. 한눈에 갈리게 색을 답니다.
         self.tree.tag_configure("open", foreground="#1a7f37")
         self.tree.tag_configure("soldout", foreground="#b42318")
+        self.tree.tag_configure("unbookable", foreground="#8a8a8a")
         self.tree.grid(row=0, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
@@ -1316,10 +1318,12 @@ class BookerApp:
             transfer,
             journey.seat_text(KorailSeatClass.GENERAL),
             journey.seat_text(KorailSeatClass.SPECIAL),
-            " · ".join(journey.extras()) or "-",
+            "예매 불가" if unbookable_reason(journey) else (" · ".join(journey.extras()) or "-"),
         )
 
     def _row_tags(self, journey: Journey) -> tuple[str, ...]:
+        if unbookable_reason(journey) is not None:
+            return ("unbookable",)
         if journey.source is JourneySource.CUSTOM_TRANSFER:
             return ("custom",)
         if journey.bookable_seat_class(SeatPreference.ANY) is not None:
@@ -1348,6 +1352,20 @@ class BookerApp:
             return
         added = 0
         for target in picked:
+            # 자리가 열려도 폼이 만들어지지 않는 행이 있습니다. 새벽에 자리가
+            # 났을 때 알게 되는 것보다 지금 아는 편이 낫습니다.
+            reason = unbookable_reason(target.journey)
+            if reason is not None:
+                self._write_log(f"담지 못했습니다 — {target.describe()}: {reason}")
+                messagebox.showwarning(
+                    "예매 대상",
+                    f"{target.journey.summary()}\n\n"
+                    "이 열차는 서버가 예약에 필요한 값을 주지 않아 예매할 수 "
+                    "없습니다. 수서 출발처럼 KORAIL 예매 대상이 아닌 열차가 "
+                    "그렇게 옵니다(SRT 는 SRT 앱에서 예매해야 합니다).\n\n"
+                    f"({reason})",
+                )
+                continue
             if any(
                 existing.journey.key() == target.journey.key()
                 and existing.direction == target.direction

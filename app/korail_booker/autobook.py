@@ -209,6 +209,9 @@ class AutoBooker:
         #: 방향마다 하나씩만 잡습니다. 잡힌 방향은 여기 들어가고 더는 보지
         #: 않습니다 — 같은 방향을 두 번 잡으면 중복 예약입니다.
         self._settled: dict[tuple[str, str, str], ReservationHoldResponse | None] = {}
+        #: 예약 폼 자체가 만들어지지 않는 대상. 되풀이해도 달라지지 않으므로
+        #: 한 번 걸리면 빼고 갑니다(서버가 그 행에 필요한 값을 안 준 경우).
+        self._unusable: set[tuple[tuple[str, str, str, str], ...]] = set()
 
     @property
     def directions(self) -> tuple[tuple[str, str, str], ...]:
@@ -216,7 +219,10 @@ class AutoBooker:
 
     def _pending(self) -> tuple[Target, ...]:
         return tuple(
-            target for target in self.targets if target.direction not in self._settled
+            target
+            for target in self.targets
+            if target.direction not in self._settled
+            and target.journey.key() not in self._unusable
         )
 
     # -- 보고 ----------------------------------------------------------------
@@ -397,7 +403,25 @@ class AutoBooker:
         except KorailSessionExpiredError:
             self._try_relogin()
             return None
+        except KorailProtocolError as exc:
+            # 서버가 이 행에 예약에 필요한 값을 주지 않았습니다. 자리가 열려도
+            # 폼이 만들어지지 않으므로 되풀이할 이유가 없습니다.
+            return self._drop_unusable(target, str(exc))
         return self._settle(result, target, journey, kind="좌석 예약")
+
+    def _drop_unusable(self, target: Target, reason: str) -> BookingResult | None:
+        self._unusable.add(target.journey.key())
+        self.say(
+            f"    이 열차는 예약 폼을 만들 수 없어 감시에서 뺍니다 — {reason}"
+        )
+        if self._pending():
+            return None
+        return BookingResult(
+            Outcome.FAILED,
+            "담긴 열차를 모두 예약할 수 없습니다. 서버가 그 행에 예약에 필요한 "
+            f"값을 주지 않았습니다({reason}). 수서 출발처럼 KORAIL 예매 대상이 "
+            "아닌 열차가 그렇게 옵니다.",
+        )
 
     def _try_standby(self, target: Target, journey: Journey) -> BookingResult | None:
         """예약대기(1102). 일반실 직통에서만 성립합니다."""

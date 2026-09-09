@@ -687,6 +687,64 @@ def test_no_module_in_the_app_names_a_money_moving_call():
             assert forbidden not in source, f"{path.name}: {forbidden}"
 
 
+# --- 예약 폼을 만들 수 없는 행 ---------------------------------------------------
+
+
+def _row_without_class_code(**overrides: Any) -> dict[str, Any]:
+    """서버가 ``h_trn_clsf_cd`` 를 빼고 준 행. 수서 출발에서 실제로 그랬습니다."""
+    row = _row("00387", **overrides)
+    del row["h_trn_clsf_cd"]
+    return row
+
+
+def test_a_row_without_the_reservation_fields_is_named_before_it_bites():
+    """자리가 열려도 폼이 안 만들어지는 행이 있습니다. 담기 전에 알아야 합니다."""
+    broken = _journey(TrainSummary.from_raw(_row_without_class_code(general="11")))
+    reason = J.unbookable_reason(broken)
+    assert reason is not None and "train_class_code" in reason
+    assert J.unbookable_reason(_journey(_summary(general="11"))) is None
+
+
+def test_such_a_target_is_dropped_instead_of_killing_the_whole_run():
+    """예전에는 그 한 건이 자동예매 전체를 실패로 끝냈습니다."""
+    recorder = _Recorder(
+        {SEARCH: _search_reply([
+            _row_without_class_code(general="11"),
+            _row("00101", general="13"),
+        ])}
+    )
+    broken = _journey(TrainSummary.from_raw(_row_without_class_code(general="11")))
+    healthy = _journey(_summary(general="13"))
+    booker = _booker(recorder, [broken, healthy], live=True, watch_minutes=0)
+    booker._sleep = lambda stop, deadline: None  # type: ignore[method-assign]
+    stop = threading.Event()
+    polls: list[int] = []
+    original = booker._poll
+
+    def limited():
+        polls.append(1)
+        if len(polls) >= 3:
+            stop.set()
+        return original()
+
+    booker._poll = limited  # type: ignore[method-assign]
+    result = booker.run(stop)
+    assert result.outcome is Outcome.STOPPED       # 죽지 않고 계속 지켜봤고
+    assert broken.key() in booker._unusable        # 못 쓰는 것만 빠졌습니다
+    # 폼을 만들다 걸리므로 요청은 아예 나가지 않습니다.
+    assert recorder.count(RESERVE) == 0
+
+
+def test_when_every_target_is_unusable_the_run_says_why():
+    recorder = _Recorder(
+        {SEARCH: _search_reply([_row_without_class_code(general="11")])}
+    )
+    broken = _journey(TrainSummary.from_raw(_row_without_class_code(general="11")))
+    result = _booker(recorder, [broken], live=True).run(threading.Event())
+    assert result.outcome is Outcome.FAILED
+    assert "예약에 필요한 값" in result.message
+
+
 # --- 런처 ---------------------------------------------------------------------
 
 
