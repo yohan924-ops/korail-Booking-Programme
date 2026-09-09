@@ -21,6 +21,10 @@ from korail_mobile_api.constants import KORAIL_STANDBY_WAIT_FLAG as STANDBY_WAIT
 #: "이 객실에 예매 가능한 자리가 있다"는 유일한 값. 라이브러리의 예약 폼도 같은
 #: 값만 받아들입니다(``mutation_payloads._assert_leg_is_bookable``).
 AVAILABLE_SEAT_CODE = "11"
+#: 매진. 라이브러리 주석이 이 값을 그렇게 읽습니다 — 예약대기가 열리는 열차는
+#: 대개 ``"13"`` 이고(``_assert_leg_is_bookable``), 입석 판정도 일반실이
+#: ``"13"`` 일 때를 매진으로 봅니다(``_standing_flag``).
+SOLD_OUT_SEAT_CODE = "13"
 
 MINUTES_PER_DAY = 24 * 60
 
@@ -117,6 +121,19 @@ class SeatState:
     label: str
     #: 이 등급이 이 여정에 아예 없을 때(특실 없는 열차 등) 참.
     absent: bool = False
+    #: 모든 구간이 매진 코드일 때 참. 자동예매가 노리는 것이 이 상태입니다.
+    sold_out: bool = False
+
+    @property
+    def status(self) -> str:
+        """한 낱말로 줄인 상태. 표의 맨 앞에 이것이 옵니다."""
+        if self.available:
+            return "예약가능"
+        if self.sold_out:
+            return "매진"
+        if self.absent:
+            return "-"
+        return "불가"
 
 
 def _reservation_code(train: TrainSummary, seat_class: KorailSeatClass) -> str | None:
@@ -219,12 +236,13 @@ class Journey:
         names = [_availability_name(train, seat_class) for train in self.legs]
         absent = all(code is None or not code.strip() for code in codes)
         available = all(code == AVAILABLE_SEAT_CODE for code in codes)
+        # 한 구간이라도 매진이면 그 여정은 못 탑니다.
+        sold_out = any(code == SOLD_OUT_SEAT_CODE for code in codes)
         shown = [name for name in names if name]
-        if not shown:
-            label = "-" if absent else ("예약가능" if available else "불가")
-        else:
-            label = " · ".join(dict.fromkeys(shown))
-        return SeatState(available=available, label=label, absent=absent)
+        label = " · ".join(dict.fromkeys(shown))
+        return SeatState(
+            available=available, label=label, absent=absent, sold_out=sold_out
+        )
 
     def remaining_seats(self, seat_class: KorailSeatClass) -> int | None:
         """남은 좌석 수. 환승이면 **가장 적은 구간**의 수입니다.
@@ -269,12 +287,20 @@ class Journey:
         return tuple(tokens)
 
     def seat_text(self, seat_class: KorailSeatClass) -> str:
-        """표의 한 칸에 들어갈 좌석 상태. 서버 문구 + 남은 좌석 수."""
+        """표의 한 칸. **상태를 맨 앞에** 두고 서버 문구와 잔여석을 붙입니다.
+
+        서버 문구는 운임과 적립 안내라서, 그것만으로는 매진인지 아닌지가 한눈에
+        보이지 않습니다. 자동예매가 노리는 것이 매진이므로 그 한 낱말이 맨 앞에
+        와야 합니다.
+        """
         state = self.seat_state(seat_class)
+        parts = [state.status]
+        if state.label and state.label != state.status:
+            parts.append(state.label)
         remaining = self.remaining_seats(seat_class)
-        if remaining is None:
-            return state.label
-        return f"{state.label} · {remaining}석"
+        if remaining is not None:
+            parts.append(f"{remaining}석")
+        return " · ".join(parts)
 
     def bookable_seat_class(
         self,

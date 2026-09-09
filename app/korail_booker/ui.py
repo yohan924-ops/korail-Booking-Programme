@@ -38,6 +38,7 @@ from .autobook import (
     BookingResult,
     BookingSession,
     Outcome,
+    Target,
 )
 from .journeys import (
     Journey,
@@ -150,39 +151,55 @@ class AutocompleteCombobox(ttk.Combobox):
         self.configure(values=matches or list(self._completions))
 
 
-class DatePicker(tk.Toplevel):
-    """달 달력 하나. 고른 날짜를 ``YYYY-MM-DD`` 로 돌려줍니다.
+class CalendarPanel(ttk.LabelFrame):
+    """같은 창 안에 붙는 달 달력. 팝업이 아닙니다.
 
     tkcalendar 같은 것을 새로 들이지 않으려고 직접 그립니다 — 이 프로그램의
     의존성은 라이브러리와 같아야 합니다(``httpx``, ``cryptography``).
     """
 
-    def __init__(self, master: tk.Misc, initial: date, on_pick: Callable[[date], None]):
-        super().__init__(master)
-        self.title("날짜 고르기")
-        self.transient(master.winfo_toplevel())
-        self.resizable(False, False)
+    def __init__(self, master: tk.Misc, on_pick: Callable[[date], None]):
+        super().__init__(master, text="날짜 고르기")
         self._on_pick = on_pick
         self._today = date.today()
-        self._shown = initial.replace(day=1)
+        self._shown = self._today.replace(day=1)
         self._header = tk.StringVar()
+        self._title = tk.StringVar(value="가는 날")
         top = ttk.Frame(self)
-        top.grid(row=0, column=0, padx=8, pady=(8, 4), sticky="ew")
+        top.grid(row=0, column=0, padx=8, pady=(6, 2), sticky="ew")
+        ttk.Label(top, textvariable=self._title, foreground="#1f6feb").pack(side="left")
         ttk.Button(top, text="◀", width=3, command=lambda: self._shift(-1)).pack(
-            side="left"
+            side="left", padx=(10, 0)
         )
-        ttk.Label(top, textvariable=self._header, width=14, anchor="center").pack(
-            side="left", padx=6
+        ttk.Label(top, textvariable=self._header, width=12, anchor="center").pack(
+            side="left"
         )
         ttk.Button(top, text="▶", width=3, command=lambda: self._shift(1)).pack(
             side="left"
         )
-        ttk.Button(top, text="오늘", command=lambda: self._choose(self._today)).pack(
-            side="left", padx=(10, 0)
+        ttk.Button(top, text="오늘", width=5, command=lambda: self._choose(self._today)).pack(
+            side="left", padx=(8, 0)
         )
+        ttk.Button(top, text="닫기", width=5, command=self.hide).pack(side="left", padx=4)
         self._grid = ttk.Frame(self)
-        self._grid.grid(row=1, column=0, padx=8, pady=(0, 8))
+        self._grid.grid(row=1, column=0, padx=8, pady=(0, 6))
         self._draw()
+
+    def open_for(self, title: str, current: date, *, over: tk.Misc, x: int, y: int) -> None:
+        """조회 묶음 위에 겹쳐 띄웁니다.
+
+        ``grid`` 로 한 줄을 차지하면 열릴 때마다 아래의 결과 표가 밀려 내려가고,
+        창 밖으로 나가기까지 합니다. ``place`` 는 배치를 건드리지 않습니다 —
+        팝업 창이 아니라 같은 창 안에 겹치는 것입니다.
+        """
+        self._title.set(title)
+        self._shown = current.replace(day=1)
+        self._draw()
+        self.place(in_=over, x=x, y=y)
+        self.lift()
+
+    def hide(self) -> None:
+        self.place_forget()
 
     def _shift(self, months: int) -> None:
         month = self._shown.month + months
@@ -192,7 +209,7 @@ class DatePicker(tk.Toplevel):
 
     def _choose(self, chosen: date) -> None:
         self._on_pick(chosen)
-        self.destroy()
+        self.hide()
 
     def _draw(self) -> None:
         for child in self._grid.winfo_children():
@@ -240,6 +257,11 @@ class BookerApp:
         self._transfer_route: tuple[str, str] | None = None
         #: 전국 역 이름. 자동완성과 환승역 추가가 이것을 씁니다.
         self.station_names: tuple[str, ...] = ()
+        #: 달력이 지금 어느 칸을 고치는 중인지.
+        self._calendar_for_return = False
+        #: 조회 결과와, 자동예매에 담아 둔 것.
+        self.results: list[Target] = []
+        self.targets: list[Target] = []
         self._build()
         self._restore()
         self._watch_for_changes(
@@ -267,10 +289,11 @@ class BookerApp:
         self.root.columnconfigure(0, weight=1)
         # minsize 가 없으면 위쪽 조건이 커질 때 표가 몇 줄로 눌립니다.
         self.root.rowconfigure(2, weight=5, minsize=240)
-        self.root.rowconfigure(4, weight=1, minsize=120)
+        self.root.rowconfigure(5, weight=1, minsize=110)
         self._build_login()
         self._build_query()
         self._build_results()
+        self._build_targets()
         self._build_booking()
         self._build_log()
         # 조건을 고치고 Enter — 조회 단추를 찾아 누르지 않아도 됩니다.
@@ -305,6 +328,8 @@ class BookerApp:
         self.departure = tk.StringVar()
         self.arrival = tk.StringVar()
         self.date = tk.StringVar(value=time.strftime("%Y-%m-%d"))
+        self.return_date = tk.StringVar(value=time.strftime("%Y-%m-%d"))
+        self.round_trip = tk.BooleanVar(value=False)
         self.after_time = tk.StringVar()
         self.before_time = tk.StringVar()
         self.train_kind_vars = {kind: tk.BooleanVar(value=False) for kind in TRAIN_KINDS}
@@ -336,11 +361,21 @@ class BookerApp:
             row, textvariable=self.arrival, width=12
         )
         self.arrival_box.pack(side="left", padx=(2, 8))
-        ttk.Label(row, text="날짜").pack(side="left")
+        ttk.Label(row, text="가는 날").pack(side="left")
         ttk.Entry(row, textvariable=self.date, width=12).pack(side="left", padx=(2, 2))
-        ttk.Button(row, text="달력", width=5, command=self.pick_date).pack(
-            side="left", padx=(0, 8)
+        ttk.Button(
+            row, text="달력", width=5, command=lambda: self.open_calendar(False)
+        ).pack(side="left", padx=(0, 8))
+        ttk.Checkbutton(
+            row, text="왕복", variable=self.round_trip, command=self._round_trip_toggled
+        ).pack(side="left")
+        ttk.Label(row, text="오는 날").pack(side="left", padx=(6, 0))
+        self.return_entry = ttk.Entry(row, textvariable=self.return_date, width=12)
+        self.return_entry.pack(side="left", padx=(2, 2))
+        self.return_calendar_button = ttk.Button(
+            row, text="달력", width=5, command=lambda: self.open_calendar(True)
         )
+        self.return_calendar_button.pack(side="left", padx=(0, 8))
         # 시각은 고르는 것입니다. 손으로 치면 형식을 틀리기 쉽고, 틀린 값은
         # 조회 전에 경고창으로만 돌아옵니다.
         ttk.Label(row, text="시간").pack(side="left")
@@ -424,7 +459,11 @@ class BookerApp:
         self.transfer_frame = ttk.LabelFrame(
             frame, text="환승 조건 (직통 열차에는 영향을 주지 않습니다)"
         )
-        self.transfer_frame.grid(row=3, column=0, sticky="ew", padx=4, pady=(2, 6))
+        # "w" 입니다("ew" 가 아니라) — 옆자리를 달력에게 내주려면 자기 폭만
+        # 차지해야 합니다.
+        self.transfer_frame.grid(row=3, column=0, sticky="w", padx=4, pady=(2, 6))
+        self.query_frame = frame
+        self.calendar = CalendarPanel(frame, self._calendar_picked)
         self._build_search_button(frame)
         left = ttk.Frame(self.transfer_frame)
         left.grid(row=0, column=0, sticky="nw", padx=4, pady=4)
@@ -506,7 +545,7 @@ class BookerApp:
             text="목록은 코레일이 이 구간에 대해 답한 환승역(qry.chtnStn.do)입니다. "
             "직접 지정 모드에서는 여기 없는 역도 위 칸에서 찾아 [추가] 하면 됩니다.",
             foreground="#666666",
-            wraplength=560,
+            wraplength=380,
             justify="left",
         ).pack(anchor="w", pady=(2, 0))
 
@@ -517,7 +556,7 @@ class BookerApp:
         찾지 못합니다. 환승역을 바꾼 뒤 다시 누르는 일이 잦습니다.
         """
         bar = ttk.Frame(frame)
-        bar.grid(row=4, column=0, sticky="ew", padx=4, pady=(0, 8))
+        bar.grid(row=5, column=0, sticky="ew", padx=4, pady=(0, 8))
         style = ttk.Style(self.root)
         style.configure("Search.TButton", font=("", 11, "bold"), padding=(24, 8))
         self.search_button = ttk.Button(
@@ -530,13 +569,32 @@ class BookerApp:
             foreground="#666666",
         ).pack(side="left", padx=10)
 
-    def pick_date(self) -> None:
-        """달력에서 고릅니다. 칸에 직접 쳐 넣어도 그대로 됩니다."""
+    def open_calendar(self, for_return: bool) -> None:
+        """같은 창 안에서 달력을 폅니다. 칸에 직접 쳐 넣어도 그대로 됩니다."""
+        self._calendar_for_return = for_return
+        variable = self.return_date if for_return else self.date
         try:
-            current = date.fromisoformat(self.date.get().strip())
+            current = date.fromisoformat(variable.get().strip())
         except ValueError:
             current = date.today()
-        DatePicker(self.root, current, lambda picked: self.date.set(picked.isoformat()))
+        self.calendar.open_for(
+            "오는 날" if for_return else "가는 날",
+            current,
+            over=self.query_frame,
+            # 날짜 칸 바로 아래입니다. 조회 조건 위에 겹칩니다.
+            x=330 if not for_return else 560,
+            y=36,
+        )
+
+    def _calendar_picked(self, picked: date) -> None:
+        variable = self.return_date if self._calendar_for_return else self.date
+        variable.set(picked.isoformat())
+
+    def _round_trip_toggled(self) -> None:
+        state = "normal" if self.round_trip.get() else "disabled"
+        self.return_entry.configure(state=state)
+        self.return_calendar_button.configure(state=state)
+        self.mark_stale()
 
     def _build_results(self) -> None:
         frame = ttk.LabelFrame(self.root, text="3. 열차 (여러 개 고르면 먼저 열리는 것을 잡습니다)")
@@ -554,7 +612,7 @@ class BookerApp:
             height=9,
         )
         headings = {
-            "kind": ("구분", 90),
+            "kind": ("구분", 120),
             "train": ("열차", 150),
             "departure": ("출발", 70),
             "arrival": ("도착", 70),
@@ -572,6 +630,9 @@ class BookerApp:
             self.tree.column(name, width=width, anchor="center")
         self.tree.tag_configure("custom", foreground="#a15c00")
         self.tree.tag_configure("leg", foreground="#555555")
+        # 자동예매가 노리는 것은 매진입니다. 한눈에 갈리게 색을 답니다.
+        self.tree.tag_configure("open", foreground="#1a7f37")
+        self.tree.tag_configure("soldout", foreground="#b42318")
         self.tree.grid(row=0, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
@@ -582,9 +643,36 @@ class BookerApp:
         self.results_label = ttk.Label(frame, textvariable=self.results_status)
         self.results_label.grid(row=1, column=0, columnspan=2, sticky="w", padx=4)
 
-    def _build_booking(self) -> None:
-        frame = ttk.LabelFrame(self.root, text="4. 자동예매 (만석이면 취소표를 계속 노립니다)")
+    def _build_targets(self) -> None:
+        frame = ttk.LabelFrame(self.root, text="4. 예매 대상 (여기 담긴 것만 노립니다)")
         frame.grid(row=3, column=0, sticky="ew", padx=8, pady=4)
+        frame.columnconfigure(0, weight=1)
+        self.target_list = tk.Listbox(
+            frame, height=4, selectmode="extended", exportselection=False
+        )
+        self.target_list.grid(row=0, column=0, sticky="ew", padx=(4, 0), pady=4)
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=self.target_list.yview)
+        self.target_list.configure(yscrollcommand=scroll.set)
+        scroll.grid(row=0, column=1, sticky="ns", pady=4)
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=0, column=2, sticky="n", padx=6, pady=4)
+        ttk.Button(buttons, text="↑ 담기", width=10, command=self.add_targets).pack()
+        ttk.Button(buttons, text="빼기", width=10, command=self.remove_targets).pack(
+            pady=(4, 0)
+        )
+        ttk.Button(buttons, text="비우기", width=10, command=self.clear_targets).pack(
+            pady=(4, 0)
+        )
+        ttk.Label(
+            frame,
+            text="위 목록에서 고르고 [담기]. 왕복이면 가는 편·오는 편을 각각 "
+            "담으세요 — 방향마다 한 건씩 잡고 멈춥니다.",
+            foreground="#666666",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=4, pady=(0, 6))
+
+    def _build_booking(self) -> None:
+        frame = ttk.LabelFrame(self.root, text="5. 자동예매 (만석이면 취소표를 계속 노립니다)")
+        frame.grid(row=4, column=0, sticky="ew", padx=8, pady=4)
         self.poll_interval = tk.StringVar(value=f"{DEFAULT_POLL_INTERVAL_S:g}")
         self.watch_minutes = tk.StringVar(value="60")
         self.allow_standby = tk.BooleanVar(value=False)
@@ -631,7 +719,7 @@ class BookerApp:
 
     def _build_log(self) -> None:
         frame = ttk.LabelFrame(self.root, text="기록")
-        frame.grid(row=4, column=0, sticky="nsew", padx=8, pady=(4, 8))
+        frame.grid(row=5, column=0, sticky="nsew", padx=8, pady=(4, 8))
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(frame, height=6, wrap="word", state="disabled")
@@ -876,10 +964,9 @@ class BookerApp:
                 action()
             except Exception as exc:
                 self._write_log(f"화면 갱신 오류: {type(exc).__name__}: {exc}")
+        # 큐를 비우는 이 자리는 120ms 마다 돕니다. 여기에 다른 일을 걸면 그 일도
+        # 초당 여덟 번씩 돕니다 — 역 목록 조회가 실제로 그렇게 새어 나갔습니다.
         self.root.after(120, self._drain)
-        # 역 목록은 로그인 없이도 받을 수 있습니다. 켜자마자 받아 두면 자동완성이
-        # 처음부터 돕니다 — 단추를 눌러야 채워지는 이유를 아무도 모릅니다.
-        self.root.after(200, self.on_load_stations)
 
     def _in_thread(self, work: Callable[[], None], name: str) -> None:
         """작업 스레드 하나. 무슨 예외가 나든 조용히 죽지 않습니다.
@@ -1047,6 +1134,21 @@ class BookerApp:
             passengers=passengers,
         )
 
+    def build_return_request(self, outbound: SearchRequest) -> SearchRequest:
+        """오는 편 조회 조건. 구간을 뒤집고 날짜만 갈아 끼웁니다."""
+        return_date = parse_date_field(self.return_date.get())
+        if return_date < outbound.date:
+            raise ValueError("오는 날이 가는 날보다 빠릅니다")
+        return replace(
+            outbound,
+            departure=outbound.arrival,
+            arrival=outbound.departure,
+            date=return_date,
+            # 환승역 후보는 구간마다 다릅니다. 오는 편에 그대로 물리면 있지도
+            # 않은 역으로 거르게 되므로 비웁니다.
+            transfer_stations=(),
+        )
+
     def on_search(self) -> None:
         try:
             request = self.build_request()
@@ -1060,16 +1162,34 @@ class BookerApp:
         self.log(f"조회: {request.departure}→{request.arrival} {request.date}")
         self._note_if_today(request)
 
+        legs: list[tuple[str, SearchRequest]] = [
+            ("가는 편" if self.round_trip.get() else "", request)
+        ]
+        if self.round_trip.get():
+            try:
+                legs.append(("오는 편", self.build_return_request(request)))
+            except ValueError as exc:
+                messagebox.showwarning("조회 조건", str(exc))
+                self.search_button.configure(state="normal")
+                return
+
         def work() -> None:
+            found: list[Target] = []
             try:
                 client = self._ensure_client()
-                self._refresh_transfer_stations(client, request)
-                journeys = search_journeys(client, request, log=self.log)
+                for label, leg in legs:
+                    if label:
+                        self.log(f"── {label}: {leg.departure}→{leg.arrival} {leg.date}")
+                    self._refresh_transfer_stations(client, leg)
+                    found.extend(
+                        Target(journey=journey, request=leg, label=label)
+                        for journey in search_journeys(client, leg, log=self.log)
+                    )
             except (KorailApiError, ValueError) as exc:
                 message = str(exc)
                 self.events.put(lambda: self._search_failed(message))
                 return
-            self.events.put(lambda: self._show_journeys(journeys))
+            self.events.put(lambda: self._show_journeys(found))
 
         self._in_thread(work, "korail-search")
 
@@ -1120,14 +1240,20 @@ class BookerApp:
         self._write_log(f"조회 실패: {message}")
         messagebox.showerror("조회 실패", message)
 
-    def _show_journeys(self, journeys: list[Journey]) -> None:
+    def _show_journeys(self, results: list[Target]) -> None:
         self.search_button.configure(state="normal")
-        self.journeys = journeys
+        self.results = results
+        self.journeys = [target.journey for target in results]
         self.item_journeys.clear()
         self.tree.delete(*self.tree.get_children())
-        for index, journey in enumerate(journeys):
-            item = self.tree.insert("", "end", values=self._row_values(journey),
-                                    tags=self._row_tags(journey))
+        for index, target in enumerate(results):
+            journey = target.journey
+            item = self.tree.insert(
+                "",
+                "end",
+                values=self._row_values(target),
+                tags=self._row_tags(journey),
+            )
             self.item_journeys[item] = index
             if journey.is_transfer:
                 for leg_index, leg in enumerate(journey.legs):
@@ -1148,6 +1274,7 @@ class BookerApp:
                         tags=("leg",),
                     )
                 self.tree.item(item, open=True)
+        journeys = self.journeys
         direct = sum(1 for journey in journeys if not journey.is_transfer)
         transfer = len(journeys) - direct
         self.results_status.set(
@@ -1165,7 +1292,8 @@ class BookerApp:
                 "주지 않습니다. 시간대를 넓히거나 열차 종류 선택을 지워 보세요.",
             )
 
-    def _row_values(self, journey: Journey) -> tuple[str, ...]:
+    def _row_values(self, target: Target) -> tuple[str, ...]:
+        journey = target.journey
         if journey.is_transfer:
             kind = (
                 "환승"
@@ -1180,7 +1308,7 @@ class BookerApp:
         names = " ".join(dict.fromkeys(name for name in journey.train_names() if name))
         trains = "+".join(journey.train_numbers())
         return (
-            kind,
+            f"{target.label[:2]}·{kind}" if target.label else kind,
             f"{names} {trains}".strip(),
             format_clock(journey.departure_clock),
             format_clock(journey.arrival_clock),
@@ -1192,19 +1320,59 @@ class BookerApp:
         )
 
     def _row_tags(self, journey: Journey) -> tuple[str, ...]:
-        return ("custom",) if journey.source is JourneySource.CUSTOM_TRANSFER else ()
+        if journey.source is JourneySource.CUSTOM_TRANSFER:
+            return ("custom",)
+        if journey.bookable_seat_class(SeatPreference.ANY) is not None:
+            return ("open",)
+        general = journey.seat_state(KorailSeatClass.GENERAL)
+        special = journey.seat_state(KorailSeatClass.SPECIAL)
+        return ("soldout",) if general.sold_out or special.sold_out else ()
 
     # -- 동작: 자동예매 ------------------------------------------------------
 
-    def selected_journeys(self) -> list[Journey]:
-        chosen: list[Journey] = []
+    def selected_results(self) -> list[Target]:
+        """표에서 고른 것들. 구간 행을 골랐으면 그 여정을 씁니다."""
+        chosen: list[Target] = []
         for item in self.tree.selection():
             index = self.item_journeys.get(item)
-            if index is None:  # 구간 행을 골랐으면 부모 여정을 씁니다.
+            if index is None:
                 index = self.item_journeys.get(self.tree.parent(item))
-            if index is not None and self.journeys[index] not in chosen:
-                chosen.append(self.journeys[index])
+            if index is not None and self.results[index] not in chosen:
+                chosen.append(self.results[index])
         return chosen
+
+    def add_targets(self) -> None:
+        picked = self.selected_results()
+        if not picked:
+            messagebox.showwarning("예매 대상", "위 목록에서 열차를 고르고 [담기] 를 누르세요")
+            return
+        added = 0
+        for target in picked:
+            if any(
+                existing.journey.key() == target.journey.key()
+                and existing.direction == target.direction
+                for existing in self.targets
+            ):
+                continue
+            self.targets.append(target)
+            self.target_list.insert("end", target.describe())
+            added += 1
+        self._write_log(
+            f"예매 대상에 {added}편을 담았습니다 (모두 {len(self.targets)}편)."
+            if added
+            else "이미 담긴 열차입니다."
+        )
+
+    def remove_targets(self) -> None:
+        for index in sorted(self.target_list.curselection(), reverse=True):
+            self.target_list.delete(index)
+            del self.targets[index]
+        self._write_log(f"예매 대상 {len(self.targets)}편 남았습니다.")
+
+    def clear_targets(self) -> None:
+        self.target_list.delete(0, "end")
+        self.targets.clear()
+        self._write_log("예매 대상을 비웠습니다.")
 
     def build_options(self) -> BookingOptions:
         interval = self.poll_interval.get().strip()
@@ -1227,12 +1395,13 @@ class BookerApp:
         if self.session is not None and self.session.running:
             messagebox.showinfo("자동예매", "이미 돌고 있습니다")
             return
-        targets = self.selected_journeys()
+        targets = list(self.targets)
         if not targets:
-            messagebox.showwarning("자동예매", "목록에서 열차를 하나 이상 고르세요")
+            messagebox.showwarning(
+                "자동예매", "먼저 [담기] 로 예매 대상에 열차를 넣으세요"
+            )
             return
         try:
-            request = self.build_request()
             options = self.build_options()
         except (ValueError, TypeError) as exc:
             messagebox.showwarning("자동예매", str(exc))
@@ -1242,7 +1411,11 @@ class BookerApp:
             return
         if options.live and not self._confirm_live(targets):
             return
-        custom = [j for j in targets if j.source is JourneySource.CUSTOM_TRANSFER]
+        custom = [
+            target
+            for target in targets
+            if target.journey.source is JourneySource.CUSTOM_TRANSFER
+        ]
         if custom and not messagebox.askyesno(
             "확인",
             "직접 지정한 환승 조합이 들어 있습니다. 서버가 이런 조합을 받아들이는지"
@@ -1251,7 +1424,6 @@ class BookerApp:
             return
         booker = AutoBooker(
             self._ensure_client(),
-            request,
             targets,
             options,
             log=self.log,
@@ -1262,16 +1434,20 @@ class BookerApp:
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
         mode = "실제 예약" if options.live else "미리보기(아무것도 보내지 않음)"
-        self.log(f"자동예매 시작 — {len(targets)}편 감시, {mode}")
+        directions = len({target.direction for target in targets})
+        self.log(
+            f"자동예매 시작 — {len(targets)}편 감시, 방향 {directions}개, {mode}"
+        )
         self.session.start(on_done=lambda result: self.events.put(
             lambda: self._booking_done(result)
         ))
 
-    def _confirm_live(self, targets: list[Journey]) -> bool:
-        lines = "\n".join(f"· {journey.summary()}" for journey in targets[:5])
+    def _confirm_live(self, targets: list[Target]) -> bool:
+        lines = "\n".join(f"· {target.describe()}" for target in targets[:5])
         return messagebox.askyesno(
             "실제 예약을 만듭니다",
-            "아래 열차 중 먼저 열리는 것 하나에 진짜 예약(결제 전 홀드)을 만듭니다.\n\n"
+            "아래 열차를 지켜보다가 **방향마다 한 건씩** 진짜 예약(결제 전 홀드)을 "
+            "만듭니다.\n\n"
             f"{lines}\n\n"
             "결제는 하지 않습니다. 잡은 뒤에는 코레일 앱에서 기한 안에 결제하거나 "
             "취소해야 합니다. 계속할까요?",

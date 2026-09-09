@@ -19,7 +19,7 @@ import random
 import threading
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
 from korail_mobile_api import (
@@ -93,12 +93,36 @@ class BookingOptions:
 
 
 @dataclass(frozen=True)
+class Target:
+    """지켜볼 여정 하나와, 그것을 **다시 찾을** 조회 조건.
+
+    조건을 함께 들고 다니는 것은 왕복 때문입니다. 가는 편과 오는 편은 구간도
+    날짜도 다른 별개의 조회라, 여정만으로는 다시 찾을 수 없습니다.
+    """
+
+    journey: Journey
+    request: SearchRequest
+    #: 화면에 그대로 찍는 이름 — ``"가는 편"``, ``"오는 편"``, 편도면 빈 문자열.
+    label: str = ""
+
+    @property
+    def direction(self) -> tuple[str, str, str]:
+        """같은 방향인지 가르는 값. 구간과 날짜가 같으면 같은 방향입니다."""
+        return (self.request.departure, self.request.arrival, self.request.date)
+
+    def describe(self) -> str:
+        return f"{self.label} {self.journey.summary()}".strip()
+
+
+@dataclass(frozen=True)
 class BookingResult:
     outcome: Outcome
     message: str
     journey: Journey | None = None
     hold: ReservationHoldResponse | None = None
     polls: int = 0
+    #: 방향마다 하나씩. 편도면 한 건, 왕복이면 두 건입니다.
+    holds: tuple[ReservationHoldResponse, ...] = ()
 
     @property
     def pnr_no(self) -> str | None:
@@ -166,8 +190,7 @@ class AutoBooker:
     def __init__(
         self,
         client: KorailClient,
-        request: SearchRequest,
-        targets: Sequence[Journey],
+        targets: Sequence[Target],
         options: BookingOptions,
         *,
         log: Logger | None = None,
@@ -177,14 +200,24 @@ class AutoBooker:
         if not targets:
             raise ValueError("자동예매에는 열차를 하나 이상 골라야 합니다")
         self.client = client
-        self.request = request
         self.targets = tuple(targets)
         self.options = options
         self._log = log
         self._notify = notify
         self._relogin = relogin
         self._relogins = 0
-        self._target_keys = [journey.key() for journey in self.targets]
+        #: 방향마다 하나씩만 잡습니다. 잡힌 방향은 여기 들어가고 더는 보지
+        #: 않습니다 — 같은 방향을 두 번 잡으면 중복 예약입니다.
+        self._settled: dict[tuple[str, str, str], ReservationHoldResponse | None] = {}
+
+    @property
+    def directions(self) -> tuple[tuple[str, str, str], ...]:
+        return tuple(dict.fromkeys(target.direction for target in self.targets))
+
+    def _pending(self) -> tuple[Target, ...]:
+        return tuple(
+            target for target in self.targets if target.direction not in self._settled
+        )
 
     # -- 보고 ----------------------------------------------------------------
 
@@ -254,66 +287,107 @@ class AutoBooker:
                 return result
             self._sleep(stop, deadline)
 
-    def _poll(self) -> list[Journey]:
-        """지금의 여정 상태를 다시 읽습니다. 고른 것만 남깁니다."""
-        wanted = set(self._target_keys)
-        return [
-            journey
-            for journey in search_journeys(self.client, self.request)
-            if journey.key() in wanted
-        ]
+    def _poll(self) -> list[tuple[Target, Journey]]:
+        """아직 안 잡힌 방향만 다시 조회합니다.
 
-    def _act_on(self, poll: int, fresh: Sequence[Journey]) -> BookingResult | None:
+        방향(구간+날짜)마다 조회는 한 번입니다. 같은 방향의 대상이 여럿이면 그
+        한 번의 결과에서 골라 씁니다 — 대상마다 조회하면 요청이 곱으로 늘어납니다.
+        """
+        fresh: list[tuple[Target, Journey]] = []
+        pending = self._pending()
+        for direction in dict.fromkeys(target.direction for target in pending):
+            same = [target for target in pending if target.direction == direction]
+            found = search_journeys(self.client, same[0].request)
+            by_key = {journey.key(): journey for journey in found}
+            for target in same:
+                journey = by_key.get(target.journey.key())
+                if journey is not None:
+                    fresh.append((target, journey))
+        return fresh
+
+    def _act_on(
+        self,
+        poll: int,
+        fresh: Sequence[tuple[Target, Journey]],
+    ) -> BookingResult | None:
         if not fresh:
             self.say(f"[{poll}] 고른 열차가 조회 결과에 없습니다")
             return None
         self._report(poll, fresh)
-        for journey in fresh:
+        for target, journey in fresh:
+            if target.direction in self._settled:
+                continue
             seat_class = journey.bookable_seat_class(self.options.seat_preference)
             if seat_class is None:
                 continue
-            result = self._try_reserve(journey, seat_class)
+            result = self._try_reserve(target, journey, seat_class)
             if result is not None:
                 return result
         if self.options.allow_standby:
-            for journey in fresh:
-                if is_standby_available(journey):
-                    return self._try_standby(journey)
+            for target, journey in fresh:
+                if target.direction not in self._settled and is_standby_available(
+                    journey
+                ):
+                    result = self._try_standby(target, journey)
+                    if result is not None:
+                        return result
         return None
 
-    def _report(self, poll: int, fresh: Sequence[Journey]) -> None:
+    def _finish(self, kind: str) -> BookingResult | None:
+        """방향이 다 끝났으면 마무리합니다. 남았으면 계속 지켜봅니다."""
+        if len(self._settled) < len(self.directions):
+            remaining = len(self.directions) - len(self._settled)
+            self.say(f"    남은 방향 {remaining}개를 계속 지켜봅니다")
+            return None
+        holds = tuple(hold for hold in self._settled.values() if hold is not None)
+        if not holds:
+            return BookingResult(
+                Outcome.PREVIEW,
+                f"{kind} 가능 — 하지만 아무것도 보내지 않았습니다(미리보기).",
+                polls=0,
+            )
+        return BookingResult(
+            Outcome.HELD,
+            f"{len(holds)}건을 잡았습니다.",
+            hold=holds[0],
+            holds=holds,
+        )
+
+    def _report(self, poll: int, fresh: Sequence[tuple[Target, Journey]]) -> None:
         parts = []
-        for journey in fresh:
+        for target, journey in fresh:
             state = ", ".join(
                 f"{seat_class.name[:2]}:{journey.seat_state(seat_class).label}"
                 for seat_class in self.options.seat_preference.seat_classes()
             )
-            parts.append(f"{'+'.join(journey.train_numbers())}({state})")
+            prefix = f"{target.label} " if target.label else ""
+            parts.append(f"{prefix}{'+'.join(journey.train_numbers())}({state})")
         self.say(f"[{poll}] {' / '.join(parts)}")
 
     # -- 예약 ----------------------------------------------------------------
 
     def _try_reserve(
         self,
+        target: Target,
         journey: Journey,
         seat_class: KorailSeatClass,
     ) -> BookingResult | None:
         label = "특실" if seat_class is KorailSeatClass.SPECIAL else "일반실"
-        self.say(f"    자리가 열렸습니다 — {journey.summary()} {label} 예약 시도")
+        self.say(f"    자리가 열렸습니다 — {target.describe()} {label} 예약 시도")
         consent = reserve_consent(live=self.options.live)
         try:
             if journey.is_transfer:
                 result = self.client.reserve_transfer(
                     journey.legs,
                     consent=consent,
-                    passengers=self.request.passengers,
+                    passengers=target.request.passengers,
                     seat_classes=[seat_class] * len(journey.legs),
                 )
             else:
                 result = self.client.reserve(
                     journey.first,
                     consent=consent,
-                    passengers=self.request.passengers,
+                    passengers=target.request.passengers,
                     seat_class=seat_class,
                     job_type=KorailReservationJobType.IMMEDIATE,
                 )
@@ -323,18 +397,18 @@ class AutoBooker:
         except KorailSessionExpiredError:
             self._try_relogin()
             return None
-        return self._settle(result, journey, kind="좌석 예약")
+        return self._settle(result, target, journey, kind="좌석 예약")
 
-    def _try_standby(self, journey: Journey) -> BookingResult | None:
+    def _try_standby(self, target: Target, journey: Journey) -> BookingResult | None:
         """예약대기(1102). 일반실 직통에서만 성립합니다."""
         if self.options.seat_preference is SeatPreference.SPECIAL:
             return None
-        self.say(f"    예약대기 시도 — {journey.summary()}")
+        self.say(f"    예약대기 시도 — {target.describe()}")
         try:
             result = self.client.reserve(
                 journey.first,
                 consent=reserve_consent(live=self.options.live),
-                passengers=self.request.passengers,
+                passengers=target.request.passengers,
                 seat_class=KorailSeatClass.GENERAL,
                 job_type=KorailReservationJobType.STANDBY,
             )
@@ -344,12 +418,8 @@ class AutoBooker:
         except KorailProtocolError as exc:
             self.say(f"    예약대기 조건이 아닙니다: {exc}")
             return None
-        settled = self._settle(result, journey, kind="예약대기")
-        if (
-            settled is not None
-            and settled.outcome is Outcome.HELD
-            and isinstance(result, ReservationHoldResponse)
-        ):
+        settled = self._settle(result, target, journey, kind="예약대기")
+        if isinstance(result, ReservationHoldResponse):
             self._confirm_standby(result)
         return settled
 
@@ -374,32 +444,37 @@ class AutoBooker:
     def _settle(
         self,
         result: MutationPreview | BaseKorailResponse,
+        target: Target,
         journey: Journey,
         *,
         kind: str,
-    ) -> BookingResult:
+    ) -> BookingResult | None:
+        """한 방향이 끝났습니다. 남은 방향이 있으면 계속 지켜봅니다."""
         if isinstance(result, MutationPreview):
-            message = (
+            self._settled[target.direction] = None
+            self.say(
                 f"{kind} 가능 — 하지만 아무것도 보내지 않았습니다(미리보기).\n"
-                f"{journey.summary()}\n보낼 곳: {result.route}"
+                f"{target.describe()}\n보낼 곳: {result.route}"
             )
-            self.say(message)
-            return BookingResult(Outcome.PREVIEW, message, journey=journey)
+            return self._finish(kind)
         hold = result if isinstance(result, ReservationHoldResponse) else None
         pnr = (hold.pnr_no if hold else None) or "(응답에 PNR 이 없습니다)"
         if hold is not None and self.options.add_to_cart:
             self._add_to_cart(hold)
-        message = (
+        self._settled[target.direction] = hold
+        self.announce(
             f"🚆 {kind} 성공 (아직 결제 전)\n"
-            f"{journey.summary()}\n"
+            f"{target.describe()}\n"
             f"PNR {pnr}\n"
             f"금액 {fare_text(hold)}\n"
             f"결제 기한 {payment_deadline_text(hold)}\n"
             f"소요 {format_duration(journey.total_minutes)}\n"
             "결제는 코레일 앱에서 기한 안에 하세요."
         )
-        self.announce(message)
-        return BookingResult(Outcome.HELD, message, journey=journey, hold=hold)
+        finished = self._finish(kind)
+        if finished is not None:
+            return replace(finished, journey=journey)
+        return None
 
     def _add_to_cart(self, hold: ReservationHoldResponse) -> None:
         pnr = (hold.pnr_no or "").strip()

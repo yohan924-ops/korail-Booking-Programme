@@ -17,6 +17,7 @@ Tkinter 는 여기서 import 하지 않습니다 — 그래서 화면 없는 CI 
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import importlib.util
 import json
@@ -39,6 +40,7 @@ from korail_booker.autobook import (
     AutoBooker,
     BookingOptions,
     Outcome,
+    Target,
     cart_consent,
     is_standby_available,
     payment_deadline_text,
@@ -321,11 +323,34 @@ def test_an_extra_needs_every_leg_to_offer_it():
     assert "입석" not in journey.extras()
 
 
-def test_the_seat_cell_carries_the_count_when_there_is_one():
-    with_count = _journey(_summary(h_rsv_psb_nm="여유", h_std_rest_seat_cnt="12"))
-    assert with_count.seat_text(KorailSeatClass.GENERAL) == "여유 · 12석"
-    without = _journey(_summary(h_rsv_psb_nm="매진"))
-    assert without.seat_text(KorailSeatClass.GENERAL) == "매진"
+def test_the_seat_cell_leads_with_sold_out_or_available():
+    """자동예매가 노리는 것이 매진이라, 그 한 낱말이 맨 앞에 와야 합니다."""
+    open_seat = _journey(
+        _summary(general="11", h_rsv_psb_nm="여유", h_std_rest_seat_cnt="12")
+    )
+    assert open_seat.seat_text(KorailSeatClass.GENERAL) == "예약가능 · 여유 · 12석"
+    sold = _journey(_summary(general="13", h_rsv_psb_nm="매진"))
+    assert sold.seat_text(KorailSeatClass.GENERAL) == "매진"
+    assert sold.seat_state(KorailSeatClass.GENERAL).sold_out
+    assert not open_seat.seat_state(KorailSeatClass.GENERAL).sold_out
+
+
+def test_a_cabin_the_train_does_not_have_reads_as_a_dash():
+    """특실 없는 열차의 특실 칸은 매진이 아닙니다 — 아예 없는 것입니다."""
+    train = _journey(_summary(general="11"))
+    state = train.seat_state(KorailSeatClass.SPECIAL)
+    assert state.absent and not state.sold_out
+    assert state.status == "-"
+
+
+def test_a_transfer_is_sold_out_when_any_leg_is():
+    journey = _journey(
+        _summary(arrival="대전", arrival_code="0010", general="11"),
+        _summary(train_no="00503", departure="대전", departure_code="0010",
+                 general="13"),
+        source=J.JourneySource.SERVER_TRANSFER,
+    )
+    assert journey.seat_state(KorailSeatClass.GENERAL).sold_out
 
 
 # --- 조회 조건 -----------------------------------------------------------------
@@ -691,6 +716,10 @@ def test_the_launcher_names_the_dependencies_the_package_actually_declares():
 # --- 자동예매 -----------------------------------------------------------------
 
 
+def _target(journey, request=None, label="") -> Target:
+    return Target(journey=journey, request=request or _request(), label=label)
+
+
 def _booker(recorder: _Recorder, targets, **option_overrides: Any) -> AutoBooker:
     options = BookingOptions(
         poll_interval_s=option_overrides.pop("poll_interval_s", 10.0),
@@ -699,8 +728,7 @@ def _booker(recorder: _Recorder, targets, **option_overrides: Any) -> AutoBooker
     )
     return AutoBooker(
         _client(recorder),
-        _request(),
-        targets,
+        [target if isinstance(target, Target) else _target(target) for target in targets],
         options,
         log=lambda message: None,
     )
@@ -788,8 +816,7 @@ def test_a_transfer_target_books_both_legs_in_one_request():
     )
     booker = AutoBooker(
         _client(recorder),
-        _request(include_direct=False, include_transfer=True),
-        [target],
+        [_target(target, _request(include_direct=False, include_transfer=True))],
         BookingOptions(poll_interval_s=10.0, live=True),
         log=lambda message: None,
     )
@@ -879,8 +906,7 @@ def test_an_expired_session_logs_in_again():
 
     booker = AutoBooker(
         client,
-        _request(),
-        [_journey(_summary(general="13"))],
+        [_target(_journey(_summary(general="13")))],
         BookingOptions(poll_interval_s=10.0, live=True),
         log=lambda message: None,
         relogin=relogin,
@@ -929,6 +955,124 @@ def test_the_payment_deadline_is_only_what_the_server_said():
 
     assert "자동 취소" in payment_deadline_text(_NoDeadline())
     assert payment_deadline_text(None) == "알 수 없음"
+
+
+def test_a_round_trip_holds_one_per_direction_and_then_stops():
+    """왕복은 방향마다 한 건입니다. 한쪽을 잡아도 다른 쪽은 계속 지켜봅니다."""
+    outbound = _request(departure="서울", arrival="부산", date="20990101")
+    inbound = _request(departure="부산", arrival="서울", date="20990105")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = httpx.QueryParams(request.content.decode())
+        if request.url.path == RESERVE:
+            return httpx.Response(200, json=_reserve_reply())
+        # 가는 편만 자리가 열려 있습니다.
+        going = body.get("txtGoStart") == "서울"
+        row = _row("00101", general="11" if going else "13")
+        return httpx.Response(200, json=_search_reply([row]))
+
+    recorder_client = KorailClient(transport=httpx.MockTransport(handler))
+    recorder_client.session.current = KorailSession(jsessionid="s")
+    booker = AutoBooker(
+        recorder_client,
+        [
+            _target(_journey(_summary(general="13")), outbound, "가는 편"),
+            _target(
+                _journey(
+                    TrainSummary.from_raw(
+                        _row("00101", departure="부산", arrival="서울",
+                             departure_code="0020", arrival_code="0001")
+                    )
+                ),
+                inbound,
+                "오는 편",
+            ),
+        ],
+        BookingOptions(poll_interval_s=10.0, live=True, watch_minutes=1),
+        log=lambda message: None,
+    )
+    booker._sleep = lambda stop, deadline: None  # type: ignore[method-assign]
+    stop = threading.Event()
+    polls: list[int] = []
+    original = booker._poll
+
+    def limited():
+        polls.append(1)
+        if len(polls) > 3:
+            stop.set()
+        return original()
+
+    booker._poll = limited  # type: ignore[method-assign]
+    result = booker.run(stop)
+    # 가는 편은 잡혔고, 오는 편은 만석이라 못 잡은 채 중지됐습니다.
+    assert result.outcome is Outcome.STOPPED
+    assert len(booker._settled) == 1
+
+
+def test_both_directions_finish_together():
+    recorder = _Recorder(
+        {SEARCH: _search_reply([_row("00101", general="11")]),
+         RESERVE: _reserve_reply()}
+    )
+    client = _client(recorder)
+    booker = AutoBooker(
+        client,
+        [
+            _target(_journey(_summary(general="11")),
+                    _request(departure="서울", arrival="부산"), "가는 편"),
+            _target(_journey(_summary(general="11")),
+                    _request(departure="부산", arrival="서울", date="20990105"),
+                    "오는 편"),
+        ],
+        BookingOptions(poll_interval_s=10.0, live=True),
+        log=lambda message: None,
+    )
+    result = booker.run(threading.Event())
+    assert result.outcome is Outcome.HELD
+    assert len(result.holds) == 2          # 방향마다 하나씩
+    assert recorder.count(RESERVE) == 2    # 그리고 딱 둘뿐
+
+
+def test_one_search_per_direction_not_per_target():
+    """같은 방향에 대상이 여럿이어도 조회는 한 번입니다."""
+    recorder = _Recorder({SEARCH: _search_reply([_row("00101"), _row("00103")])})
+    request = _request()
+    booker = AutoBooker(
+        _client(recorder),
+        [
+            _target(_journey(_summary(train_no="00101")), request),
+            _target(_journey(_summary(train_no="00103")), request),
+        ],
+        BookingOptions(poll_interval_s=10.0, live=True, watch_minutes=1),
+        log=lambda message: None,
+    )
+    fresh = booker._poll()
+    assert recorder.count(SEARCH) == 1
+    assert len(fresh) == 2
+
+
+def test_the_ui_event_pump_schedules_nothing_but_itself():
+    """``_drain`` 은 120ms 마다 돕니다. 여기에 다른 일을 걸면 그 일도 그렇게 돕니다.
+
+    역 목록 조회가 실제로 여기 걸려 초당 여덟 번씩 새어 나갔습니다. Tkinter 를
+    띄우지 않고 원문에서 확인합니다.
+    """
+    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    drains = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_drain"
+    ]
+    assert len(drains) == 1
+    scheduled = [
+        ast.unparse(call.args[1])
+        for call in ast.walk(drains[0])
+        if isinstance(call, ast.Call)
+        and ast.unparse(call.func).endswith("after")
+        and len(call.args) >= 2
+    ]
+    assert scheduled == ["self._drain"], scheduled
 
 
 # --- 텔레그램 -----------------------------------------------------------------
