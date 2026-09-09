@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 
@@ -119,6 +120,48 @@ def format_duration(minutes: int | None) -> str:
 #: :class:`TrainSummary` 의 속성 이름과 같습니다(``_journey_fields`` 가 그렇게
 #: 씁니다). 문구가 바뀌어 못 뽑으면 그냥 원문을 보여 줍니다.
 _FIELD_IN_MESSAGE = re.compile(r"train field ([a-z_]+) ")
+
+
+def first_leg_key(journey: Journey) -> tuple[str, str, str]:
+    """1구간을 알아보는 값 — 열차 번호와 출발·도착 시각.
+
+    직접 조합 환승은 같은 1구간에 2구간만 다른 조합이 여럿 나옵니다. 그것을
+    묶으려면 "같은 1구간" 을 정의해야 합니다.
+    """
+    train = journey.first
+    return (
+        (train.train_no or "").strip(),
+        normalize_clock(train.departure_time),
+        normalize_clock(train.arrival_time),
+    )
+
+
+def group_by_first_leg(
+    journeys: Sequence[Journey],
+) -> list[tuple[Journey, list[int]]]:
+    """1구간이 같은 여정끼리 묶습니다. **차례는 그대로** 둡니다.
+
+    돌려주는 것은 ``(그 묶음의 첫 여정, 원래 번호들)`` 의 나열입니다. 화면은
+    번호로 원래 목록을 되짚으므로, 묶으면서 번호를 잃으면 안 됩니다.
+
+    직통과 서버 추천 환승은 묶지 않습니다 — 직통은 1구간이 곧 여정이고,
+    서버 추천은 코레일이 이미 골라 준 조합이라 수가 적습니다. 묶어서 접을
+    값어치가 있는 것은 **경우의 수가 곱으로 늘어나는 직접 조합**뿐입니다.
+    """
+    order: list[tuple[str, str, str]] = []
+    buckets: dict[tuple[str, str, str], list[int]] = {}
+    for index, journey in enumerate(journeys):
+        if journey.source is not JourneySource.CUSTOM_TRANSFER:
+            # 묶지 않는 것은 저마다 혼자인 묶음이 됩니다 — 부르는 쪽이 갈래를
+            # 나누지 않아도 되게.
+            key = ("", str(index), "")
+        else:
+            key = first_leg_key(journey)
+        if key not in buckets:
+            buckets[key] = []
+            order.append(key)
+        buckets[key].append(index)
+    return [(journeys[buckets[key][0]], buckets[key]) for key in order]
 
 
 def unbookable_reason(journey: Journey) -> str | None:

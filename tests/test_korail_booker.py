@@ -2629,3 +2629,84 @@ def test_the_settings_file_lives_outside_the_repository(monkeypatch: pytest.Monk
     if sys.platform != "win32":
         assert ST.settings_path() == Path("/tmp/synthetic-config/korail-booker/settings.json")
     assert Path(__file__).parents[1] not in ST.settings_path().parents
+
+
+# --- 직접 조합 결과를 1구간으로 묶기 -------------------------------------------
+
+
+def _leg(train_no: str, dep: str, arr: str) -> TrainSummary:
+    return _summary(train_no=train_no, departure_time=dep, arrival_time=arr)
+
+
+def test_the_same_first_leg_becomes_one_bundle():
+    """직접 조합은 1구간 하나에 2구간이 여럿 붙습니다 — 그것을 묶습니다."""
+    first = _leg("00301", "054700", "062800")
+    a = _journey(first, _leg("00301", "063000", "071200"), source=J.JourneySource.CUSTOM_TRANSFER)
+    b = _journey(first, _leg("00003", "063400", "072200"), source=J.JourneySource.CUSTOM_TRANSFER)
+    groups = J.group_by_first_leg([a, b])
+    assert [indices for _head, indices in groups] == [[0, 1]]
+
+
+def test_a_bundle_keeps_the_original_row_numbers():
+    """화면은 번호로 원래 목록을 되짚습니다. 묶으면서 잃으면 엉뚱한 걸 담습니다."""
+    first = _leg("00301", "054700", "062800")
+    other = _leg("00305", "060000", "064000")
+    journeys = [
+        _journey(first, _leg("00301", "063000", "071200"), source=J.JourneySource.CUSTOM_TRANSFER),
+        _journey(other, _leg("00007", "065000", "073000"), source=J.JourneySource.CUSTOM_TRANSFER),
+        _journey(first, _leg("00003", "063400", "072200"), source=J.JourneySource.CUSTOM_TRANSFER),
+    ]
+    groups = J.group_by_first_leg(journeys)
+    assert [indices for _head, indices in groups] == [[0, 2], [1]]
+
+
+def test_direct_and_server_transfers_are_never_bundled():
+    """직통은 1구간이 곧 여정이고, 서버 추천은 코레일이 이미 골라 준 것입니다."""
+    train = _leg("00301", "054700", "062800")
+    journeys = [
+        _journey(train),
+        _journey(train),
+        _journey(train, _leg("00003", "063400", "072200"), source=J.JourneySource.SERVER_TRANSFER),
+        _journey(train, _leg("00005", "064000", "073000"), source=J.JourneySource.SERVER_TRANSFER),
+    ]
+    groups = J.group_by_first_leg(journeys)
+    assert [indices for _head, indices in groups] == [[0], [1], [2], [3]]
+
+
+def test_the_screen_draws_bundles_and_expands_them_when_picked():
+    """부모 줄을 고르면 그 아래 조합 전부가 담깁니다."""
+    source = _ui_source()
+    assert "group_by_first_leg" in source
+    assert "def _insert_group" in source
+    assert "self._group_children" in source
+    body = _ui_function("selected_results")
+    assert "_group_children" in body
+
+
+# --- 텔레그램: 저장할지 이번만 쓸지 --------------------------------------------
+
+
+def test_telegram_settings_can_be_used_without_touching_the_disk():
+    """남의 컴퓨터에서 한 번만 쓰고 싶을 때가 있습니다. 토큰은 봇 전체 열쇠입니다."""
+    source = _ui_source()
+    assert 'text="⑥ 저장하고 쓰기"' in source
+    assert 'text="이번만 쓰기"' in source
+    assert 'text="저장된 값 지우기"' in source
+    once = _ui_function("use_once")
+    assert "self._telegram_once = TelegramConfig(" in once
+    assert "settings_module.save" not in once
+
+
+def test_a_one_time_telegram_setting_wins_over_the_stored_one():
+    """방금 넣은 값을 쓰겠다는 뜻입니다. 저장된 값이 있어도 그렇습니다."""
+    body = _ui_function("_make_notifier")
+    assert "self._telegram_once or TelegramConfig(" in body
+
+
+def test_saving_clears_the_one_time_value():
+    """저장한 값이 곧바로 쓰이지 않으면 사람이 저장이 안 됐다고 생각합니다."""
+    store = _ui_function("store")
+    assert "self._telegram_once = None" in store
+    forget = _ui_function("forget")
+    assert "telegram_token=''" in forget
+    assert "self._telegram_once = None" in forget

@@ -52,6 +52,9 @@ from .journeys import (
     SeatPreference,
     format_clock,
     format_duration,
+    group_by_first_leg,
+    normalize_clock,
+    one_line,
     unbookable_detail,
     unbookable_reason,
 )
@@ -385,6 +388,12 @@ class BookerApp:
         self._transfer_route: tuple[str, str] | None = None
         #: 전국 역 이름. 자동완성과 환승역 추가가 이것을 씁니다.
         self.station_names: tuple[str, ...] = ()
+        #: 묶음의 부모 줄 → 그 아래 여정들의 번호.
+        self._group_children: dict[tuple[str, str], list[int]] = {}
+        #: 이번 실행에만 쓰는 텔레그램 값. 설정 파일에는 쓰지 않습니다.
+        #: 남의 컴퓨터에서 한 번만 쓰고 싶을 때를 위한 것입니다. 있으면
+        #: 저장된 값보다 이쪽을 씁니다.
+        self._telegram_once: TelegramConfig | None = None
         #: 조회마다 번호를 매깁니다. [조회 중지] 는 그 번호를 버림 표시에
         #: 넣고, 작업 스레드가 그것을 보고 조용히 끝냅니다.
         self._search_serial = 0
@@ -1061,6 +1070,8 @@ class BookerApp:
         tree.tag_configure("open", foreground="#1a7f37")
         tree.tag_configure("soldout", foreground="#b42318")
         tree.tag_configure("unbookable", foreground="#8a8a8a")
+        # 묶음의 부모 줄은 여정이 아닙니다 — 1구간을 알려 주는 머리글입니다.
+        tree.tag_configure("group", foreground="#1f6feb")
         # 두 번 누르면 담깁니다. 고르고 단추를 찾는 것보다 빠릅니다.
         tree.bind("<Double-Button-1>", self._result_double_clicked)
         tree.grid(row=0, column=0, sticky="nsew")
@@ -2274,11 +2285,26 @@ class BookerApp:
         self.journeys = [target.journey for target in results]
         self.sync_round_trip_panes()
         self.item_journeys.clear()
+        self._group_children.clear()
         for tree in (self.tree, self.return_tree):
             tree.delete(*tree.get_children())
-        for index, target in enumerate(results):
-            tree = self.return_tree if target.label == "오는 편" else self.tree
-            self._insert_row(tree, index, target)
+        # 1구간이 같은 직접 조합은 한 줄로 접습니다. 조합이 곱으로 늘어나면
+        # 평평한 목록은 눈으로 셀 수 없습니다.
+        for tree in (self.tree, self.return_tree):
+            wanted = "오는 편" if tree is self.return_tree else None
+            numbered = [
+                (index, target)
+                for index, target in enumerate(results)
+                if (target.label == "오는 편") == (wanted == "오는 편")
+            ]
+            groups = group_by_first_leg([target.journey for _index, target in numbered])
+            for _first, members in groups:
+                picked = [numbered[position] for position in members]
+                if len(picked) == 1:
+                    index, target = picked[0]
+                    self._insert_row(tree, index, target)
+                else:
+                    self._insert_group(tree, picked)
         journeys = self.journeys
         direct = sum(1 for journey in journeys if not journey.is_transfer)
         transfer = len(journeys) - direct
@@ -2341,6 +2367,64 @@ class BookerApp:
             )
         tree.item(item, open=True)
 
+    def _insert_group(self, tree: ttk.Treeview, picked: list[tuple[int, Target]]) -> None:
+        """1구간이 같은 조합 여럿을 한 부모 줄 아래에 접습니다.
+
+        부모 줄은 **1구간 열차**입니다. 그 자체로는 여정이 아니므로 좌석 칸을
+        비우고, 자식 줄이 저마다 하나의 여정이 됩니다. 부모를 고르면 **그
+        아래 전부**를 고른 것으로 봅니다 — 자동예매는 어차피 한 방향에 한 건만
+        잡으므로, 1구간이 같은 조합을 여럿 담아 두면 그만큼 먼저 열리는 것을
+        잡을 기회가 늘어납니다.
+        """
+        _index, first = picked[0]
+        leg = first.journey.first
+        parent = tree.insert(
+            "",
+            "end",
+            values=(
+                f"{first.label[:2]}·환승(직접)" if first.label else "환승(직접)",
+                one_line(f"{(leg.train_class_name or '').strip()} "
+                         f"{(leg.train_no or '').strip().lstrip('0')}"),
+                format_clock(normalize_clock(leg.departure_time)),
+                format_clock(normalize_clock(leg.arrival_time)),
+                format_duration(first.journey.leg_minutes(0)),
+                f"{leg.departure_station_name}→{leg.arrival_station_name} · "
+                f"이어지는 편 {len(picked)}개",
+                "",
+                "",
+                "",
+            ),
+            tags=("group",),
+            open=True,
+        )
+        self._group_children[(str(tree), parent)] = [index for index, _t in picked]
+        for index, target in picked:
+            item = tree.insert(
+                parent,
+                "end",
+                values=self._combination_values(target),
+                tags=self._row_tags(target.journey),
+            )
+            self.item_journeys[(str(tree), item)] = index
+
+    def _combination_values(self, target: Target) -> tuple[str, ...]:
+        """접힌 자식 줄 — **2구간과 총 소요**만 새로 말합니다."""
+        journey = target.journey
+        second = journey.legs[1]
+        station = journey.transfer_station_name or "환승역"
+        return (
+            "└ 이어서",
+            one_line(f"{(second.train_class_name or '').strip()} "
+                     f"{(second.train_no or '').strip().lstrip('0')}"),
+            format_clock(normalize_clock(second.departure_time)),
+            format_clock(normalize_clock(second.arrival_time)),
+            format_duration(journey.total_minutes),
+            f"{station} {format_duration(journey.transfer_minutes)} 대기",
+            journey.seat_text(KorailSeatClass.GENERAL),
+            journey.seat_text(KorailSeatClass.SPECIAL),
+            "예매 불가" if unbookable_reason(journey) else (" · ".join(journey.extras()) or "-"),
+        )
+
     def _row_values(self, target: Target) -> tuple[str, ...]:
         journey = target.journey
         if journey.is_transfer:
@@ -2386,6 +2470,10 @@ class BookerApp:
         chosen: list[Target] = []
         for tree in (self.tree, self.return_tree):
             for item in tree.selection():
+                # 묶음의 부모를 골랐으면 그 아래 전부를 고른 것으로 봅니다.
+                for index in self._group_children.get((str(tree), item), []):
+                    if self.results[index] not in chosen:
+                        chosen.append(self.results[index])
                 index = self.item_journeys.get((str(tree), item))
                 if index is None:
                     index = self.item_journeys.get((str(tree), tree.parent(item)))
@@ -2689,7 +2777,9 @@ class BookerApp:
     def _make_notifier(self) -> Callable[[str], None] | None:
         if not self.notify_enabled.get():
             return None
-        config = TelegramConfig(
+        # 이번만 쓰기로 한 값이 있으면 그것이 먼저입니다. 저장된 값이 있어도
+        # 사람이 방금 넣은 쪽을 쓰겠다는 뜻이기 때문입니다.
+        config = self._telegram_once or TelegramConfig(
             token=self.settings.telegram_token,
             chat_id=self.settings.telegram_chat_id,
         )
@@ -2926,6 +3016,7 @@ class BookerApp:
             self._in_thread(work, "telegram-test")
 
         def store() -> None:
+            """설정 파일에 적습니다. 다음에 켤 때도 그대로 있습니다."""
             if bad_chat_id():
                 return
             self.settings = replace(
@@ -2935,17 +3026,57 @@ class BookerApp:
                 notify_enabled=self.notify_enabled.get(),
             )
             path = settings_module.save(self.settings)
+            # 저장한 값이 이번 실행에도 곧바로 쓰이도록, 일회용 값은 치웁니다.
+            self._telegram_once = None
             self._write_log(
                 f"텔레그램 설정을 저장했습니다: {path}" if path
                 else "설정을 저장하지 못했습니다(권한을 확인하세요)."
             )
             window.destroy()
 
+        def use_once() -> None:
+            """이번 실행에만 씁니다. 파일에는 아무것도 쓰지 않습니다.
+
+            남의 컴퓨터나 공용 컴퓨터에서 한 번만 쓰고 싶을 때를 위한 것입니다.
+            토큰은 봇을 통째로 조종할 수 있으니 디스크에 남기지 않는 편이
+            나을 때가 있습니다.
+            """
+            if bad_chat_id():
+                return
+            self._telegram_once = TelegramConfig(
+                token=token.get().strip(),
+                chat_id=chat_id.get().strip(),
+            )
+            self._write_log(
+                "텔레그램 설정을 이번 실행에만 씁니다 — 파일에 저장하지 "
+                "않았습니다. 프로그램을 끄면 사라집니다."
+            )
+            window.destroy()
+
+        def forget() -> None:
+            """저장된 값을 지웁니다. 이번 실행의 일회용 값도 같이 치웁니다."""
+            self.settings = replace(
+                self.settings,
+                telegram_token="",
+                telegram_chat_id="",
+            )
+            self._telegram_once = None
+            token.set("")
+            chat_id.set("")
+            path = settings_module.save(self.settings)
+            status.set("저장된 값을 지웠습니다.")
+            self._write_log(
+                f"텔레그램 설정을 지웠습니다: {path}" if path
+                else "설정 파일을 고치지 못했습니다(권한을 확인하세요)."
+            )
+
         buttons = ttk.Frame(window)
         buttons.grid(row=8, column=0, columnspan=2, sticky="w", padx=10, pady=8)
         ttk.Button(buttons, text="④ 내 대화 ID 찾기", command=find_chat_id).pack(side="left")
         ttk.Button(buttons, text="⑤ 테스트 전송", command=send_test).pack(side="left", padx=6)
-        ttk.Button(buttons, text="⑥ 저장", command=store).pack(side="left")
+        ttk.Button(buttons, text="⑥ 저장하고 쓰기", command=store).pack(side="left")
+        ttk.Button(buttons, text="이번만 쓰기", command=use_once).pack(side="left", padx=6)
+        ttk.Button(buttons, text="저장된 값 지우기", command=forget).pack(side="left")
         ttk.Label(
             window,
             text="잘 안 될 때:\n"
@@ -2955,7 +3086,11 @@ class BookerApp:
             "   봇 대화에서 /start 를 한 번 보내고 다시 누르세요.\n"
             "· 둘 다 채웠는데 테스트가 실패하면 → 봇 대화를 차단하지 않았는지 보세요.\n"
             "\n"
-            "토큰은 이 컴퓨터의 설정 파일에만 저장되며 화면과 기록에는 남지 않습니다.",
+            "\n"
+            "[⑥ 저장하고 쓰기] 는 이 컴퓨터의 설정 파일에 적습니다 — 다음에 켤 때도\n"
+            "그대로 있습니다. [이번만 쓰기] 는 파일에 아무것도 쓰지 않고 이번 실행에만\n"
+            "씁니다(프로그램을 끄면 사라집니다). 어느 쪽이든 토큰은 화면과 기록에\n"
+            "남지 않습니다.",
             foreground="#666666",
             justify="left",
         ).grid(row=9, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 10))
