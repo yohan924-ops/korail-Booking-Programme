@@ -56,7 +56,7 @@ from .journeys import (
     unbookable_reason,
 )
 from .logfmt import format_entry
-from .notify import TelegramConfig, TelegramNotifier
+from .notify import ResolvedChat, TelegramConfig, TelegramNotifier, looks_like_chat_id
 from .search import (
     TRANSFER_CUSTOM,
     TRANSFER_SERVER,
@@ -2345,8 +2345,15 @@ class BookerApp:
         ttk.Entry(step4, textvariable=chat_id, width=24).pack(anchor="w", padx=8, pady=(6, 2))
         ttk.Label(
             step4,
-            text="모양: 123456789 (숫자만, 앞에 - 가 붙기도 합니다).\n"
-            "직접 알 필요 없습니다 — 3단계를 마쳤으면 아래 단추가 채워 줍니다.",
+            text="모양: 123456789 — **숫자**입니다(그룹이면 앞에 - 가 붙습니다).\n"
+            "봇 이름(@my_korail_alarm_bot 같은 것)을 넣는 칸이 아닙니다. 텔레그램이\n"
+            "@이름을 받는 것은 채널·슈퍼그룹뿐이고, 봇 자신은 대화 상대가 될 수\n"
+            "없습니다.\n"
+            "\n"
+            "직접 알 필요 없습니다 — 3단계를 마쳤으면 아래 [내 대화 ID 찾기] 가\n"
+            "채워 줍니다. 그 단추는 이 칸에 뭐가 적혀 있든 **보지 않고 덮어씁니다**\n"
+            "(봇이 받은 마지막 메시지에서 읽어 옵니다). 그래서 뭘 쳐 넣었든\n"
+            "누르는 순간 숫자로 바뀝니다.",
             foreground="#666666",
             justify="left",
         ).pack(anchor="w", padx=8, pady=(0, 6))
@@ -2356,19 +2363,22 @@ class BookerApp:
         )
 
         def find_chat_id() -> None:
-            def apply(found: str | None) -> None:
-                if found:
-                    chat_id.set(found)
-                    status.set(f"대화 ID {found} 를 찾았습니다")
-                else:
+            def apply(found: ResolvedChat | None) -> None:
+                if found is None:
                     status.set(
                         "못 찾았습니다 — 3단계를 하셨나요? 봇 대화에서 /start 를 "
                         "한 번 보낸 뒤 다시 누르세요."
                     )
+                    return
+                # 이 칸에 뭐가 적혀 있든 덮어씁니다. 그것이 이 단추의 일입니다.
+                chat_id.set(found.chat_id)
+                # 숫자 하나만 돌려주면 그 숫자가 무엇인지 알 수 없습니다.
+                whose = f"({found.title} 님과의 대화)" if found.title else ""
+                status.set(f"대화 ID {found.chat_id} 를 찾아 넣었습니다 {whose}".strip())
 
             def work() -> None:
                 with TelegramNotifier(TelegramConfig(token=token.get().strip())) as bot:
-                    found = bot.resolve_chat_id()
+                    found = bot.resolve_chat()
                 self.events.put(lambda: apply(found))
 
             status.set("찾는 중…")
@@ -2394,7 +2404,20 @@ class BookerApp:
             status.set("토큰 확인 중…")
             self._in_thread(work, "telegram-getme")
 
+        def bad_chat_id() -> bool:
+            """숫자가 아니면 말해 줍니다. 그대로 보내면 조용히 실패합니다."""
+            value = chat_id.get().strip()
+            if not value or looks_like_chat_id(value):
+                return False
+            status.set(
+                f'대화 ID 는 숫자입니다 — "{value}" 는 그 모양이 아닙니다. '
+                "[내 대화 ID 찾기] 를 누르세요."
+            )
+            return True
+
         def send_test() -> None:
+            if bad_chat_id():
+                return
             config = TelegramConfig(token=token.get().strip(), chat_id=chat_id.get().strip())
 
             def work() -> None:
@@ -2408,6 +2431,8 @@ class BookerApp:
             self._in_thread(work, "telegram-test")
 
         def store() -> None:
+            if bad_chat_id():
+                return
             self.settings = replace(
                 self.settings,
                 telegram_token=token.get().strip(),

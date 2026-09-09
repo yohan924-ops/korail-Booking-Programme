@@ -1659,6 +1659,57 @@ def test_a_stopped_run_is_announced_too():
     assert sent[-1].startswith("⏹️ 자동예매 종료")
 
 
+def test_the_chat_id_is_a_number_not_a_bot_name():
+    """``@봇이름`` 은 이 칸의 모양이 아닙니다.
+
+    실제로 ``@my_korail_alarm_bot`` 을 넣었다가 [내 대화 ID 찾기] 를 누르니
+    숫자로 바뀌어 헷갈렸다는 보고가 있었습니다. 그 단추가 칸을 보지 않고
+    덮어쓰기 때문인데, 화면이 그것을 말하지 않았습니다.
+    """
+    assert N.looks_like_chat_id("7073365948")
+    assert N.looks_like_chat_id("-1001234567890")  # 그룹은 음수
+    assert not N.looks_like_chat_id("@my_korail_alarm_bot")
+    assert not N.looks_like_chat_id("")
+    assert not N.looks_like_chat_id("123abc")
+
+
+def test_the_dialog_says_the_button_overwrites_whatever_is_typed():
+    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+
+    assert "뭐가 적혀 있든 **보지 않고 덮어씁니다**" in source
+    assert "봇 이름(@my_korail_alarm_bot 같은 것)을 넣는 칸이 아닙니다" in source
+    # 숫자가 아닌 값으로는 보내지도 저장하지도 않습니다.
+    assert "def bad_chat_id()" in source
+    assert "if bad_chat_id():" in source
+
+
+def test_the_resolved_chat_says_whose_it_is():
+    """숫자 하나만 돌려주면 그 숫자가 무엇인지 알 수 없습니다."""
+    payload = {
+        "ok": True,
+        "result": [
+            {"message": {"chat": {"id": 7073365948, "first_name": "윤한", "username": "yh"}}}
+        ],
+    }
+
+    with _telegram(lambda _r: httpx.Response(200, json=payload)) as bot:
+        found = bot.resolve_chat()
+
+    assert found is not None
+    assert found.chat_id == "7073365948"
+    # title → username → first_name 순서로 사람이 알아보는 이름을 고릅니다.
+    assert found.title == "yh"
+
+
+def test_a_chat_without_a_name_still_gives_its_number():
+    payload = {"ok": True, "result": [{"message": {"chat": {"id": -100}}}]}
+
+    with _telegram(lambda _r: httpx.Response(200, json=payload)) as bot:
+        found = bot.resolve_chat()
+
+    assert found is not None and found.chat_id == "-100" and found.title == ""
+
+
 def test_the_token_dialog_walks_through_the_whole_setup():
     """BotFather 답장만 보고는 어느 값을 어디에 넣는지 헷갈립니다."""
     source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")

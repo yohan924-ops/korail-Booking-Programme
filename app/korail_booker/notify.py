@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 import httpx
@@ -33,6 +34,34 @@ def mask_token(text: str, token: str) -> str:
     head = token.split(":", 1)[0]
     # 토큰의 앞부분(봇 ID)만 남은 URL 조각도 지웁니다.
     return masked.replace(head, "***") if head and head != token else masked
+
+
+#: 대화 ID 는 정수입니다. 그룹은 앞에 ``-`` 가 붙습니다.
+#:
+#: ``@이름`` 은 이 칸의 모양이 **아닙니다.** 텔레그램이 ``@이름`` 을 받는 것은
+#: 채널과 슈퍼그룹뿐이고, 봇 자신의 이름은 대화 상대가 될 수 없습니다.
+CHAT_ID_RE = re.compile(r"-?[0-9]+")
+
+
+def looks_like_chat_id(value: str) -> bool:
+    return CHAT_ID_RE.fullmatch(value.strip()) is not None
+
+
+def _chat_title(chat: dict[str, object]) -> str:
+    """대화를 사람이 알아보는 이름으로. 없으면 빈 문자열."""
+    for key in ("title", "username", "first_name"):
+        value = chat.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+@dataclass(frozen=True)
+class ResolvedChat:
+    """``getUpdates`` 에서 찾아낸 대화 하나."""
+
+    chat_id: str
+    title: str = ""
 
 
 @dataclass(frozen=True)
@@ -127,11 +156,14 @@ class TelegramNotifier:
         name = result.get("username")
         return name if isinstance(name, str) and name else None
 
-    def resolve_chat_id(self) -> str | None:
-        """봇에게 마지막으로 말을 건 대화의 ID.
+    def resolve_chat(self) -> ResolvedChat | None:
+        """봇에게 마지막으로 말을 건 **대화**. 번호와 이름을 함께 돌려줍니다.
 
         사용자가 자기 chat id 를 알아낼 방법이 없어서 있는 기능입니다 — 봇에게
         아무 메시지나 한 번 보낸 뒤 이것을 부르면 됩니다.
+
+        이름까지 읽는 이유: 돌아오는 것이 숫자 하나뿐이면 그 숫자가 무엇인지
+        알 수 없습니다. "내 계정"이라고 말해 주어야 사람이 납득합니다.
         """
         if not self.config.token.strip():
             return None
@@ -159,8 +191,16 @@ class TelegramNotifier:
                     continue
                 chat = message.get("chat")
                 if isinstance(chat, dict) and chat.get("id") is not None:
-                    return str(chat["id"])
+                    return ResolvedChat(
+                        chat_id=str(chat["id"]),
+                        title=_chat_title(chat),
+                    )
         return None
+
+    def resolve_chat_id(self) -> str | None:
+        """:meth:`resolve_chat` 의 번호만."""
+        found = self.resolve_chat()
+        return found.chat_id if found is not None else None
 
     def describe_failure(self, exc: Exception) -> str:
         """예외를 토큰 없는 한 줄로. 로그에 쓰는 유일한 통로입니다."""
