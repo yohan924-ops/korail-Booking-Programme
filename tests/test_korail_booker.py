@@ -1554,6 +1554,23 @@ def test_every_section_is_a_pane_the_user_can_resize():
         assert "_add_pane(parent" in builders[name], name
 
 
+def test_the_query_section_uses_its_right_hand_space():
+    """오른쪽이 비어 있으면 그만큼 아래 목록이 눌립니다.
+
+    환승 조건 묶음을 왼쪽 줄들 **옆에** 세워 조회 묶음이 472px 에서 300px
+    남짓으로 줄었습니다. 그러려면 왼쪽 줄이 좁아야 해서 승객과 열차 종류를
+    따로 줄로 뗐습니다 — 한 줄에 몰면 1000px 가까이 되어 옆자리가 없습니다.
+    """
+    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+
+    # 환승 조건은 1번 칸(오른쪽)에서 왼쪽 줄 전체와 나란히 섭니다.
+    assert "row=0, column=1, rowspan=7" in source
+    # 승객은 구간에서 떨어져 나온 제 줄입니다.
+    assert 'self._section(frame, 1, "승객")' in source
+    # 열차 종류 여덟은 두 줄로 접힙니다.
+    assert "half = (len(TRAIN_KINDS) + 1) // 2" in source
+
+
 def test_a_pane_with_buttons_measures_its_own_minimum():
     """손으로 적어 둔 최소 높이는 반드시 어긋납니다.
 

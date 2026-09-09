@@ -511,6 +511,10 @@ class BookerApp:
 
         # 줄마다 무엇을 정하는 줄인지 앞머리에 적습니다. 칸이 스무 개가 넘으면
         # 이름 없이 늘어놓은 줄은 읽히지 않습니다.
+        # 왼쪽 줄은 모두 오른쪽 '환승 조건' 옆에 서야 하므로 좁아야 합니다.
+        # 그래서 승객과 열차 종류를 따로 줄로 뗐습니다 — 한 줄에 몰면 1000px
+        # 가까이 되어 옆자리가 남지 않고, 그러면 환승 조건이 아래로 내려가
+        # 묶음이 통째로 길어집니다.
         route = self._section(frame, 0, "구간")
         ttk.Label(route, text="출발").pack(side="left")
         self.departure_box = AutocompleteCombobox(
@@ -522,7 +526,9 @@ class BookerApp:
             route, textvariable=self.arrival, width=12
         )
         self.arrival_box.pack(side="left", padx=(2, 14))
-        ttk.Label(route, text="승객").pack(side="left")
+        self.station_state = tk.StringVar(value="역 불러오는 중…")
+
+        people = self._section(frame, 1, "승객")
         for label, key in (
             ("어른", "adult"),
             ("청소년", "teenager"),
@@ -530,20 +536,13 @@ class BookerApp:
             ("유아", "infant"),
             ("경로", "senior"),
         ):
-            ttk.Label(route, text=label).pack(side="left", padx=(8, 1))
-            ttk.Entry(route, textvariable=self.passenger_vars[key], width=3).pack(
-                side="left"
+            ttk.Label(people, text=label).pack(side="left", padx=(0, 1))
+            ttk.Entry(people, textvariable=self.passenger_vars[key], width=3).pack(
+                side="left", padx=(0, 8)
             )
-        self.station_state = tk.StringVar(value="역 목록을 불러오는 중…")
-        ttk.Label(route, textvariable=self.station_state, foreground="#666666").pack(
-            side="left", padx=(14, 4)
-        )
-        ttk.Button(route, text="새로고침", width=8, command=self.on_load_stations).pack(
-            side="left"
-        )
 
         # 가는 편과 오는 편은 같은 모양의 줄입니다 — 날짜와 시간대를 각각.
-        outbound = self._section(frame, 1, "가는 편")
+        outbound = self._section(frame, 2, "가는 편")
         self._leg_fields(outbound, self.date, self.after_time, self.before_time, False)
         ttk.Checkbutton(
             outbound,
@@ -552,23 +551,37 @@ class BookerApp:
             command=self._round_trip_toggled,
         ).pack(side="left", padx=(16, 0))
 
-        inbound = self._section(frame, 2, "오는 편")
+        inbound = self._section(frame, 3, "오는 편")
         self.return_widgets = self._leg_fields(
             inbound, self.return_date, self.return_after_time, self.return_before_time, True
         )
 
-        kinds = self._section(frame, 3, "열차 종류")
-        for kind in TRAIN_KINDS:
+        # 여덟 종을 한 줄에 늘어놓으면 950px 입니다. 두 줄로 접어 좁힙니다.
+        kinds = self._section(frame, 5, "열차 종류")
+        half = (len(TRAIN_KINDS) + 1) // 2
+        for index, kind in enumerate(TRAIN_KINDS):
             ttk.Checkbutton(
                 kinds,
                 text=kind,
                 variable=self.train_kind_vars[kind],
                 command=self.sync_train_kinds,
-            ).pack(side="left", padx=(0, 6))
-        ttk.Button(kinds, text="모두 지우기", command=self.clear_train_kinds).pack(
-            side="left", padx=(6, 6)
+            ).grid(row=index // half, column=index % half, sticky="w", padx=(0, 6))
+        # 고른 개수는 체크박스 옆에 붙습니다. 아랫줄로 내리면 그 줄이 넓어져
+        # 오른쪽 환승 조건이 옆에 못 섭니다.
+        ttk.Label(kinds, textvariable=self.train_kind_label, foreground="#1f6feb").grid(
+            row=0, column=half, rowspan=2, sticky="w", padx=(10, 0)
         )
-        ttk.Label(kinds, textvariable=self.train_kind_label, foreground="#1f6feb").pack(
+        tail = self._section(frame, 6, "")
+        ttk.Button(tail, text="모두 지우기", command=self.clear_train_kinds).pack(
+            side="left", padx=(0, 6)
+        )
+        # 역 목록 상태와 [새로고침] 은 구간 줄에 있었습니다. 그 줄이 길어지면
+        # 오른쪽 환승 조건이 옆에 못 서므로 여기로 내렸습니다 — 자주 누르는
+        # 단추가 아닙니다(켜자마자 자동으로 불러옵니다).
+        ttk.Label(tail, textvariable=self.station_state, foreground="#666666").pack(
+            side="left", padx=(0, 4)
+        )
+        ttk.Button(tail, text="역 새로고침", width=10, command=self.on_load_stations).pack(
             side="left"
         )
 
@@ -595,9 +608,12 @@ class BookerApp:
         self.transfer_frame = ttk.LabelFrame(
             frame, text="환승 조건 (직통 열차에는 영향을 주지 않습니다)"
         )
-        # "w" 입니다("ew" 가 아니라) — 옆자리를 달력에게 내주려면 자기 폭만
-        # 차지해야 합니다.
-        self.transfer_frame.grid(row=5, column=0, sticky="w", padx=4, pady=(4, 6))
+        # 왼쪽 다섯 줄(구간·가는 편·오는 편·열차 종류·좌석) 오른쪽의 빈자리에
+        # 세웁니다. 아래에 두면 묶음이 200px 넘게 길어지고, 그만큼 열차 목록과
+        # 예매 대상이 눌립니다. 옆에 두면 세로로는 그 다섯 줄과 겹칩니다.
+        self.transfer_frame.grid(
+            row=0, column=1, rowspan=7, sticky="nw", padx=(12, 4), pady=(2, 6)
+        )
         self.query_frame = frame
         self.calendar = CalendarPanel(frame, self._calendar_picked)
         self._build_search_button(frame)
@@ -605,7 +621,7 @@ class BookerApp:
         left.grid(row=0, column=0, sticky="nw", padx=4, pady=4)
         self.server_radio = ttk.Radiobutton(
             left,
-            text="서버 추천 환승 (검증됨)",
+            text="서버 추천 (검증됨)",
             variable=self.transfer_mode,
             value=TRANSFER_SERVER,
             command=self._transfer_toggled,
@@ -613,7 +629,7 @@ class BookerApp:
         self.server_radio.pack(anchor="w")
         self.custom_radio = ttk.Radiobutton(
             left,
-            text="환승역 직접 지정 (서버 수용 미검증)",
+            text="직접 지정 (서버 미검증)",
             variable=self.transfer_mode,
             value=TRANSFER_CUSTOM,
             command=self._transfer_toggled,
@@ -631,12 +647,10 @@ class BookerApp:
             self.transfer_time_row, textvariable=self.max_transfer, width=4
         )
         self.max_transfer_entry.pack(side="left", padx=2)
-        ttk.Label(self.transfer_time_row, text="분 이하 (0 = 제한 없음)").pack(
-            side="left"
-        )
+        ttk.Label(self.transfer_time_row, text="분 이하 (0=제한없음)").pack(side="left")
 
         right = ttk.Frame(self.transfer_frame)
-        right.grid(row=0, column=1, sticky="nw", padx=12, pady=4)
+        right.grid(row=0, column=1, sticky="nw", padx=(10, 4), pady=4)
         ttk.Label(right, text="환승역 (Ctrl+클릭으로 여러 개)").pack(anchor="w")
         # 이 목록이 무엇이고 지금 무슨 구실을 하는지는 모드마다 다릅니다.
         # 화면이 그것을 말하지 않으면 고른 역이 필터인지 조회 대상인지 알 수
@@ -647,7 +661,7 @@ class BookerApp:
         picker = ttk.Frame(right)
         picker.pack(anchor="w")
         self.transfer_list = tk.Listbox(
-            picker, selectmode="extended", height=4, width=24, exportselection=False
+            picker, selectmode="extended", height=4, width=20, exportselection=False
         )
         self.transfer_list.bind("<<ListboxSelect>>", self.mark_stale)
         self.transfer_list.pack(side="left")
@@ -662,7 +676,7 @@ class BookerApp:
         # 어차피 두 구간을 따로 조회하는 것이라, 역 이름만 알면 됩니다.
         self.transfer_query = tk.StringVar()
         self.transfer_entry = AutocompleteCombobox(
-            adder, textvariable=self.transfer_query, width=14
+            adder, textvariable=self.transfer_query, width=12
         )
         self.transfer_entry.pack(side="left")
         self.transfer_entry.bind("<Return>", lambda _event: self.add_transfer_station())
@@ -671,24 +685,33 @@ class BookerApp:
         )
         self.transfer_add_button.pack(side="left", padx=4)
         self.transfer_load_button = ttk.Button(
-            adder,
-            text="이 구간 후보 다시 불러오기",
-            command=self.on_load_transfer_stations,
+            adder, text="구간 후보 갱신", command=self.on_load_transfer_stations
         )
         self.transfer_load_button.pack(side="left", padx=4)
         ttk.Label(
             right,
-            text="목록은 코레일이 이 구간에 대해 답한 환승역(qry.chtnStn.do)입니다. "
-            "직접 지정 모드에서는 여기 없는 역도 위 칸에서 찾아 [추가] 하면 됩니다.",
+            text="코레일이 이 구간에 답한 역입니다(qry.chtnStn.do). "
+            "직접 지정 모드에서는 없는 역도 [추가] 됩니다.",
             foreground="#666666",
-            wraplength=380,
+            wraplength=260,
             justify="left",
         ).pack(anchor="w", pady=(2, 0))
 
-    def _section(self, frame: ttk.LabelFrame, row: int, title: str) -> ttk.Frame:
-        """이름 붙은 한 줄. 이름은 왼쪽에 고정 폭으로 세워 눈이 따라가게 합니다."""
+    def _section(
+        self,
+        frame: ttk.LabelFrame,
+        row: int,
+        title: str,
+        *,
+        span: int = 1,
+    ) -> ttk.Frame:
+        """이름 붙은 한 줄. 이름은 왼쪽에 고정 폭으로 세워 눈이 따라가게 합니다.
+
+        ``span`` 이 2 면 두 칸을 가로지릅니다 — 옆에 환승 조건을 세울 수 없을
+        만큼 긴 줄(구간, 열차 종류)이 그렇습니다.
+        """
         line = ttk.Frame(frame)
-        line.grid(row=row, column=0, sticky="w", padx=4, pady=3)
+        line.grid(row=row, column=0, columnspan=span, sticky="w", padx=4, pady=3)
         ttk.Label(line, text=title, width=9, anchor="w", foreground="#1f6feb").pack(
             side="left"
         )
@@ -737,7 +760,7 @@ class BookerApp:
         찾지 못합니다. 환승역을 바꾼 뒤 다시 누르는 일이 잦습니다.
         """
         bar = ttk.Frame(frame)
-        bar.grid(row=6, column=0, sticky="ew", padx=4, pady=(0, 8))
+        bar.grid(row=7, column=0, columnspan=2, sticky="ew", padx=4, pady=(2, 8))
         style = ttk.Style(self.root)
         style.configure("Search.TButton", font=("", 11, "bold"), padding=(24, 8))
         self.search_button = ttk.Button(
@@ -1050,9 +1073,9 @@ class BookerApp:
     def sync_train_kinds(self) -> None:
         self.mark_stale()
         picked = self.selected_train_kinds()
-        self.train_kind_label.set(
-            "전체 (아무것도 고르지 않음)" if not picked else f"{len(picked)}종 선택"
-        )
+        # 짧게 씁니다. 이 글이 길면 줄이 넓어지고, 줄이 넓어지면 오른쪽 환승
+        # 조건이 옆에 못 서서 묶음이 세로로 길어집니다.
+        self.train_kind_label.set("전체" if not picked else f"{len(picked)}종")
 
     def clear_train_kinds(self) -> None:
         for var in self.train_kind_vars.values():
