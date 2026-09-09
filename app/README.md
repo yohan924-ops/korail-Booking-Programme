@@ -32,15 +32,31 @@ python3 app/main.py     # httpx, cryptography 가 이미 있을 때
 ### 파이썬 없이 쓰게 하려면 (실행 파일 하나)
 
 파이썬 설치조차 시키고 싶지 않은 사람에게 줄 때는 Windows 실행 파일을
-만듭니다. **크로스 컴파일이 안 되므로 Windows 에서 빌드해야 합니다** — 그래서
-GitHub Actions 에 맡겨 두었습니다: Actions 탭 → **Desktop build** →
-*Run workflow*. 끝나면 그 실행 기록에 `KorailBooker-windows` 아티팩트가 붙고,
-그 안의 `KorailBooker.exe` 가 파이썬 없는 컴퓨터에서 더블클릭으로 돕니다.
+만듭니다. **실행 파일은 만드는 컴퓨터의 운영체제 것으로 나옵니다** — 리눅스나
+macOS 에서 Windows 용을 대신 만들어 줄 수 없습니다. 그래서 길이 둘입니다.
 
-`--onefile` 이라 **첫 실행 때 몇 초 멈춥니다**(임시 폴더에 푸는 시간입니다).
-고장이 아닙니다. 이 저장소의 누구도 그 exe 가 실제로 창을 띄우는 것을 확인한
-적이 없습니다 — 리눅스에서는 만들 수도 실행할 수도 없습니다. 처음 만드는
-사람이 확인해 주세요.
+**Windows 를 쓰신다면 — `exe 만들기 (Windows).bat` 더블클릭.** 먼저
+`실행 (Windows).bat` 을 한 번 눌러 `.venv` 가 있어야 하고, 그 환경을 그대로
+씁니다. 1~3분 뒤 `dist\KorailBooker.exe` 가 나옵니다.
+
+**Windows 가 없다면 — GitHub Actions.** Actions 탭 → **Desktop build** →
+*Run workflow*. 끝나면 그 실행 기록에 `KorailBooker-windows` 아티팩트가
+붙습니다. 단, `workflow_dispatch` 는 **워크플로 파일이 기본 브랜치에 있어야**
+단추가 보입니다 — 이 파일이 `main` 에 들어간 뒤에야 쓸 수 있습니다. 두 길은
+같은 PyInstaller 명령을 씁니다(시험이 둘을 대조합니다).
+
+만든 exe 는 저장소도 파이썬도 없는 컴퓨터에서 더블클릭으로 돕니다. 설정은
+`%APPDATA%\korail-booker\settings.json` 에 저장되므로 폴더를 함께 줄 필요도
+없습니다. 알아 둘 것 셋:
+
+- `--onefile` 이라 **첫 실행 때 몇 초 멈춥니다**(임시 폴더에 푸는 시간). 고장이
+  아닙니다.
+- **서명이 없어 SmartScreen 경고가 뜹니다**("Windows의 PC 보호"). [추가 정보] →
+  [실행]. 서명을 붙이려면 코드 서명 인증서가 필요하고, 이 저장소에는 없습니다.
+- **백신이 잡을 수 있습니다.** PyInstaller `--onefile` 산출물에 흔한 오탐입니다.
+
+**이 저장소의 누구도 그 exe 가 실제로 창을 띄우는 것을 확인한 적이 없습니다** —
+여기서는 만들 수도 실행할 수도 없습니다. 처음 만드는 사람이 확인해 주세요.
 
 ## 화면
 

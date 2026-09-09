@@ -1351,6 +1351,27 @@ def test_the_unix_launcher_is_executable():
     assert UNIX_LAUNCHER.stat().st_mode & stat.S_IXUSR
 
 
+def test_the_local_exe_builder_matches_the_ci_build():
+    """같은 exe 를 두 길로 만듭니다. 명령이 어긋나면 한쪽만 되는 일이 생깁니다."""
+    script = (REPO_ROOT / "exe 만들기 (Windows).bat").read_text(encoding="utf-8")
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "desktop-build.yml"
+    ).read_text(encoding="utf-8")
+
+    for fragment in ("--onefile", "--windowed", "--name KorailBooker",
+                     "--paths src --paths app", "packaging/desktop_entry.py"):
+        assert fragment in workflow, fragment
+        # 배치 파일은 경로 구분자가 다릅니다. 그 부분만 바꿔 대조합니다.
+        assert fragment.replace("/", "\\") in script or fragment in script, fragment
+
+
+def test_the_local_exe_builder_reuses_the_launchers_environment():
+    """실행기가 만든 .venv 를 그대로 씁니다 — 환경을 둘로 만들지 않습니다."""
+    script = (REPO_ROOT / "exe 만들기 (Windows).bat").read_text(encoding="utf-8")
+    assert "실행 (Windows).bat" in script
+    assert 'if not exist "%VPY%"' in script
+
+
 def test_the_frozen_entry_point_does_not_lean_on_runtime_paths():
     """PyInstaller 는 정적으로 훑습니다 — 실행 중에 붙인 sys.path 를 못 봅니다."""
     entry = (REPO_ROOT / "packaging" / "desktop_entry.py").read_text(encoding="utf-8")
