@@ -62,7 +62,7 @@ for the whole shape, what the operator must do to prove it, and the one thing
 that blocks a clean reserve → cancel round trip. The
 read-only send path continues to refuse every mutation route, so a
 state-changing request can leave the process by no other route. The
-current reviewed offline gate is `2551 passed, 1 deselected`; the one
+current reviewed offline gate is `2557 passed, 1 deselected`; the one
 deselected test is the explicitly opted-in live-service test. Earlier gates in
 this repository's history were `1246 passed, 1 deselected` before the P0
 live-evidence documentation coverage and `1247 passed, 1 deselected` directly
@@ -693,6 +693,30 @@ a state-changing call on an existing PNR, so it goes through the same
 double-gated mutation transport as everything else, on the **`reserve` consent
 category** -- it completes the booking an `allow_reserve` consent authorised,
 moves no money and releases no seat, so it is deliberately not a new category.
+
+### Correction: `txtTrnClsfCd` is not digits-only
+
+`_journey_fields` and `_merge_leg_fields` validated `train_class_code` with
+`_required_digits`. That constraint had no source. Every APK declaration of the
+field is a plain `String` — `OJrny.java:7-27` for the reservation form key
+`txtTrnClsfCd`, `RsvInquiryResponse.TrainInfo` for the search row
+`h_trn_clsf_cd` — and nothing in the analysis narrows it further. The rule was
+generalised from the two-digit values that happened to appear in every response
+seen while the form builders were written.
+
+On 2026-09-09 a search response contradicted it: the 수서→창원중앙 KTX-산천 387
+row carried `h_trn_clsf_cd: "0A"`. The official app would have copied that
+string into the form verbatim, so refusing it refused a train the app would have
+booked — the same failure mode `models._train_scalar` documents for numeric
+JSON scalars. The check is now `_TRAIN_CLASS_RE = [0-9A-Za-z]{1,4}`, which
+accepts the observed values while still rejecting `None`, the empty string, and
+anything that is not code-shaped.
+
+The alphabet and the length bound are **not** verified. The only values this
+package has seen are the `"00"` family and `"0A"`; the pattern is a guard
+chosen to admit those without opening the field, and it should be widened again
+the first time the server sends something outside it. No live reservation has
+been posted with a non-numeric class code.
 
 ### 환승 (transfer) itineraries
 

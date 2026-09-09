@@ -397,6 +397,30 @@ def test_single_adult_reservation_form_rejects_non_hold_safe_train_shapes(train)
         build_single_adult_reservation_form(KorailConfig(), train)
 
 
+def test_the_train_class_code_is_not_digits_only():
+    """``txtTrnClsfCd`` 를 숫자로 제한한 것은 근거 없는 좁힘이었다.
+
+    APK 는 이 필드를 ``String`` 으로만 선언한다(``OJrny.java``,
+    ``RsvInquiryResponse.TrainInfo``). 2026-09-09 검색 응답이 수서→창원중앙
+    KTX-산천 387 행에 ``h_trn_clsf_cd: "0A"`` 를 보냈고, 앱이라면 그 문자열을
+    그대로 폼에 실었을 것이다. 거절하면 앱이라면 예약했을 열차를 거절하게 된다.
+    """
+    train = replace(_eligible_train(), train_class_code="0A")
+
+    form = build_single_adult_reservation_form(KorailConfig(), train)
+
+    assert form["txtTrnClsfCd1"] == "0A"
+
+
+@pytest.mark.parametrize("code", [None, "", "0A-", "00000", "0 A"])
+def test_the_train_class_code_still_has_to_look_like_a_code(code):
+    """넓힌 것이지 연 것이 아니다. 없거나 엉뚱한 덩어리는 그대로 막는다."""
+    train = replace(_eligible_train(), train_class_code=code)
+
+    with pytest.raises(KorailProtocolError):
+        build_single_adult_reservation_form(KorailConfig(), train)
+
+
 # --- passenger mix and cabin class ------------------------------------------
 #
 # Expectations below are built from w4/a.java:49-73 (the eight rows and their
