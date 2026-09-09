@@ -1536,6 +1536,66 @@ def test_the_booker_waits_for_both_legs_instead_of_grabbing_one():
     assert recorder.count(RESERVE) == 0
 
 
+# --- 환승역 목록과 조회 중지 ------------------------------------------------------
+
+
+def test_a_search_never_overwrites_hand_picked_transfer_stations():
+    """직접 지정은 사람이 고른 역이 곧 조회 대상입니다.
+
+    목록을 비우고 원하는 역을 넣었는데 조회할 때 서버 후보로 되돌아가면, 넣은
+    역은 한 번도 쓰이지 않고 사라집니다 — 실제로 그랬습니다.
+    """
+    body = _ui_function("_server_candidates_loaded")
+
+    assert "self.transfer_mode.get() == TRANSFER_CUSTOM" in body
+    assert "self.transfer_names()" in body
+    # 그래도 받아 온 것은 (검증) 표시에 씁니다.
+    assert "self._server_stations = set(names)" in body
+    assert "self._redraw_transfer_marks()" in body
+
+
+def test_the_manual_refresh_button_still_replaces_the_list():
+    """[구간 후보 갱신] 은 서버가 준 것으로 되돌리라고 누르는 단추입니다."""
+    body = _ui_function("_transfer_stations_loaded")
+    assert "self._fill_transfer_stations(names)" in body
+
+
+def test_a_station_the_server_also_offers_is_marked():
+    """직접 지정한 역이 서버 추천과 겹치는지가, 서버가 받아 줄 가능성의 단서입니다."""
+    source = _ui_source()
+    assert 'VERIFIED_MARK = " (검증)"' in source
+    assert "mark = VERIFIED_MARK if name in self._server_stations else \"\"" in source
+
+
+def test_plain_station_strips_the_mark():
+    source = _ui_source()
+    tree = ast.parse(source)
+    body = next(
+        ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_plain_station"
+    )
+    assert "VERIFIED_MARK" in body
+    # 고른 역을 읽는 곳이 이 함수를 지납니다.
+    assert "_plain_station(self.transfer_list.get(index))" in _ui_function(
+        "selected_transfer_stations"
+    )
+
+
+def test_a_running_search_can_be_stopped():
+    """하루치를 훑느라 요청이 여러 번 나갑니다. 끝까지 기다릴 이유가 없습니다."""
+    source = _ui_source()
+    assert 'text="조회 중지"' in source
+
+    stop = _ui_function("on_stop_search")
+    assert "self._search_cancelled.add(self._search_token)" in stop
+
+    search = _ui_function("on_search")
+    # 방향 사이에서 확인하고, 버린 조회의 결과는 화면에 올리지 않습니다.
+    assert "if cancelled():" in search
+    assert "if not cancelled():" in search
+
+
 # --- 좌석 등급과 입석 ------------------------------------------------------------
 
 

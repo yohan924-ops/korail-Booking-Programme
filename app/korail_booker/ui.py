@@ -191,6 +191,18 @@ def parse_int_field(text: str, *, label: str, minimum: int = 0) -> int:
     return value
 
 
+#: 서버도 후보로 준 역에 붙는 꼬리표. 화면에만 붙고 조회에는 안 나갑니다.
+VERIFIED_MARK = " (검증)"
+
+
+def _plain_station(text: str) -> str:
+    """화면 글에서 역 이름만. ``"대전 (검증)"`` → ``"대전"``."""
+    name = text.strip()
+    if name.endswith(VERIFIED_MARK.strip()):
+        name = name[: -len(VERIFIED_MARK.strip())]
+    return name.strip()
+
+
 class AutocompleteCombobox(ttk.Combobox):
     """치는 대로 목록이 좁혀지는 콤보. 직접 입력도 그대로 됩니다.
 
@@ -373,6 +385,13 @@ class BookerApp:
         self._transfer_route: tuple[str, str] | None = None
         #: 전국 역 이름. 자동완성과 환승역 추가가 이것을 씁니다.
         self.station_names: tuple[str, ...] = ()
+        #: 조회마다 번호를 매깁니다. [조회 중지] 는 그 번호를 버림 표시에
+        #: 넣고, 작업 스레드가 그것을 보고 조용히 끝냅니다.
+        self._search_serial = 0
+        self._search_token: int | None = None
+        self._search_cancelled: set[int] = set()
+        #: 서버가 이 구간 후보로 준 역들. 목록에 (검증) 을 붙이는 데 씁니다.
+        self._server_stations: set[str] = set()
         #: 떠 있는 로그인 팝업. 없으면 ``None``.
         self._login_window: tk.Toplevel | None = None
         #: 잡아 둔 예약들. 결제 기한 카운트다운이 이것을 봅니다.
@@ -974,6 +993,13 @@ class BookerApp:
         self.search_progress = ttk.Progressbar(bar, mode="indeterminate", length=140)
         self.search_progress.pack(side="left", padx=10)
         self.search_progress.pack_forget()
+        # 하루치를 훑느라 요청이 여러 번 나갑니다. 잘못 누른 조회를 끝까지
+        # 기다릴 이유가 없습니다.
+        self.search_stop_button = ttk.Button(
+            bar, text="조회 중지", width=10, command=self.on_stop_search
+        )
+        self.search_stop_button.pack(side="left")
+        self.search_stop_button.pack_forget()
         ttk.Label(
             bar,
             text="조건을 바꾼 뒤에는 다시 눌러야 합니다 (Enter 로도 됩니다).",
@@ -1320,9 +1346,27 @@ class BookerApp:
         if busy:
             self.search_progress.pack(side="left", padx=10)
             self.search_progress.start(12)
+            self.search_stop_button.pack(side="left")
         else:
             self.search_progress.stop()
             self.search_progress.pack_forget()
+            self.search_stop_button.pack_forget()
+
+    def on_stop_search(self) -> None:
+        """조회를 그만둡니다.
+
+        나가 있는 요청을 도중에 끊지는 않습니다 — 그 답은 어차피 옵니다.
+        대신 **이번 조회를 버린다는 표시**를 세워, 다음 페이지를 묻지 않고
+        받아 온 것도 화면에 올리지 않습니다.
+        """
+        if self._search_token is None:
+            return
+        self._search_cancelled.add(self._search_token)
+        self._write_log("조회를 중지했습니다.", "warn")
+        self.search_button.configure(state="normal")
+        self._searching(False)
+        self.results_status.set("조회를 중지했습니다. 다시 [조회] 를 누르세요.")
+        self.results_label.configure(foreground="#a15c00")
 
     def _build_holds(self, parent: tk.PanedWindow) -> None:
         """잡아 둔 예약과 결제 기한. 남은 시간이 1초마다 줄어듭니다.
@@ -1666,30 +1710,74 @@ class BookerApp:
         self.transfer_list.configure(state=state)
 
     def selected_transfer_stations(self) -> tuple[str, ...]:
+        """고른 역 이름. 화면에 붙은 ``(검증)`` 은 떼고 돌려줍니다 —
+        조회에 나가는 것은 역 이름이지 화면 글이 아닙니다."""
         picked = tuple(
-            self.transfer_list.get(index) for index in self.transfer_list.curselection()
+            _plain_station(self.transfer_list.get(index))
+            for index in self.transfer_list.curselection()
         )
-        return tuple(name.strip() for name in picked if name.strip())
+        return tuple(name for name in picked if name)
+
+    def _server_candidates_loaded(self, route: tuple[str, str], names: list[str]) -> None:
+        """조회하면서 받아 온 서버 후보. **직접 지정 목록을 덮지 않습니다.**
+
+        직접 지정은 사람이 고른 역이 곧 조회 대상입니다. 목록을 비우고 원하는
+        역을 넣었는데 조회할 때 서버 후보로 되돌아가면, 넣은 역은 한 번도
+        쓰이지 않고 사라집니다 — 실제로 그랬습니다.
+
+        그래도 받아 온 것은 버리지 않습니다. 어느 역이 서버도 인정하는
+        역인지를 목록에 ``(검증)`` 으로 붙여 주는 데 씁니다.
+        """
+        self._server_stations = set(names)
+        if self.transfer_mode.get() == TRANSFER_CUSTOM and self.transfer_names():
+            # 손으로 고른 것이 있으면 그대로 두고 표시만 다시 그립니다.
+            self._redraw_transfer_marks()
+            self._write_log(
+                f"{route[0]}→{route[1]} 서버 환승역 후보 {len(names)}개를 "
+                "받았습니다. 직접 지정 목록은 그대로 둡니다."
+            )
+            return
+        self._transfer_stations_loaded(names)
+
+    def transfer_names(self) -> tuple[str, ...]:
+        """목록에 있는 역 이름 전부. 붙어 있는 ``(검증)`` 은 뗍니다."""
+        return tuple(
+            _plain_station(self.transfer_list.get(index))
+            for index in range(self.transfer_list.size())
+        )
+
+    def _redraw_transfer_marks(self) -> None:
+        """이름은 그대로 두고 ``(검증)`` 표시만 다시 답니다."""
+        chosen = set(self.selected_transfer_stations())
+        self._fill_transfer_stations(
+            list(self.transfer_names()), select_all=False, keep=chosen
+        )
 
     def _fill_transfer_stations(
         self,
         names: list[str],
         *,
         select_all: bool = True,
+        keep: set[str] | None = None,
     ) -> None:
         """목록을 채웁니다. **기본은 전부 선택** 입니다.
 
         고른 것이 하나도 없는 상태는 두 모드에서 뜻이 갈립니다 — 서버 추천에서는
         "전부 보기", 직접 지정에서는 "조회할 역이 없음". 전부 선택해 두면 화면에
         보이는 것과 실제로 쓰이는 것이 같아집니다.
+
+        서버도 후보로 준 역에는 ``(검증)`` 을 답니다. 직접 지정으로 넣은 역이
+        서버 추천과 겹치는지 아닌지는, 그 조합을 서버가 받아 줄 가능성을 재는
+        유일한 단서입니다.
         """
-        keep = set(self.selected_transfer_stations())
+        keeping = set(self.selected_transfer_stations()) if keep is None else keep
         self.transfer_list.configure(state="normal")
         self.transfer_list.delete(0, "end")
         for name in names:
-            self.transfer_list.insert("end", name)
+            mark = VERIFIED_MARK if name in self._server_stations else ""
+            self.transfer_list.insert("end", f"{name}{mark}")
         for index, name in enumerate(names):
-            if select_all or name in keep:
+            if select_all or name in keeping:
                 self.transfer_list.selection_set(index)
         self.sync_transfer_state()
 
@@ -1719,13 +1807,12 @@ class BookerApp:
                 "(예: '동대구', '서대전').",
             )
             return
-        existing = list(self.transfer_list.get(0, "end"))
+        existing = list(self.transfer_names())
         if name not in existing:
             existing.append(name)
-        self._fill_transfer_stations(existing, select_all=False)
-        for index, item in enumerate(self.transfer_list.get(0, "end")):
-            if item == name:
-                self.transfer_list.selection_set(index)
+        # 넣은 역은 골라 둡니다 — 직접 지정에서는 고른 것이 곧 조회 대상입니다.
+        keep = set(self.selected_transfer_stations()) | {name}
+        self._fill_transfer_stations(existing, select_all=False, keep=keep)
         self.transfer_query.set("")
         self.mark_stale()
         self._write_log(f"환승역 후보에 {name} 을 넣었습니다.")
@@ -1749,6 +1836,9 @@ class BookerApp:
 
     def _transfer_stations_loaded(self, names: list[str]) -> None:
         self.transfer_load_button.configure(state="normal")
+        # 손으로 누른 [구간 후보 갱신] 은 서버가 준 것으로 되돌리는 것이
+        # 맞습니다 — 그러라고 누른 단추입니다.
+        self._server_stations = set(names)
         self._fill_transfer_stations(names)
         self._write_log(
             f"{self.departure.get()}→{self.arrival.get()} 환승역 {len(names)}개를 "
@@ -2091,11 +2181,22 @@ class BookerApp:
                 self._searching(False)
                 return
 
+        self._search_serial += 1
+        token = self._search_serial
+        self._search_token = token
+
+        def cancelled() -> bool:
+            return token in self._search_cancelled
+
         def work() -> None:
             found: list[Target] = []
             try:
                 client = self._ensure_client()
                 for label, leg in legs:
+                    # 방향 사이에서 한 번 봅니다. 나가 있는 요청은 못 끊지만
+                    # 다음 것을 묻지 않는 것만으로도 대부분 금방 끝납니다.
+                    if cancelled():
+                        return
                     if label:
                         self.log(f"── {label}: {leg.departure}→{leg.arrival} {leg.date}")
                     self._refresh_transfer_stations(client, leg)
@@ -2105,7 +2206,12 @@ class BookerApp:
                     )
             except (KorailApiError, ValueError) as exc:
                 message = str(exc)
-                self.events.put(lambda: self._search_failed(message))
+                if not cancelled():
+                    self.events.put(lambda: self._search_failed(message))
+                return
+            if cancelled():
+                # 중지한 조회의 결과는 올리지 않습니다. 지금 조건의 것이
+                # 아닌 표가 남으면 그것이 더 나쁩니다.
                 return
             self.events.put(lambda: self._show_journeys(found))
 
@@ -2149,11 +2255,12 @@ class BookerApp:
             self.log(f"환승역 목록을 갱신하지 못했습니다: {exc}")
             return
         self._transfer_route = route
-        self.events.put(lambda: self._transfer_stations_loaded(names))
+        self.events.put(lambda: self._server_candidates_loaded(route, names))
 
     def _search_failed(self, message: str) -> None:
         self.search_button.configure(state="normal")
         self._searching(False)
+        self._search_token = None
         self.results_status.set("조회에 실패했습니다. 기록을 확인하세요.")
         self.results_label.configure(foreground="#b42318")
         self._write_log(f"조회 실패: {message}", "bad")
@@ -2162,6 +2269,7 @@ class BookerApp:
     def _show_journeys(self, results: list[Target]) -> None:
         self.search_button.configure(state="normal")
         self._searching(False)
+        self._search_token = None
         self.results = results
         self.journeys = [target.journey for target in results]
         self.sync_round_trip_panes()
