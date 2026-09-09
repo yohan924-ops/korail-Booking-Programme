@@ -54,6 +54,7 @@ from .search import (
     TRANSFER_SERVER,
     SearchRequest,
     filter_station_names,
+    return_request,
     search_journeys,
     transfer_station_candidates,
 )
@@ -349,6 +350,8 @@ class BookerApp:
         self.round_trip = tk.BooleanVar(value=False)
         self.after_time = tk.StringVar()
         self.before_time = tk.StringVar()
+        self.return_after_time = tk.StringVar()
+        self.return_before_time = tk.StringVar()
         self.train_kind_vars = {kind: tk.BooleanVar(value=False) for kind in TRAIN_KINDS}
         self.train_kind_label = tk.StringVar(value="전체")
         self.seat_choice = tk.StringVar(value="무관")
@@ -366,64 +369,55 @@ class BookerApp:
             "senior": tk.StringVar(value="0"),
         }
 
-        row = ttk.Frame(frame)
-        row.grid(row=0, column=0, sticky="w", padx=4, pady=4)
-        ttk.Label(row, text="출발").pack(side="left")
+        # 줄마다 무엇을 정하는 줄인지 앞머리에 적습니다. 칸이 스무 개가 넘으면
+        # 이름 없이 늘어놓은 줄은 읽히지 않습니다.
+        route = self._section(frame, 0, "구간")
+        ttk.Label(route, text="출발").pack(side="left")
         self.departure_box = AutocompleteCombobox(
-            row, textvariable=self.departure, width=12
+            route, textvariable=self.departure, width=12
         )
-        self.departure_box.pack(side="left", padx=(2, 8))
-        ttk.Label(row, text="도착").pack(side="left")
+        self.departure_box.pack(side="left", padx=(2, 6))
+        ttk.Label(route, text="→ 도착").pack(side="left")
         self.arrival_box = AutocompleteCombobox(
-            row, textvariable=self.arrival, width=12
+            route, textvariable=self.arrival, width=12
         )
-        self.arrival_box.pack(side="left", padx=(2, 8))
-        ttk.Label(row, text="가는 날").pack(side="left")
-        ttk.Entry(row, textvariable=self.date, width=12).pack(side="left", padx=(2, 2))
-        ttk.Button(
-            row, text="달력", width=5, command=lambda: self.open_calendar(False)
-        ).pack(side="left", padx=(0, 8))
-        ttk.Checkbutton(
-            row, text="왕복", variable=self.round_trip, command=self._round_trip_toggled
-        ).pack(side="left")
-        ttk.Label(row, text="오는 날").pack(side="left", padx=(6, 0))
-        self.return_entry = ttk.Entry(row, textvariable=self.return_date, width=12)
-        self.return_entry.pack(side="left", padx=(2, 2))
-        self.return_calendar_button = ttk.Button(
-            row, text="달력", width=5, command=lambda: self.open_calendar(True)
-        )
-        self.return_calendar_button.pack(side="left", padx=(0, 8))
-        # 시각은 고르는 것입니다. 손으로 치면 형식을 틀리기 쉽고, 틀린 값은
-        # 조회 전에 경고창으로만 돌아옵니다.
-        ttk.Label(row, text="시간").pack(side="left")
-        ttk.Combobox(
-            row,
-            textvariable=self.after_time,
-            values=CLOCK_CHOICES,
-            width=7,
-            state="readonly",
-        ).pack(side="left", padx=2)
-        ttk.Label(row, text="~").pack(side="left")
-        ttk.Combobox(
-            row,
-            textvariable=self.before_time,
-            values=CLOCK_CHOICES,
-            width=7,
-            state="readonly",
-        ).pack(side="left", padx=2)
+        self.arrival_box.pack(side="left", padx=(2, 14))
+        ttk.Label(route, text="승객").pack(side="left")
+        for label, key in (
+            ("어른", "adult"),
+            ("청소년", "teenager"),
+            ("어린이", "child"),
+            ("유아", "infant"),
+            ("경로", "senior"),
+        ):
+            ttk.Label(route, text=label).pack(side="left", padx=(8, 1))
+            ttk.Entry(route, textvariable=self.passenger_vars[key], width=3).pack(
+                side="left"
+            )
         self.station_state = tk.StringVar(value="역 목록을 불러오는 중…")
-        ttk.Label(row, textvariable=self.station_state, foreground="#666666").pack(
-            side="left", padx=(4, 4)
+        ttk.Label(route, textvariable=self.station_state, foreground="#666666").pack(
+            side="left", padx=(14, 4)
         )
-        ttk.Button(row, text="새로고침", width=8, command=self.on_load_stations).pack(
+        ttk.Button(route, text="새로고침", width=8, command=self.on_load_stations).pack(
             side="left"
         )
 
-        # 종별은 체크박스를 한 줄에 늘어놓습니다. 체크 메뉴는 하나 고를 때마다
-        # 닫혀서, 세 종류를 고르려면 메뉴를 세 번 열어야 했습니다.
-        kinds = ttk.Frame(frame)
-        kinds.grid(row=1, column=0, sticky="w", padx=4, pady=(4, 0))
-        ttk.Label(kinds, text="열차 종류").pack(side="left", padx=(0, 6))
+        # 가는 편과 오는 편은 같은 모양의 줄입니다 — 날짜와 시간대를 각각.
+        outbound = self._section(frame, 1, "가는 편")
+        self._leg_fields(outbound, self.date, self.after_time, self.before_time, False)
+        ttk.Checkbutton(
+            outbound,
+            text="왕복",
+            variable=self.round_trip,
+            command=self._round_trip_toggled,
+        ).pack(side="left", padx=(16, 0))
+
+        inbound = self._section(frame, 2, "오는 편")
+        self.return_widgets = self._leg_fields(
+            inbound, self.return_date, self.return_after_time, self.return_before_time, True
+        )
+
+        kinds = self._section(frame, 3, "열차 종류")
         for kind in TRAIN_KINDS:
             ttk.Checkbutton(
                 kinds,
@@ -438,38 +432,23 @@ class BookerApp:
             side="left"
         )
 
-        row2 = ttk.Frame(frame)
-        row2.grid(row=2, column=0, sticky="w", padx=4, pady=4)
-        ttk.Label(row2, text="좌석").pack(side="left")
+        seats = self._section(frame, 4, "좌석")
         ttk.Combobox(
-            row2,
+            seats,
             textvariable=self.seat_choice,
             values=[label for label, _ in SEAT_CHOICES],
             width=6,
             state="readonly",
-        ).pack(side="left", padx=(2, 12))
+        ).pack(side="left", padx=(0, 14))
         ttk.Checkbutton(
-            row2, text="직통", variable=self.include_direct, command=self.mark_stale
+            seats, text="직통", variable=self.include_direct, command=self.mark_stale
         ).pack(side="left")
         ttk.Checkbutton(
-            row2,
+            seats,
             text="환승",
             variable=self.include_transfer,
             command=self._transfer_toggled,
-        ).pack(side="left", padx=(4, 12))
-        ttk.Label(row2, text="승객").pack(side="left")
-        for label, key in (
-            ("어른", "adult"),
-            ("청소년", "teenager"),
-            ("어린이", "child"),
-            ("유아", "infant"),
-            ("경로", "senior"),
-        ):
-            ttk.Label(row2, text=label).pack(side="left", padx=(6, 1))
-            ttk.Entry(row2, textvariable=self.passenger_vars[key], width=3).pack(
-                side="left"
-            )
-
+        ).pack(side="left", padx=(6, 0))
 
         # 환승 조건은 환승을 켰을 때만 만질 수 있습니다. 꺼져 있으면 아무 효과도
         # 없는 칸이라 켜 두면 헷갈리기만 합니다.
@@ -478,7 +457,7 @@ class BookerApp:
         )
         # "w" 입니다("ew" 가 아니라) — 옆자리를 달력에게 내주려면 자기 폭만
         # 차지해야 합니다.
-        self.transfer_frame.grid(row=3, column=0, sticky="w", padx=4, pady=(2, 6))
+        self.transfer_frame.grid(row=5, column=0, sticky="w", padx=4, pady=(4, 6))
         self.query_frame = frame
         self.calendar = CalendarPanel(frame, self._calendar_picked)
         self._build_search_button(frame)
@@ -566,6 +545,51 @@ class BookerApp:
             justify="left",
         ).pack(anchor="w", pady=(2, 0))
 
+    def _section(self, frame: ttk.LabelFrame, row: int, title: str) -> ttk.Frame:
+        """이름 붙은 한 줄. 이름은 왼쪽에 고정 폭으로 세워 눈이 따라가게 합니다."""
+        line = ttk.Frame(frame)
+        line.grid(row=row, column=0, sticky="w", padx=4, pady=3)
+        ttk.Label(line, text=title, width=9, anchor="w", foreground="#1f6feb").pack(
+            side="left"
+        )
+        holder = ttk.Frame(line)
+        holder.pack(side="left")
+        return holder
+
+    def _leg_fields(
+        self,
+        parent: ttk.Frame,
+        date_var: tk.StringVar,
+        after_var: tk.StringVar,
+        before_var: tk.StringVar,
+        for_return: bool,
+    ) -> tuple[ttk.Entry, ttk.Button, ttk.Combobox, ttk.Combobox]:
+        """한 방향의 날짜와 시간대. 가는 편과 오는 편이 같은 모양입니다."""
+        entry = ttk.Entry(parent, textvariable=date_var, width=12)
+        entry.pack(side="left", padx=(0, 2))
+        button = ttk.Button(
+            parent,
+            text="달력",
+            width=5,
+            command=lambda: self.open_calendar(for_return),
+        )
+        button.pack(side="left", padx=(0, 12))
+        ttk.Label(parent, text="시간").pack(side="left")
+        # 시각은 고르는 것입니다. 손으로 치면 형식을 틀리기 쉽고, 틀린 값은
+        # 조회 전에 경고창으로만 돌아옵니다.
+        after = ttk.Combobox(
+            parent, textvariable=after_var, values=CLOCK_CHOICES, width=7,
+            state="readonly",
+        )
+        after.pack(side="left", padx=2)
+        ttk.Label(parent, text="~").pack(side="left")
+        before = ttk.Combobox(
+            parent, textvariable=before_var, values=CLOCK_CHOICES, width=7,
+            state="readonly",
+        )
+        before.pack(side="left", padx=2)
+        return (entry, button, after, before)
+
     def _build_search_button(self, frame: ttk.LabelFrame) -> None:
         """조회 단추는 조건 **아래**에 크게 둡니다.
 
@@ -573,7 +597,7 @@ class BookerApp:
         찾지 못합니다. 환승역을 바꾼 뒤 다시 누르는 일이 잦습니다.
         """
         bar = ttk.Frame(frame)
-        bar.grid(row=5, column=0, sticky="ew", padx=4, pady=(0, 8))
+        bar.grid(row=6, column=0, sticky="ew", padx=4, pady=(0, 8))
         style = ttk.Style(self.root)
         style.configure("Search.TButton", font=("", 11, "bold"), padding=(24, 8))
         self.search_button = ttk.Button(
@@ -609,9 +633,14 @@ class BookerApp:
 
     def _round_trip_toggled(self) -> None:
         self.sync_round_trip_panes()
-        state = "normal" if self.round_trip.get() else "disabled"
-        self.return_entry.configure(state=state)
-        self.return_calendar_button.configure(state=state)
+        enabled = self.round_trip.get()
+        entry, button, after, before = self.return_widgets
+        entry.configure(state="normal" if enabled else "disabled")
+        button.configure(state="normal" if enabled else "disabled")
+        # 콤보는 켜도 "normal" 이 아니라 "readonly" 입니다 — 고르는 칸이지
+        # 쳐 넣는 칸이 아닙니다.
+        for combo in (after, before):
+            combo.configure(state="readonly" if enabled else "disabled")
         self.mark_stale()
 
     def _make_tree(self, parent: ttk.Frame) -> ttk.Treeview:
@@ -772,6 +801,9 @@ class BookerApp:
         scroll = ttk.Scrollbar(frame, orient="vertical", command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=scroll.set)
         scroll.grid(row=0, column=1, sticky="ns")
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=0, column=2, sticky="n", padx=6, pady=4)
+        ttk.Button(buttons, text="지우기", width=8, command=self.clear_log).pack()
 
     # -- 설정 되살리기 -------------------------------------------------------
 
@@ -783,6 +815,15 @@ class BookerApp:
         self.after_time.set(format_clock(stored.depart_after) if stored.depart_after else "")
         self.before_time.set(
             format_clock(stored.depart_before) if stored.depart_before else ""
+        )
+        self.round_trip.set(stored.round_trip)
+        self.return_after_time.set(
+            format_clock(stored.return_depart_after) if stored.return_depart_after else ""
+        )
+        self.return_before_time.set(
+            format_clock(stored.return_depart_before)
+            if stored.return_depart_before
+            else ""
         )
         for kind, var in self.train_kind_vars.items():
             var.set(kind in stored.train_names)
@@ -970,6 +1011,13 @@ class BookerApp:
             arrival=request.arrival,
             depart_after=request.depart_after,
             depart_before=request.depart_before,
+            round_trip=self.round_trip.get(),
+            return_depart_after=parse_clock_field(
+                self.return_after_time.get(), label="오는 편 시작 시각"
+            ),
+            return_depart_before=parse_clock_field(
+                self.return_before_time.get(), label="오는 편 끝 시각"
+            ),
             train_names=list(request.train_names),
             seat_preference=request.seat_preference.value,
             include_direct=request.include_direct,
@@ -997,6 +1045,12 @@ class BookerApp:
         self.log_text.configure(state="normal")
         self.log_text.insert("end", f"[{time.strftime('%H:%M:%S')}] {message}\n")
         self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+    def clear_log(self) -> None:
+        """기록을 비웁니다. 오래 돌리면 스크롤이 감당이 안 됩니다."""
+        self.log_text.configure(state="normal")
+        self.log_text.delete("1.0", "end")
         self.log_text.configure(state="disabled")
 
     def _drain(self) -> None:
@@ -1180,18 +1234,16 @@ class BookerApp:
         )
 
     def build_return_request(self, outbound: SearchRequest) -> SearchRequest:
-        """오는 편 조회 조건. 구간을 뒤집고 날짜만 갈아 끼웁니다."""
-        return_date = parse_date_field(self.return_date.get())
-        if return_date < outbound.date:
-            raise ValueError("오는 날이 가는 날보다 빠릅니다")
-        return replace(
+        """오는 편 조회 조건. 날짜와 시간대는 오는 편 줄의 것을 씁니다."""
+        return return_request(
             outbound,
-            departure=outbound.arrival,
-            arrival=outbound.departure,
-            date=return_date,
-            # 환승역 후보는 구간마다 다릅니다. 오는 편에 그대로 물리면 있지도
-            # 않은 역으로 거르게 되므로 비웁니다.
-            transfer_stations=(),
+            date=parse_date_field(self.return_date.get()),
+            depart_after=parse_clock_field(
+                self.return_after_time.get(), label="오는 편 시작 시각"
+            ),
+            depart_before=parse_clock_field(
+                self.return_before_time.get(), label="오는 편 끝 시각"
+            ),
         )
 
     def on_search(self) -> None:

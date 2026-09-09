@@ -592,6 +592,35 @@ def test_a_session_expiry_is_never_swallowed_by_that_isolation():
         S.search_journeys(_client(recorder), _request(), log=lambda line: None)
 
 
+def test_the_return_leg_flips_the_route_and_keeps_its_own_window():
+    """오는 편은 자기 시간대를 씁니다. 가는 편 시간창을 물려받지 않습니다.
+
+    아침에 가서 저녁에 오는 것이 보통인데, 같은 시간창을 쓰면 오는 편이 통째로
+    걸러집니다.
+    """
+    outbound = _request(
+        departure="서울", arrival="부산", date="20990101",
+        depart_after="080000", depart_before="120000",
+        transfer_stations=("대전",),
+    )
+    inbound = S.return_request(
+        outbound, date="20990105", depart_after="170000", depart_before="210000"
+    )
+    assert (inbound.departure, inbound.arrival) == ("부산", "서울")
+    assert inbound.date == "20990105"
+    assert (inbound.depart_after, inbound.depart_before) == ("170000", "210000")
+    # 환승역 후보는 구간마다 다릅니다. 물려받으면 없는 역으로 거르게 됩니다.
+    assert inbound.transfer_stations == ()
+    # 나머지 조건은 그대로입니다.
+    assert inbound.passengers == outbound.passengers
+
+
+def test_a_return_date_before_the_outbound_one_is_refused():
+    outbound = _request(date="20990105")
+    with pytest.raises(ValueError, match="빠릅니다"):
+        S.return_request(outbound, date="20990101")
+
+
 # --- 환승역 후보 ---------------------------------------------------------------
 
 STATION_DATA = "/classes/com.korail.mobile.common.stationdata"

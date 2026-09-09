@@ -22,7 +22,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from korail_mobile_api import (
     KorailApiError,
@@ -104,6 +104,34 @@ class SearchRequest:
             departure_time=departure_time or self.depart_after or "000000",
             passengers=self.passengers.total,
         )
+
+
+def return_request(
+    outbound: SearchRequest,
+    *,
+    date: str,
+    depart_after: str = "",
+    depart_before: str = "",
+) -> SearchRequest:
+    """오는 편 조회 조건. 구간을 뒤집고 날짜와 **자기 시간대**를 붙입니다.
+
+    가는 편의 시간대를 물려받지 않습니다 — 아침에 가서 저녁에 오는 것이 보통인데
+    같은 시간창을 쓰면 오는 편이 통째로 걸러집니다.
+
+    환승역도 비웁니다. 환승역 후보는 구간마다 다르므로, 가는 편에서 고른 역을
+    그대로 물리면 있지도 않은 역으로 거르게 됩니다.
+    """
+    if date < outbound.date:
+        raise ValueError("오는 날이 가는 날보다 빠릅니다")
+    return replace(
+        outbound,
+        departure=outbound.arrival,
+        arrival=outbound.departure,
+        date=date,
+        depart_after=depart_after,
+        depart_before=depart_before,
+        transfer_stations=(),
+    )
 
 
 def station_code_index(client: KorailClient) -> dict[str, str]:

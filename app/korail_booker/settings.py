@@ -52,6 +52,10 @@ class Settings:
     arrival: str = "부산"
     depart_after: str = ""
     depart_before: str = ""
+    round_trip: bool = False
+    #: 오는 편은 자기 시간대를 씁니다. 가는 편과 같은 시간대를 쓰라는 법이 없습니다.
+    return_depart_after: str = ""
+    return_depart_before: str = ""
     train_names: list[str] = field(default_factory=list)
     seat_preference: str = "any"
     include_direct: bool = True
