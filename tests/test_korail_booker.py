@@ -18,11 +18,14 @@ Tkinter 는 여기서 import 하지 않습니다 — 그래서 화면 없는 CI 
 from __future__ import annotations
 
 import dataclasses
+import importlib.util
 import json
 import os
+import re
 import stat
 import sys
 import threading
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -434,6 +437,32 @@ def test_no_module_in_the_app_names_a_money_moving_call():
             "cancel_unpaid_hold(",
         ):
             assert forbidden not in source, f"{path.name}: {forbidden}"
+
+
+# --- 런처 ---------------------------------------------------------------------
+
+
+def _load_launcher():
+    """``app/main.py`` 를 import 합니다. import 만으로는 창이 열리지 않습니다."""
+    spec = importlib.util.spec_from_file_location(
+        "korail_booker_launcher", APP_DIR / "main.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_launcher_names_the_dependencies_the_package_actually_declares():
+    """설치 안내가 틀린 이름을 알려 주면 안내가 없느니만 못합니다."""
+    pyproject = tomllib.loads(
+        (APP_DIR.parent / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    declared = {
+        re.split(r"[<>=!~;\[ ]", requirement)[0]
+        for requirement in pyproject["project"]["dependencies"]
+    }
+    assert set(_load_launcher().DEPENDENCIES) == declared
 
 
 # --- 자동예매 -----------------------------------------------------------------
