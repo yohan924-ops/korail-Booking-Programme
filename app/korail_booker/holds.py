@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from korail_mobile_api import ReservationHoldResponse
 
+    from .journeys import Journey
+
 
 #: 기한이 이만큼 남으면 급한 것으로 봅니다. 화면이 색을 바꾸는 기준입니다.
 URGENT_SECONDS = 3 * 60
@@ -150,6 +152,13 @@ class Held:
     #: 머리글에는 "이 묶음이 원래 어느 여정이었는지" 가 필요합니다. 비어
     #: 있으면 :attr:`summary` 를 대신 씁니다.
     full_summary: str = ""
+    #: 이 홀드가 가리키는 (구간만큼의) 여정 그대로. 열차·시각·소요·좌석
+    #: 칸을 조회 결과·예매 대상과 **같은 함수로** 채우는 데 씁니다 —
+    #: 그 문자열들을 여기서 다시 만들면 셋이 반드시 어긋납니다. 화면
+    #: 없이 시험하는 것은 이 값을 들여다보지 않고 문자열만 봅니다.
+    #: ``None`` 이어도 이 조각의 나머지는 그대로 돌아갑니다 — 그 칸들만
+    #: "모름" 으로 빈 채 남습니다(지어내지 않습니다).
+    held_journey: Journey | None = None
 
     def row(self, now: datetime) -> tuple[str, ...]:
         """표 한 줄. 남은 시간은 부를 때마다 다시 셉니다."""

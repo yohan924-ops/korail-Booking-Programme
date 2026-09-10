@@ -1707,10 +1707,14 @@ def test_the_target_table_carries_the_seat_columns_too():
     for name in ("일반실", "특실", "입석·자유석·대기"):
         assert f'("{name}"' in source, name
 
+    # 조회 결과와 같은 함수(_row_values → _journey_row_values)로 채우므로,
+    # 좌석 칸도 거기서 옵니다.
     body = _ui_function("_insert_target_row")
-    assert "target.journey.seat_text(KorailSeatClass.GENERAL)" in body
-    assert "target.journey.seat_text(KorailSeatClass.SPECIAL)" in body
-    assert "target.journey.extras()" in body
+    assert "self._row_values(target)" in body
+    row_values = _ui_function("_journey_row_values")
+    assert "journey.seat_text(KorailSeatClass.GENERAL)" in row_values
+    assert "journey.seat_text(KorailSeatClass.SPECIAL)" in row_values
+    assert "journey.extras()" in row_values
 
 
 # --- 바로 예약 ------------------------------------------------------------------
@@ -2444,20 +2448,22 @@ def test_the_train_table_never_starts_at_one_row():
 
 
 def test_the_target_table_carries_the_warnings_where_they_cannot_be_cut():
-    """여정 칸 끝에 달았더니 표가 조금만 좁아도 안 보였습니다."""
+    """상태 칸 끝에 달았더니 표가 조금만 좁아도 안 보였습니다."""
     source = _ui_source()
-    assert '("상태", 140, "center")' in source
-    assert '("환승 대기", 150, "center")' in source
+    assert '("상태", 130, "center")' in source
+    assert '("환승 대기", 140, "center")' in source
     state = _ui_function("_target_state")
     assert "books_as_one_reservation(target.journey)" in state
     assert "구간별" in state
-    transfer = _ui_function("_target_transfer")
-    assert "_transfer_text(" in transfer
+    # 환승 대기 칸은 조회 결과와 같은 함수(_row_values)로 채웁니다 —
+    # 따로 계산하면 둘이 어긋납니다.
+    row = _ui_function("_insert_target_row")
+    assert "self._row_values(target)" in row
 
 
 def test_one_train_is_written_the_same_way_everywhere():
     """한 화면에서 같은 열차가 "00017" 과 "KTX 17" 로 갈리면 안 됩니다."""
-    body = _ui_function("_row_values")
+    body = _ui_function("_journey_row_values")
     assert "one_line(journey.train_label())" in body
     assert "journey.train_numbers()" not in body
 
@@ -2917,16 +2923,48 @@ def test_direct_and_server_transfers_are_never_bundled():
     assert [indices for _head, indices in groups] == [[0], [1], [2], [3]]
 
 
+def test_a_leg_row_alone_makes_a_target_for_just_that_leg():
+    """1구간/2구간 정보 줄만 따로 고르면 그 구간 하나만의 예매 대상입니다.
+
+    예전에는 이 줄을 골라도 부모(전체 여정)로 되돌아갔습니다 — 1구간만
+    보고 싶어도 전체가 담겼습니다.
+    """
+    body = _ui_function("_leg_only_target")
+    assert "parent.journey.legs[leg_index]" in body
+    assert "Journey(legs=(leg,), source=parent.journey.source)" in body
+    # 그 구간 자신의 역·날짜로 새 SearchRequest 를 만듭니다 — 부모 것을
+    # 그대로 쓰면 direction 이 여전히 전체 여정(첫 역→마지막 역)을
+    # 가리켜, "이미 잡았다" 판정이 엉뚱한 방향을 막거나 못 막습니다.
+    assert "departure=leg.departure_station_name" in body
+    assert "arrival=leg.arrival_station_name" in body
+    assert "date=leg.departure_date" in body
+    # 구간 하나는 평범한 직통 예약입니다 — 환승 조건을 켜 둘 이유가 없습니다.
+    assert "include_transfer=False" in body
+
+    picker = _ui_function("_selected_results_with_groups")
+    assert "leg_key = self._leg_items.get((str(tree), item))" in picker
+    assert "self._leg_only_target(*leg_key)" in picker
+    # 구간 줄을 찾으면 부모 줄 찾기로 내려가지 않습니다(continue).
+    assert picker.index("leg_key = self._leg_items.get") < picker.index(
+        "index = self.item_journeys.get"
+    )
+
+
 def test_the_screen_draws_bundles_and_expands_them_when_picked():
-    """부모 줄을 고르면 그 아래 조합 전부가 담깁니다."""
+    """부모 줄을 고르면 그 아래 조합 전부를 **후보로** 돌려줍니다.
+
+    바로 담지는 않습니다 — 팝업에서 하나를 고르게 합니다
+    (:meth:`_offer_group_picker`).
+    """
     source = _ui_source()
     assert "group_by_first_leg" in source
     assert "def _insert_group" in source
     assert "self._group_children" in source
     body = _ui_function("_selected_results_with_groups")
     assert "_group_children" in body
-    # 부모로 통째로 딸려 온 것은 화면이 말해 줍니다.
-    assert "groups.append((self.results[members[0]], len(members)))" in body
+    # 부모로 고른 것은 direct 가 아니라 groups 로, 후보 전부와 함께 갑니다.
+    assert "groups.append([self.results[index] for index in members])" in body
+    assert "continue" in body
 
 
 # --- 텔레그램: 저장할지 이번만 쓸지 --------------------------------------------
@@ -3115,9 +3153,10 @@ def test_a_tight_connection_is_red_in_both_tables():
     tags = _ui_function("_row_tags")
     assert "if is_tight_transfer(journey):" in tags
     assert "return ('tight',)" in tags
-    # 담고 나면 위 표를 다시 보지 않습니다. 경고가 함께 따라와야 합니다.
-    transfer = _ui_function("_target_transfer")
-    assert "_transfer_text(" in transfer
+    # 담고 나면 위 표를 다시 보지 않습니다. 경고가 함께 따라와야 합니다 —
+    # 조회 결과와 같은 함수(_row_values)로 그 칸을 채우므로 자동으로 그렇게 됩니다.
+    row = _ui_function("_insert_target_row")
+    assert "self._row_values(target)" in row
     assert "is_tight_transfer(journey)" in _ui_function("_transfer_text")
 
 
@@ -3140,7 +3179,7 @@ def test_the_watcher_buys_a_custom_combination_one_leg_at_a_time():
         [_target(journey, _request(include_direct=False, include_transfer=True))],
         BookingOptions(poll_interval_s=10.0, live=True),
         log=lambda message: None,
-        on_hold=lambda label, summary, kind, direction, hold, group, full: made.append(
+        on_hold=lambda label, summary, kind, direction, hold, group, full, hj: made.append(
             kind
         ),
     )
@@ -3707,7 +3746,8 @@ def test_a_batch_id_ties_split_holds_together():
     # 심어도 이 계약을 잊을 수 없게.
     assert (
         "HoldWatcher = Callable[\n"
-        "    [str, str, str, tuple[str, str, str], ReservationHoldResponse, str, str], None\n"
+        "    [str, str, str, tuple[str, str, str], ReservationHoldResponse, str, str, Journey],\n"
+        "    None,\n"
         "]" in booker
     )
 
@@ -3719,7 +3759,7 @@ def test_reserve_now_partial_also_names_the_leg_not_the_whole_journey():
     잊기 쉬웠습니다)."""
     body = _ui_function("_reserve_now_partial")
     assert "target.journey.leg_hold_label(number - 1, partial=True)" in body
-    assert "batch, target.journey.summary())" in body  # full_summary 로 넘어갑니다
+    assert "batch, target.journey.summary(), Journey(" in body  # full_summary·held_journey
 
 
 def test_reserve_now_functions_also_generate_a_batch_id():
@@ -3838,15 +3878,23 @@ def test_a_late_telegram_setting_tells_the_running_watches():
     assert source.count("self.announce_watches()") == 2
 
 
-def test_picking_a_bundle_head_says_what_it_just_added():
-    """부모 줄은 1구간만 정합니다. 2구간은 가능한 것이 전부 담깁니다."""
-    body = _ui_function("_explain_groups")
-    assert "1구간" in body and "2구간" in body
-    assert "if not groups:" in body            # 자식만 골랐으면 조용합니다
-    # Tk 에 찍히는 글에 마크다운이 없는지는 저장소 전체 시험이 봅니다
-    # (test_no_screen_text_carries_markdown_asterisks). 여기서 다시 보면
-    # 주석의 강조까지 걸립니다.
-    assert "self._explain_groups(groups)" in _ui_function("add_targets")
+def test_picking_a_bundle_head_opens_a_picker_instead_of_adding_everything():
+    """부모 줄은 1구간만 정합니다. 2구간은 팝업에서 하나를 골라야 담깁니다.
+
+    예전에는 고른 적 없는 2구간 후보까지 전부 조용히 담고 나서 그 사실만
+    설명하는 창을 띄웠습니다. 이제는 **그 자리에서 아무것도 담지 않고**
+    팝업으로 고르게 합니다.
+    """
+    picker = _ui_function("_offer_group_picker")
+    assert "1구간" in picker and "2구간" in picker
+    assert "if not candidates:" in picker  # 후보가 없으면 조용합니다
+    # 팝업 밖(add_targets)에서는 groups 를 담지 않고 그대로 넘깁니다.
+    add = _ui_function("add_targets")
+    assert "self._offer_group_picker(candidates)" in add
+    assert "self._add_picked_targets(direct)" in add
+    assert "self._add_picked_targets(groups" not in add
+    # 팝업 안에서 하나를 고른 뒤에야 담습니다.
+    assert "self._add_picked_targets([chosen])" in picker
 
 
 def test_switching_transfer_mode_never_overwrites_a_curated_list():

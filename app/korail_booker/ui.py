@@ -50,7 +50,7 @@ from .autobook import (
     payment_deadline_text,
     reserve_once,
 )
-from .holds import Held, is_expired, now_kst, parse_deadline
+from .holds import Held, is_expired, now_kst, parse_deadline, remaining_text
 from .journeys import (
     TIGHT_TRANSFER_MINUTES,
     Journey,
@@ -134,25 +134,42 @@ PANE_CHROME = 13
 RESULTS_MIN_HEIGHT = 185
 #: 스스로 굴러가는 위젯. 이 위에서는 휠을 그쪽에 양보합니다.
 SELF_SCROLLING = frozenset({"Text", "Treeview", "Listbox"})
-#: 잡은 예약 표의 칸 — (이름, 폭, 정렬).
+#: 잡은 예약 표의 칸 — (이름, 폭, 정렬). **가운데 아홉 칸은 조회 결과·예매
+#: 대상과 같습니다**(:meth:`BookerApp._journey_row_values`) — "여정" 한
+#: 칸으로 뭉뚱그리면 구간별 홀드가 같은 줄처럼 보여 중복 예약으로
+#: 오인하기 쉬웠습니다. 종류(좌석 예약/N구간)는 조회 결과에 없는, 이 표만의
+#: 칸이라 따로 둡니다.
 HOLD_LAYOUT = (
-    ("구분", 70, "center"),
-    ("종류", 80, "center"),
-    ("여정", 380, "w"),
-    ("PNR", 140, "center"),
+    ("구분", 100, "center"),
+    ("종류", 90, "center"),
+    ("열차", 120, "w"),
+    ("출발", 60, "center"),
+    ("도착", 60, "center"),
+    ("총 소요", 85, "center"),
+    ("환승 대기", 140, "center"),
+    ("일반실", 150, "w"),
+    ("특실", 150, "w"),
+    ("입석·자유석·대기", 130, "w"),
+    ("PNR", 130, "center"),
     ("운임", 90, "e"),
-    ("결제 기한", 150, "center"),
-    ("남은 시간", 120, "center"),
+    ("결제 기한", 140, "center"),
+    ("남은 시간", 110, "center"),
 )
 HOLD_COLUMNS = tuple(name for name, _width, _anchor in HOLD_LAYOUT)
-#: 예매 대상 표의 칸.
+#: 예매 대상 표의 칸. **가운데 아홉 칸은 조회 결과(TREE_COLUMNS)와 같습니다**
+#: — 여정을 문장 하나로 뭉뚱그리면, 조회 결과에서는 구분해 보던 열차·시각·
+#: 소요가 담는 순간 사라집니다. 앞뒤에 이 표에서만 뜻이 있는 칸(상태·조회
+#: 주기·남은 감시)만 더합니다.
 TARGET_LAYOUT = (
     # 구간별로 사는 것인지가 상태 칸에 붙습니다 — 맨 앞이라 표를 아무리
     # 좁혀도 잘리지 않습니다. 여정 칸 끝에 달았더니 실제로 안 보였습니다.
-    ("상태", 140, "center"),
-    ("여정", 360, "w"),
-    # 조회 결과와 같은 칸입니다. 촉박한 환승 경고가 여기서도 보여야 합니다.
-    ("환승 대기", 150, "center"),
+    ("상태", 130, "center"),
+    ("구분", 100, "center"),
+    ("열차", 120, "w"),
+    ("출발", 60, "center"),
+    ("도착", 60, "center"),
+    ("총 소요", 85, "center"),
+    ("환승 대기", 140, "center"),
     # 조회 결과에서 보던 것이 여기서 사라지면, 담고 나서 좌석이 어땠는지
     # 다시 위 표를 뒤져야 합니다.
     ("일반실", 165, "w"),
@@ -514,6 +531,10 @@ class BookerApp:
         self.station_names: tuple[str, ...] = ()
         #: 묶음의 부모 줄 → 그 아래 여정들의 번호.
         self._group_children: dict[tuple[str, str], list[int]] = {}
+        #: 여정이 아니라 구간 하나만 보여 주는 줄(1구간/2구간 정보 줄) →
+        #: (그 여정의 번호, 구간 번호). 이 줄만 따로 고르면 그 구간 하나만의
+        #: 예매 대상을 만듭니다(:meth:`_leg_only_target`).
+        self._leg_items: dict[tuple[str, str], tuple[int, int]] = {}
         #: 이번 실행에만 쓰는 텔레그램 값. 설정 파일에는 쓰지 않습니다.
         #: 남의 컴퓨터에서 한 번만 쓰고 싶을 때를 위한 것입니다. 있으면
         #: 저장된 값보다 이쪽을 씁니다.
@@ -1747,6 +1768,13 @@ class BookerApp:
                 if split
                 else target.journey.summary()
             )
+            hold_journey = (
+                Journey(
+                    legs=(target.journey.legs[number - 1],), source=target.journey.source
+                )
+                if split
+                else target.journey
+            )
             held = self._held_from(
                 target.label,
                 summary,
@@ -1755,6 +1783,7 @@ class BookerApp:
                 target.direction,
                 batch,
                 target.journey.summary(),
+                hold_journey,
             )
             self.remember_hold(held)
             self._write_log(
@@ -1817,6 +1846,9 @@ class BookerApp:
                 target.direction,
                 batch,
                 target.journey.summary(),
+                Journey(
+                    legs=(target.journey.legs[number - 1],), source=target.journey.source
+                ),
             )
             self.remember_hold(held)
         pnrs = ", ".join(h.pnr_no or "?" for h in holds) or "(없음)"
@@ -2005,7 +2037,12 @@ class BookerApp:
             item = self._hold_items.get(index)
             if item is None:
                 continue
-            self.hold_tree.item(item, values=held.row(now), tags=(held.tag(now),))
+            # 통째로 다시 그리지 않고 '남은 시간' 칸만 고쳐 씁니다 — 나머지
+            # 열세 칸은 매초 다시 셀 이유가 없는 값입니다.
+            values = list(self.hold_tree.item(item, "values"))
+            if len(values) == len(HOLD_COLUMNS):
+                values[-1] = remaining_text(held.deadline, now)
+                self.hold_tree.item(item, values=values, tags=(held.tag(now),))
         # 예매 대상의 '남은 감시' 도 여기서 셉니다. 표를 통째로 다시 그리면
         # 고른 줄이 깜빡이므로 그 칸 하나만 고쳐 씁니다.
         for index, item in self._target_items.items():
@@ -2028,6 +2065,7 @@ class BookerApp:
         direction: tuple[str, str, str] = ("", "", ""),
         group: str = "",
         full_summary: str = "",
+        held_journey: Journey | None = None,
     ) -> Held:
         """서버 응답에서 화면이 쓸 것만 뽑습니다. 없는 값은 지어내지 않습니다."""
         return Held(
@@ -2047,6 +2085,7 @@ class BookerApp:
             hold_response=hold if type(hold) is ReservationHoldResponse else None,
             group=group,
             full_summary=full_summary or summary,
+            held_journey=held_journey,
         )
 
     def on_hold_made(
@@ -2058,9 +2097,12 @@ class BookerApp:
         hold: ReservationHoldResponse,
         group: str = "",
         full_summary: str = "",
+        held_journey: Journey | None = None,
     ) -> None:
         """자동예매 스레드에서 불립니다 — 큐를 거쳐 화면에 올립니다."""
-        held = self._held_from(label, summary, kind, hold, direction, group, full_summary)
+        held = self._held_from(
+            label, summary, kind, hold, direction, group, full_summary, held_journey
+        )
         self.events.put(lambda: self.remember_hold(held))
 
     def remember_hold(self, held: Held) -> None:
@@ -2104,12 +2146,34 @@ class BookerApp:
             else:
                 self._insert_hold_group(indices)
 
+    def _hold_row_values(self, held: Held, now: datetime) -> tuple[str, ...]:
+        """잡은 예약 한 줄의 열네 칸.
+
+        가운데 아홉 칸(구분·열차·출발·도착·총 소요·환승 대기·좌석)은
+        :meth:`_journey_row_values` 로 조회 결과·예매 대상과 **같은 방식으로**
+        채웁니다. ``held_journey`` 가 없으면(옛 기록 등) 그 칸들만 "-" 로
+        비웁니다 — 지어내지 않습니다. 종류(좌석 예약/N구간)·PNR·운임·결제
+        기한·남은 시간은 이 표만의 칸입니다.
+        """
+        if held.held_journey is not None:
+            middle = self._journey_row_values(held.label, held.held_journey)
+        else:
+            middle = (held.label or "편도", "-", "-", "-", "-", "-", "-", "-", "-")
+        return (
+            *middle,
+            held.kind,
+            held.pnr,
+            held.fare,
+            held.deadline_text,
+            remaining_text(held.deadline, now),
+        )
+
     def _insert_hold_row(self, index: int, *, parent: str) -> None:
         """잡은 예약 한 줄. 묶음 아래(자식)든 최상위(단독)든 같은 모양입니다."""
         held = self.holds[index]
         now = now_kst()
         item = self.hold_tree.insert(
-            parent, "end", values=held.row(now), tags=(held.tag(now),)
+            parent, "end", values=self._hold_row_values(held, now), tags=(held.tag(now),)
         )
         self._hold_items[index] = item
 
@@ -2128,8 +2192,15 @@ class BookerApp:
             values=(
                 first.label or "편도",
                 "구간별 예약",
+                "",
+                "",
+                "",
+                "",
                 f"{first.full_summary or first.summary} · 구간 {len(indices)}개로 "
                 "나누어 샀습니다 — 결제도 구간마다 따로입니다",
+                "",
+                "",
+                "",
                 "",
                 "",
                 "",
@@ -3006,6 +3077,7 @@ class BookerApp:
         self.journeys = []
         self.item_journeys.clear()
         self._group_children.clear()
+        self._leg_items.clear()
         self.results_status.set(
             "계정이 바뀌어 목록을 비웠습니다. 조건을 정하고 [조회] 를 누르세요."
         )
@@ -3285,6 +3357,7 @@ class BookerApp:
         self.sync_round_trip_panes()
         self.item_journeys.clear()
         self._group_children.clear()
+        self._leg_items.clear()
         for tree in (self.tree, self.return_tree):
             tree.delete(*tree.get_children())
         # 1구간이 같은 직접 조합은 한 줄로 접습니다. 조합이 곱으로 늘어나면
@@ -3348,7 +3421,7 @@ class BookerApp:
             # 막혔는지는 여기서만 보입니다. 한 구간짜리 여정으로 만들어
             # 같은 계산을 그대로 씁니다 — 규칙을 두 번 쓰지 않습니다.
             alone = Journey(legs=(leg,), source=journey.source)
-            tree.insert(
+            leg_item = tree.insert(
                 item,
                 "end",
                 values=(
@@ -3364,6 +3437,10 @@ class BookerApp:
                 ),
                 tags=("leg",),
             )
+            # 이 구간 줄만 따로 고르면 **이 구간 하나만의 예매 대상**을
+            # 만듭니다(:meth:`_leg_only_target`) — 부모 전체를 고른 것으로
+            # 되돌리지 않습니다.
+            self._leg_items[(str(tree), leg_item)] = (index, leg_index)
         tree.item(item, open=True)
 
     def _insert_group(self, tree: ttk.Treeview, picked: list[tuple[int, Target]]) -> None:
@@ -3425,7 +3502,16 @@ class BookerApp:
         )
 
     def _row_values(self, target: Target) -> tuple[str, ...]:
-        journey = target.journey
+        return self._journey_row_values(target.label, target.journey)
+
+    def _journey_row_values(self, label: str, journey: Journey) -> tuple[str, ...]:
+        """구분·열차·출발·도착·총 소요·환승 대기·일반실·특실·입석 아홉 칸.
+
+        조회 결과·예매 대상·잡은 예약, **세 표가 전부 이 함수 하나로** 이
+        아홉 칸을 채웁니다. 여정을 문장 하나로 뭉뚱그리면(예전의 "여정"
+        칸), 조회 결과에서는 구분해 보던 것이 담거나 잡는 순간 사라집니다
+        — 실제로 그런 신고가 있었습니다.
+        """
         if journey.is_transfer:
             kind = (
                 "환승"
@@ -3438,7 +3524,7 @@ class BookerApp:
             kind = "직통"
             transfer = "-"
         return (
-            f"{target.label[:2]}·{kind}" if target.label else kind,
+            f"{label[:2]}·{kind}" if label else kind,
             # 예매 대상·기록·알림과 같은 표기를 씁니다. 한 화면에서 같은
             # 열차가 "00017" 과 "KTX 17" 로 갈리면 같은 것인지 알 수 없습니다.
             one_line(journey.train_label()),
@@ -3470,36 +3556,70 @@ class BookerApp:
     # -- 동작: 자동예매 ------------------------------------------------------
 
     def selected_results(self) -> list[Target]:
-        """두 표에서 고른 것들. 구간 행을 골랐으면 그 여정을 씁니다."""
-        chosen, _groups = self._selected_results_with_groups()
-        return chosen
+        """두 표에서 고른 것들. 구간 행을 골랐으면 그 구간 하나만의 여정을,
+        묶음 머리를 골랐으면 그 아래 후보 전부를 씁니다."""
+        direct, groups = self._selected_results_with_groups()
+        return direct + [target for candidates in groups for target in candidates]
+
+    def _leg_only_target(self, parent_index: int, leg_index: int) -> Target:
+        """1구간/2구간 정보 줄만 따로 골랐을 때 — **그 구간 하나만**의 예매 대상.
+
+        구간마다 독자적인 :class:`SearchRequest` 를 새로 만듭니다(그 구간
+        자신의 역·날짜로) — 부모 여정의 것을 그대로 쓰면
+        :attr:`Target.direction` 이 여전히 **전체 여정**(첫 역→마지막 역)을
+        가리켜, "이 방향은 이미 잡았다" 판정이 엉뚱한 방향을 막거나(이
+        구간만 잡았는데 전체가 막힌 것으로) 못 막습니다(전체를 잡았는데
+        이 구간은 안 막힌 것으로). 이 구간은 그 자체로 평범한 직통
+        예약이므로, 환승 조건은 켜 둘 이유가 없습니다.
+        """
+        parent = self.results[parent_index]
+        leg = parent.journey.legs[leg_index]
+        request = replace(
+            parent.request,
+            departure=leg.departure_station_name,
+            arrival=leg.arrival_station_name,
+            date=leg.departure_date,
+            include_direct=True,
+            include_transfer=False,
+            transfer_stations=(),
+        )
+        journey = Journey(legs=(leg,), source=parent.journey.source)
+        return Target(journey=journey, request=request, label=parent.label)
 
     def _selected_results_with_groups(
         self,
-    ) -> tuple[list[Target], list[tuple[Target, int]]]:
-        """고른 것들과, 그중 **묶음 부모로 통째로 딸려 온 것**의 목록.
+    ) -> tuple[list[Target], list[list[Target]]]:
+        """바로 담을 것과, **묶음 머리를 골라서 나온 후보 목록**을 나눕니다.
 
-        부모 줄은 1구간만 정해 주고 2구간은 가능한 것이 전부 담깁니다. 그
-        사실을 화면이 말해 주어야 사람이 "왜 이렇게 많이 담겼지" 로 끝나지
-        않습니다. 그래서 어느 묶음이 몇 편을 데려왔는지도 함께 돌려줍니다.
+        묶음 머리는 여정이 아니라 1구간입니다. 그것을 곧장 담으면 이어질
+        수 있는 2구간이 전부(고른 적 없는 것까지) 예매 대상에 들어갑니다 —
+        그래서 여기서는 담지 않고 후보만 돌려주고, 부르는 쪽
+        (:meth:`add_targets`)이 팝업으로 하나를 고르게 합니다. 구간 정보
+        줄(1구간/2구간)만 따로 골랐으면 그 구간 하나만의 예매 대상을
+        만듭니다(:meth:`_leg_only_target`) — 부모 전체로 되돌리지 않습니다.
         """
-        chosen: list[Target] = []
-        groups: list[tuple[Target, int]] = []
+        direct: list[Target] = []
+        groups: list[list[Target]] = []
         for tree in (self.tree, self.return_tree):
             for item in tree.selection():
-                # 묶음의 부모를 골랐으면 그 아래 전부를 고른 것으로 봅니다.
+                # 묶음의 부모를 골랐으면 그 아래 후보 전부를 돌려줍니다 —
+                # 여기서는 담지 않습니다.
                 members = self._group_children.get((str(tree), item), [])
                 if members:
-                    groups.append((self.results[members[0]], len(members)))
-                for index in members:
-                    if self.results[index] not in chosen:
-                        chosen.append(self.results[index])
+                    groups.append([self.results[index] for index in members])
+                    continue
+                leg_key = self._leg_items.get((str(tree), item))
+                if leg_key is not None:
+                    leg_target = self._leg_only_target(*leg_key)
+                    if leg_target not in direct:
+                        direct.append(leg_target)
+                    continue
                 index = self.item_journeys.get((str(tree), item))
                 if index is None:
                     index = self.item_journeys.get((str(tree), tree.parent(item)))
-                if index is not None and self.results[index] not in chosen:
-                    chosen.append(self.results[index])
-        return chosen, groups
+                if index is not None and self.results[index] not in direct:
+                    direct.append(self.results[index])
+        return direct, groups
 
     @staticmethod
     def _on_expander(tree: ttk.Treeview, event: tk.Event) -> bool:
@@ -3533,10 +3653,33 @@ class BookerApp:
         return "break"
 
     def add_targets(self) -> None:
-        picked, groups = self._selected_results_with_groups()
-        if not picked:
+        """고른 것을 예매 대상에 담습니다.
+
+        묶음 머리(1구간)를 골랐으면 아무것도 바로 담지 않고 팝업을 엽니다
+        (:meth:`_offer_group_picker`) — 이어질 수 있는 2구간을 전부 담으면
+        고른 적 없는 열차가 목록에 쌓인 것처럼 보입니다. 구간 정보 줄이나
+        여정 줄을 직접 골랐으면 그 자리에서 바로 담습니다.
+        """
+        direct, groups = self._selected_results_with_groups()
+        if not direct and not groups:
             messagebox.showwarning("예매 대상", "위 목록에서 열차를 고르고 [담기] 를 누르세요")
             return
+        if direct:
+            added = self._add_picked_targets(direct)
+            self._write_log(
+                f"예매 대상에 {added}편을 담았습니다 (모두 {len(self.targets)}편)."
+                if added
+                else "이미 담긴 열차입니다."
+            )
+        for candidates in groups:
+            self._offer_group_picker(candidates)
+
+    def _add_picked_targets(self, picked: list[Target]) -> int:
+        """고른 여정들을 예매 대상에 담습니다. 실제로 들어간 편 수를 돌려줍니다.
+
+        자리가 열려도 폼이 만들어지지 않는 행은 걸러 알리고, 이미 담긴 것과
+        같은 여정·방향은 조용히 건너뜁니다 — 두 번 담아도 뜻이 없습니다.
+        """
         added = 0
         for target in picked:
             # 자리가 열려도 폼이 만들어지지 않는 행이 있습니다. 새벽에 자리가
@@ -3564,47 +3707,67 @@ class BookerApp:
             self.targets.append(target)
             added += 1
         self.sync_target_list()
-        self._write_log(
-            f"예매 대상에 {added}편을 담았습니다 (모두 {len(self.targets)}편)."
-            if added
-            else "이미 담긴 열차입니다."
-        )
-        if added:
-            self._explain_groups(groups)
+        return added
 
-    def _explain_groups(self, groups: list[tuple[Target, int]]) -> None:
-        """묶음 부모로 담았을 때 무엇이 담긴 것인지 말해 줍니다.
+    def _offer_group_picker(self, candidates: list[Target]) -> None:
+        """'이어서' 후보 중 하나를 고르는 팝업.
 
-        부모 줄은 여정이 아니라 **1구간 머리글**입니다. 그것을 고르면 그
-        1구간에 이어지는 2구간이 전부 담깁니다 — 그게 이 묶음의 값어치이지만,
-        말해 주지 않으면 고른 적 없는 열차가 목록에 쌓인 것처럼 보입니다.
-
-        자식 줄만 고른 경우에는 아무 말도 하지 않습니다.
+        묶음의 머리 줄은 여정이 아니라 1구간입니다. 거기서 곧장 담으면
+        이어질 수 있는 2구간이 전부(고른 적 없는 것까지) 예매 대상에
+        들어갑니다. **이 함수는 그 자리에서 아무것도 담지 않습니다** — 팝업
+        안에서 하나를 고를 때만 1구간과 함께 담깁니다.
         """
-        if not groups:
+        if not candidates:
             return
-        lines = []
-        for head, count in groups:
-            leg = head.journey.first
-            name = one_line(f"{(leg.train_class_name or '').strip()} "
-                            f"{(leg.train_no or '').strip().lstrip('0')}").strip()
-            lines.append(
-                f"· 1구간 {name} "
+        leg = candidates[0].journey.first
+        name = one_line(
+            f"{(leg.train_class_name or '').strip()} "
+            f"{(leg.train_no or '').strip().lstrip('0')}"
+        ).strip()
+        window = tk.Toplevel(self.root)
+        window.title("이어지는 구간 고르기")
+        window.transient(self.root)
+        ttk.Label(
+            window,
+            text=(
+                f"1구간 {name} "
                 f"{format_clock(normalize_clock(leg.departure_time))}-"
                 f"{format_clock(normalize_clock(leg.arrival_time))} "
-                f"({leg.departure_station_name}→{leg.arrival_station_name})\n"
-                f"  → 이어지는 2구간 {count}편이 모두 담겼습니다."
-            )
-        messagebox.showinfo(
-            "1구간만 정해졌습니다",
-            "묶음의 머리 줄을 고르셨습니다. 그 줄은 여정이 아니라 1구간이라,\n"
-            "이어질 수 있는 2구간이 전부 예매 대상에 담깁니다.\n\n"
-            + "\n\n".join(lines)
-            + "\n\n한 편만 노리시려면 예매 대상에서 나머지를 [빼기] 하거나, "
-            "위 표에서 원하는 '└ 이어서' 줄만 골라 담으세요.\n"
-            "그대로 두어도 됩니다 — 자동예매는 한 방향에 한 건만 잡으므로, "
-            "여럿을 담아 두면 먼저 열리는 것을 잡을 기회가 그만큼 늘어납니다.",
-        )
+                f"({leg.departure_station_name}→{leg.arrival_station_name}) 은 "
+                "정해졌습니다.\n"
+                f"이어지는 2구간 {len(candidates)}개 중 하나를 고르세요 — 고르면 "
+                "1구간과 함께 예매 대상에 담깁니다."
+            ),
+            justify="left",
+            wraplength=420,
+        ).pack(anchor="w", padx=12, pady=(12, 6))
+        listbox = tk.Listbox(window, width=64, height=min(8, len(candidates)))
+        for candidate in candidates:
+            listbox.insert("end", candidate.journey.summary())
+        listbox.selection_set(0)
+        listbox.pack(padx=12, pady=(0, 8), fill="both", expand=True)
+
+        def pick() -> None:
+            selection = listbox.curselection()
+            if not selection:
+                messagebox.showinfo("이어지는 구간 고르기", "목록에서 하나를 고르세요")
+                return
+            chosen = candidates[selection[0]]
+            added = self._add_picked_targets([chosen])
+            window.destroy()
+            if added:
+                messagebox.showinfo(
+                    "예매 대상에 담았습니다",
+                    f"1구간과 함께 담겼습니다:\n{chosen.journey.summary()}",
+                )
+            else:
+                self._write_log("이미 담긴 열차입니다.")
+
+        buttons = ttk.Frame(window)
+        buttons.pack(pady=(0, 12))
+        ttk.Button(buttons, text="고른 것 담기", command=pick).pack(side="left", padx=(0, 6))
+        ttk.Button(buttons, text="취소", width=8, command=window.destroy).pack(side="left")
+        window.grab_set()
 
     def _target_double_clicked(self, event: tk.Event) -> str | None:
         """두 번 누르면 뺍니다. **접거나 펴지는 않습니다** — 조회 결과와 같은
@@ -3816,7 +3979,14 @@ class BookerApp:
         self.stop_button.configure(state="normal" if self.any_running() else "disabled")
 
     def _insert_target_row(self, index: int, *, parent: str) -> None:
-        """예매 대상 한 줄. 묶음 아래(자식)든 최상위(단독)든 같은 모양입니다."""
+        """예매 대상 한 줄. 묶음 아래(자식)든 최상위(단독)든 같은 모양입니다.
+
+        가운데 아홉 칸은 :meth:`_row_values` 로 조회 결과와 **똑같이** 만듭니다
+        — 그 함수 하나가 구분·열차·시각·소요·환승 대기·좌석을 다 압니다.
+        여기서 다시 쓰면 둘이 반드시 어긋납니다(실제로 어긋났습니다: 조회
+        결과는 칸이 나뉘어 있는데 예매 대상은 "여정" 한 칸으로 뭉뚱그려
+        졌습니다).
+        """
         target = self.targets[index]
         watch = self._watch_of(target)
         item = self.target_list.insert(
@@ -3824,11 +3994,7 @@ class BookerApp:
             "end",
             values=(
                 self._target_state(target, watch),
-                target.journey.summary(),
-                self._target_transfer(target),
-                target.journey.seat_text(KorailSeatClass.GENERAL),
-                target.journey.seat_text(KorailSeatClass.SPECIAL),
-                " · ".join(target.journey.extras()) or "-",
+                *self._row_values(target),
                 f"{watch.options.poll_interval_s:g}초" if watch else "-",
                 watch.remaining(time.monotonic()) if watch else "-",
             ),
@@ -3855,13 +4021,14 @@ class BookerApp:
             "end",
             values=(
                 "1구간 고정",
-                one_line(
-                    f"[1구간] {(leg.train_class_name or '').strip()} "
-                    f"{(leg.train_no or '').strip().lstrip('0')} "
-                    f"{leg.departure_station_name}→{leg.arrival_station_name} · "
-                    f"이어지는 후보 {len(indices)}개"
-                ),
                 "",
+                one_line(f"{(leg.train_class_name or '').strip()} "
+                         f"{(leg.train_no or '').strip().lstrip('0')}"),
+                format_clock(normalize_clock(leg.departure_time)),
+                format_clock(normalize_clock(leg.arrival_time)),
+                format_duration(first.leg_minutes(0)),
+                f"{leg.departure_station_name}→{leg.arrival_station_name} · "
+                f"이어지는 후보 {len(indices)}개",
                 "",
                 "",
                 "",
@@ -3886,17 +4053,6 @@ class BookerApp:
         if not books_as_one_reservation(target.journey):
             state = f"{state} · 구간별"
         return state
-
-    def _target_transfer(self, target: Target) -> str:
-        """예매 대상 표의 환승 대기 칸. 조회 결과와 같은 글입니다.
-
-        담고 나면 위 표를 다시 보지 않습니다. 촉박한 환승이라는 사실이 담는
-        순간 사라지면 경고를 한 셈이 되지 않습니다.
-        """
-        journey = target.journey
-        if not journey.is_transfer:
-            return "-"
-        return _transfer_text(journey.transfer_station_name or "환승역", journey)
 
     def selected_indices(self) -> list[int]:
         """표에서 고른 줄의 번호. Treeview 는 항목 id 로 말하므로 되짚습니다.

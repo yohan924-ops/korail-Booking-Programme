@@ -67,14 +67,17 @@ MAX_CONSECUTIVE_TRANSPORT_FAILURES = 5
 Logger = Callable[[str], None]
 Notifier = Callable[[str], None]
 #: 홀드 하나가 잡힐 때마다 불립니다 — (구분, 여정 한 줄, 종류, 방향, 응답,
-#: 묶음 값, 원래 여정 전체 한 줄).
+#: 묶음 값, 원래 여정 전체 한 줄, 이 홀드가 가리키는 여정).
 #:
 #: 방향까지 넘기는 것은 화면이 "이 방향은 이미 잡았다" 를 판단해야 하기
 #: 때문입니다. 여정 한 줄로는 목록에서 그 줄을 뺀 뒤 판단할 길이 없습니다.
 #: 묶음 값은 구간별로 따로 산 홀드 여럿을 화면이 한 시도로 묶어 보여 주기
 #: 위한 것입니다 — 방향만으로는 기한 지난 옛 홀드와 새 홀드가 뒤섞입니다.
+#: 마지막 여정은 화면이 열차·시각·소요·좌석 칸을 조회 결과와 같은 함수로
+#: 채우는 데 씁니다 — 문자열을 다시 만들면 반드시 어긋납니다.
 HoldWatcher = Callable[
-    [str, str, str, tuple[str, str, str], ReservationHoldResponse, str, str], None
+    [str, str, str, tuple[str, str, str], ReservationHoldResponse, str, str, Journey],
+    None,
 ]
 
 
@@ -727,6 +730,7 @@ class AutoBooker:
                     hold,
                     batch,
                     journey.summary(),
+                    Journey(legs=(journey.legs[number - 1],), source=journey.source),
                 )
         pnrs = ", ".join((hold.pnr_no or "?") for hold in held) or "(없음)"
         self.announce(
@@ -868,6 +872,14 @@ class AutoBooker:
             hold_summary = (
                 journey.leg_hold_label(number - 1) if split else journey.summary()
             )
+            # 구간마다 따로 샀으면 이 홀드가 가리키는 것도 그 구간 하나뿐인
+            # 여정입니다 — 전체 여정을 그대로 넘기면 열차·시각 칸이 두 구간을
+            # 합쳐서 말하는데, 실제로는 한 구간만 잡혔습니다.
+            hold_journey = (
+                Journey(legs=(journey.legs[number - 1],), source=journey.source)
+                if split
+                else journey
+            )
             if self._on_hold is not None:
                 self._on_hold(
                     target.label,
@@ -877,6 +889,7 @@ class AutoBooker:
                     hold,
                     batch,
                     journey.summary(),
+                    hold_journey,
                 )
             where = f" [{number}구간]" if split else ""
             self.announce(

@@ -91,6 +91,7 @@ def main() -> int:
 
     import tkinter as tk
     import types
+    from tkinter import ttk
 
     from korail_booker import ui as ui_module
     from korail_booker.autobook import Target
@@ -256,18 +257,87 @@ def main() -> int:
     root.update()
 
     # -- 묶음과 담기 ---------------------------------------------------------
+    def find_widgets(
+        widget: tk.Misc, predicate: object, found: list | None = None
+    ) -> list:
+        if found is None:
+            found = []
+        for child in widget.winfo_children():
+            try:
+                if predicate(child):  # type: ignore[operator]
+                    found.append(child)
+            except tk.TclError:
+                pass
+            find_widgets(child, predicate, found)
+        return found
+
     app._show_journeys(results)
     root.update()
     parent_row = app.tree.get_children()[0]
     check("부모 줄은 여정이 아니라 묶음 머리다",
           app.tree.item(parent_row, "tags") == ("group",))
     app.tree.selection_set(parent_row)
-    check("부모를 고르면 그 아래 조합이 전부 담긴다",
+    check("부모를 고르면 그 아래 조합이 전부 (조회용으로는) 잡힌다",
           len(app.selected_results()) == len(results), len(app.selected_results()))
     app.tree.selection_set(app.tree.get_children(parent_row)[1])
     check("자식만 고르면 그 하나만", len(app.selected_results()) == 1)
 
+    # 부모(묶음 머리)를 고르고 [담기] 를 눌러도 **곧장 담기지 않습니다** —
+    # 이어지는 2구간이 전부(고른 적 없는 것까지) 담기던 것을 그만뒀습니다.
     app.tree.selection_set(parent_row)
+    before_windows = set(root.winfo_children())
+    app.add_targets()
+    root.update()
+    check("묶음 머리를 고르고 담아도 곧장 담기지 않는다",
+          len(app.targets) == 0, len(app.targets))
+    new_windows = [
+        w for w in root.winfo_children()
+        if w not in before_windows and isinstance(w, tk.Toplevel)
+    ]
+    check("대신 고르는 팝업이 뜬다", len(new_windows) == 1, new_windows)
+    picker = new_windows[0]
+    check("팝업 제목이 '이어지는 구간 고르기' 다",
+          picker.title() == "이어지는 구간 고르기", picker.title())
+    listboxes = find_widgets(picker, lambda w: isinstance(w, tk.Listbox))
+    listbox = listboxes[0] if listboxes else None
+    check("팝업 목록에 후보가 다 있다",
+          listbox is not None and listbox.size() == len(results),
+          listbox.size() if listbox is not None else None)
+    if listbox is not None:
+        listbox.selection_clear(0, "end")
+        listbox.selection_set(1)
+        pick_buttons = find_widgets(
+            picker, lambda w: isinstance(w, ttk.Button) and w.cget("text") == "고른 것 담기"
+        )
+        assert pick_buttons, "[고른 것 담기] 단추를 못 찾았습니다"
+        pick_buttons[0].invoke()
+        root.update()
+    check("팝업에서 하나를 고르면 그제서야 1구간과 함께 담긴다",
+          len(app.targets) == 1
+          and len(app.targets[0].journey.legs) == len(results[0].journey.legs),
+          len(app.targets))
+    check("고르고 나면 팝업이 닫힌다", not picker.winfo_exists())
+
+    # 자식(이어서) 줄만 고르면 팝업 없이 곧장 담깁니다.
+    app.targets = []
+    app.sync_target_list()
+    children = app.tree.get_children(parent_row)
+    app.tree.selection_set(children[0])
+    before_windows = set(root.winfo_children())
+    app.add_targets()
+    root.update()
+    check("자식 줄만 고르면 팝업 없이 곧장 담긴다",
+          len(app.targets) == 1
+          and not [
+              w for w in root.winfo_children()
+              if w not in before_windows and isinstance(w, tk.Toplevel)
+          ],
+          len(app.targets))
+
+    # 예매 대상 묶음 표시를 보려면 자식 여럿을 한꺼번에 고릅니다.
+    app.targets = []
+    app.sync_target_list()
+    app.tree.selection_set(*children)
     app.add_targets()
     root.update()
     # 예매 대상도 조회 결과처럼 1구간이 같으면 묶입니다.
@@ -281,7 +351,8 @@ def main() -> int:
           len(target_children))
     row = app.target_list.item(target_children[0], "values")
     check("상태 칸이 구간별 예약임을 말한다", "구간별" in row[0], row[0])
-    check("환승 대기 칸이 촉박한 환승을 경고한다", "촉박" in row[2], row[2])
+    # 칸 순서: 상태, 구분, 열차, 출발, 도착, 총 소요, 환승 대기, ...
+    check("환승 대기 칸이 촉박한 환승을 경고한다", "촉박" in row[6], row[6])
 
     # 부모 줄을 고르면 그 아래 전부를 고른 것으로 칩니다.
     app.target_list.selection_set(target_top[0])
@@ -306,12 +377,8 @@ def main() -> int:
         check("글자 자리를 두 번 누르면 묶음 전체가 빠진다",
               verdict == "break" and len(app.targets) == 0,
               f"return={verdict!r} targets={len(app.targets)}")
-        # 되돌립니다 — 뒤의 확인들이 이 목록을 또 씁니다.
-        app.tree.selection_set(parent_row)
-        app.add_targets()
-        root.update()
 
-    # -- 두 번 눌러도 접히지 않는가 ------------------------------------------
+    # -- 두 번 눌러도 접히지 않는가, 더블클릭한 묶음 머리도 팝업으로 가는가 ----
     app._show_journeys(results)
     root.update()
     head = app.tree.get_children()[0]
@@ -322,36 +389,70 @@ def main() -> int:
     middle = top + height // 2
 
     was_open = bool(app.tree.item(head, "open"))
+    before_windows = set(root.winfo_children())
     verdict = app._result_double_clicked(_Click(120, middle, app.tree))
     root.update()
     check("글자 자리를 두 번 눌러도 접히거나 펴지지 않는다",
           verdict == "break" and bool(app.tree.item(head, "open")) == was_open,
           f"return={verdict!r} open={app.tree.item(head, 'open')}")
-    check("그러면서 담기기는 한다", len(app.targets) == len(results), len(app.targets))
+    check("더블클릭도 묶음 머리면 곧장 담기지 않고 팝업이 뜬다",
+          len(app.targets) == 0, len(app.targets))
+    doubled_windows = [
+        w for w in root.winfo_children()
+        if w not in before_windows and isinstance(w, tk.Toplevel)
+    ]
+    check("그 팝업도 같은 창이다", len(doubled_windows) == 1, doubled_windows)
+    for w in doubled_windows:
+        w.destroy()
+    root.update()
+
     before = len(app.targets)
     verdict = app._result_double_clicked(_Click(8, middle, app.tree))
     root.update()
     check("+/- 자리는 막지 않는다(접고 펴기가 살아 있다)",
           verdict is None and len(app.targets) == before, f"return={verdict!r}")
 
-    # -- 감시 중에 텔레그램을 채워도 알림이 가는가 ----------------------------
-    # 묶음 머리로 담으면 무엇이 담긴 것인지 말해 주는가
+    # -- 구간 정보 줄만 골라 담으면 그 구간 하나만 --------------------------
+    # 1구간이 겹치지 않는 새 후보라, 묶이지 않고 조회 때처럼 '1구간'/'2구간'
+    # 정보 줄이 그대로 펼쳐집니다.
+    solo_first = train(train_no="00777", departure="동탄", arrival="대전",
+                        departure_code="0001", arrival_code="0010",
+                        departure_time="150000", arrival_time="160000")
+    solo_second = train(train_no="00778", departure="대전", arrival="동대구",
+                         departure_code="0010", arrival_code="0015",
+                         departure_time="161000", arrival_time="171500")
+    solo_journey = Journey(legs=(solo_first, solo_second),
+                           source=JourneySource.CUSTOM_TRANSFER)
+    solo_target = Target(journey=solo_journey, request=request)
+    app._show_journeys([solo_target])
+    root.update()
+    solo_row = app.tree.get_children()[0]
+    check("혼자인 후보는 묶이지 않는다",
+          app.tree.item(solo_row, "tags") != ("group",))
+    leg_rows = app.tree.get_children(solo_row)
+    check("구간 정보 줄이 둘 펼쳐진다", len(leg_rows) == 2, len(leg_rows))
+
     app.targets = []
-    app.sync_target_list()
-    shown.clear()
-    app.tree.selection_set(head)
+    app.tree.selection_set(leg_rows[0])
     app.add_targets()
     root.update()
-    check("묶음 머리로 담으면 1구간만 정해졌다고 알려 준다",
-          any("1구간" in title for title, _m in shown), [t for t, _ in shown])
+    check("구간 정보 줄만 고르면 그 구간 하나만 담긴다",
+          len(app.targets) == 1 and len(app.targets[0].journey.legs) == 1,
+          [len(t.journey.legs) for t in app.targets])
+    check("그 대상의 방향은 그 구간 자신의 역이다(전체 여정이 아니다)",
+          app.targets and app.targets[0].direction == ("동탄", "대전", "20990101"),
+          app.targets[0].direction if app.targets else None)
+
     app.targets = []
-    app.sync_target_list()
-    shown.clear()
-    app.tree.selection_set(app.tree.get_children(head)[0])
+    app.tree.selection_set(leg_rows[1])
     app.add_targets()
     root.update()
-    check("자식 줄만 고르면 그 창이 뜨지 않는다",
-          not any("1구간" in title for title, _m in shown), [t for t, _ in shown])
+    check("2구간 줄만 고르면 2구간 하나만 담긴다",
+          app.targets and app.targets[0].direction == ("대전", "동대구", "20990101"),
+          app.targets[0].direction if app.targets else None)
+
+    app.targets = []
+    app.sync_target_list()
 
     # 바인딩된 메서드는 볼 때마다 새 객체라 `is` 로는 비교되지 않습니다.
     check("알림 함수는 설정을 굽지 않는다",
@@ -401,12 +502,17 @@ def main() -> int:
           app.settings.telegram_token == "" and app.settings.telegram_chat_id == "")
     check("알림이 그 값을 쓴다", app._make_notifier() is not None)
 
-    # -- 잡은 예약: 구간별 홀드를 한 묶음으로 접는가 --------------------------
+    # -- 잡은 예약: 조회 결과와 같은 칸으로 채워지는가, 묶이는가 ----------------
+    # PNR 은 이제 11번째 칸(0-based index 10)입니다 — 구분·열차·출발·도착·
+    # 총 소요·환승 대기·일반실·특실·입석자유석대기 아홉 칸이 앞에 옵니다.
+    PNR_COL = 10
+    first_target = results[0]
     app.holds = [
         Held(
             label="", summary="[1구간] 서울 → 대전", pnr="P1001", fare="10000",
             deadline=None, deadline_text="모름", kind="좌석 예약(1구간)",
             group="batch-1", full_summary="서울 → 동대구",
+            held_journey=first_target.journey,
         ),
         Held(
             label="", summary="[2구간] 대전 → 동대구", pnr="P1002", fare="12000",
@@ -434,31 +540,40 @@ def main() -> int:
     check("묶지 않는 홀드는 최상위에 혼자 남는다",
           len(hold_top) - 1 == 1
           and any(
-              app.hold_tree.item(item, "values")[3] == "P2001" for item in hold_top
+              app.hold_tree.item(item, "values")[PNR_COL] == "P2001"
+              for item in hold_top
           ))
     check("부모 줄은 선택해도 취소 대상이 되지 않는다(PNR 칸이 비어 있다)",
-          app.hold_tree.item(group_parent, "values")[3] == "")
+          app.hold_tree.item(group_parent, "values")[PNR_COL] == "")
     app.hold_tree.selection_set(group_parent)
     check("부모를 고르고 취소를 찾으면 못 찾는다(안전하게 막힌다)",
           app._selected_hold_index() is None)
+
+    # held_journey 를 준 홀드는 조회 결과와 정확히 같은 아홉 칸을 보여야
+    # 합니다 — 같은 함수(_journey_row_values)로 채우기 때문입니다.
+    p1001 = next(
+        item for item in group_children
+        if app.hold_tree.item(item, "values")[PNR_COL] == "P1001"
+    )
+    expected = app._journey_row_values("", first_target.journey)
+    actual = tuple(app.hold_tree.item(p1001, "values"))[:9]
+    check("열차·시각·좌석 칸이 조회 결과와 글자 하나까지 같다",
+          actual == expected, (actual, expected))
+
+    # held_journey 가 없는 홀드는 지어내지 않고 그 칸들을 비웁니다.
+    p1002 = next(
+        item for item in group_children
+        if app.hold_tree.item(item, "values")[PNR_COL] == "P1002"
+    )
+    check("여정을 못 받은 홀드는 좌석 칸을 '-' 로 비운다(지어내지 않는다)",
+          app.hold_tree.item(p1002, "values")[2] == "-",
+          app.hold_tree.item(p1002, "values"))
+
     app.holds = []
     app.sync_holds()
 
     # -- 로그인 팝업: 감시 중 잠금, 하이픈 안내, [비로그인] 목록 초기화 ------
-
-    def find_widgets(
-        widget: tk.Misc, predicate: object, found: list | None = None
-    ) -> list:
-        if found is None:
-            found = []
-        for child in widget.winfo_children():
-            try:
-                if predicate(child):  # type: ignore[operator]
-                    found.append(child)
-            except tk.TclError:
-                pass
-            find_widgets(child, predicate, found)
-        return found
+    # find_widgets 는 위 "묶음과 담기" 절에서 이미 정의했습니다.
 
     # 감시가 도는 중에는 팝업 자체가 열리지 않는다(로그아웃과 같은 방비).
     app.watches = [types.SimpleNamespace(running=True)]  # type: ignore[list-item]
@@ -492,7 +607,8 @@ def main() -> int:
     # 비어야 한다 — 이전 세션의 목록이 새 세션에 남으면 안 된다.
     app._show_journeys(results)
     root.update()
-    app.tree.selection_set(app.tree.get_children()[0])
+    # 묶음 머리는 이제 팝업을 열 뿐 곧장 담지 않으므로, 자식들을 골라 담습니다.
+    app.tree.selection_set(*app.tree.get_children(app.tree.get_children()[0]))
     app.add_targets()
     root.update()
     app.holds = [
@@ -519,7 +635,8 @@ def main() -> int:
     # 로그인에 성공해도(다른 아이디로 로그인 포함) 같은 초기화가 걸린다.
     app._show_journeys(results)
     root.update()
-    app.tree.selection_set(app.tree.get_children()[0])
+    # 묶음 머리는 이제 팝업을 열 뿐 곧장 담지 않으므로, 자식들을 골라 담습니다.
+    app.tree.selection_set(*app.tree.get_children(app.tree.get_children()[0]))
     app.add_targets()
     root.update()
     app.holds = [
