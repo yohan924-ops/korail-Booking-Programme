@@ -198,9 +198,62 @@ def main() -> int:
     check("비어 있으면 조회가 채운다",
           app.transfer_names() == ("대전", "김천구미"), app.transfer_names())
 
+    # -- 조회 중 mid-search 환승역 후보 갱신이 잠금을 풀지 않는가 -----------
+    #
+    # 실제로 있었던 문제: [조회] 를 누르면 환승 조건 칸이 잠기는데, 조회
+    # 스레드가 그 구간의 환승역 후보를 받아 와 화면 상태를 다시 맞추는
+    # 순간(sync_transfer_state) 그 칸이 도로 골라지게 바뀌었습니다. ttk
+    # 위젯은 .cget('state') 가 .state(['disabled']) 를 반영하지 않으므로
+    # (별개의 메커니즘입니다) .instate(['disabled']) 로 확인해야 합니다.
+    app._searching(True)
+    root.update()
+    check("조회를 시작하면 서버 추천 라디오가 실제로 잠긴다(instate)",
+          app.server_radio.instate(["disabled"]))
+    check("환승역 목록도 잠긴다", app.transfer_list.cget("state") == "disabled")
+    app._server_candidates_loaded(("동탄", "동대구"), ["대전", "김천구미"])
+    root.update()
+    check("조회 중 mid-search 갱신 뒤에도 라디오가 계속 잠겨 있다",
+          app.server_radio.instate(["disabled"]))
+    check("조회 중 mid-search 갱신 뒤에도 환승역 목록이 계속 잠겨 있다",
+          app.transfer_list.cget("state") == "disabled",
+          app.transfer_list.cget("state"))
+    check("조회 중 mid-search 갱신 뒤에도 [후보 갱신] 단추가 계속 잠겨 있다",
+          app.transfer_load_button.instate(["disabled"]))
+    app._transfer_stations_loaded(["대전", "오송"])
+    root.update()
+    check("[구간 후보 갱신] 콜백 뒤에도 계속 잠겨 있다",
+          app.transfer_load_button.instate(["disabled"])
+          and app.transfer_list.cget("state") == "disabled")
+    app._searching(False)
+    root.update()
+    check("조회가 끝나면 풀린다", not app.server_radio.instate(["disabled"])
+          and app.transfer_list.cget("state") == "normal")
+
     class _Click:
         def __init__(self, x: int, y: int, widget: object) -> None:
             self.x, self.y, self.widget = x, y, widget
+
+    # -- 왕복: 오는 날짜가 가는 날짜보다 앞서지 않는가 -----------------------
+    app.round_trip.set(True)
+    app._round_trip_toggled()
+    app.date.set("2026-09-10")
+    app.return_date.set("2026-09-10")
+    root.update()
+    app.date.set("2026-09-15")
+    root.update()
+    check("가는 날짜를 뒤로 미루면 오는 날짜도 따라간다",
+          app.return_date.get() == "2026-09-15", app.return_date.get())
+    app.open_calendar(for_return=True)
+    root.update()
+    nine = next(
+        w for w in app.calendar._grid.winfo_children() if w.cget("text") == "14"
+    )
+    check("오는 날 달력에서 가는 날보다 이전인 날은 잠긴다",
+          nine.instate(["disabled"]))
+    app.calendar.hide()
+    app.round_trip.set(False)
+    app._round_trip_toggled()
+    root.update()
 
     # -- 묶음과 담기 ---------------------------------------------------------
     app._show_journeys(results)

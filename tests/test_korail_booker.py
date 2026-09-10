@@ -3546,6 +3546,40 @@ def test_the_return_window_is_saved_after_it_is_read():
     assert body.index("build_return_request") < body.index("self._remember(request)")
 
 
+def test_the_return_date_never_goes_before_the_departure_date():
+    """왕복인데 가는 날짜를 뒤로 미루면, 오는 날짜가 그 이전에 남아
+    서버가 거절하는 왕복(도착이 출발보다 이름)이 됩니다."""
+    clamp = _ui_function("_clamp_return_date")
+    assert "if not self.round_trip.get():" in clamp
+    assert "if arrival < departure:" in clamp
+    assert "self.return_date.set(departure.isoformat())" in clamp
+
+    # 가는 날짜가 바뀔 때마다 불러야 합니다 — mark_stale 과는 별개의 trace.
+    source = _ui_source()
+    assert (
+        'self.date.trace_add("write", lambda *_args: self._clamp_return_date())'
+        in source
+    )
+    # 왕복을 막 켰을 때도(이미 어긋난 조합이 저장돼 있었을 수 있습니다).
+    toggled = _ui_function("_round_trip_toggled")
+    assert "self._clamp_return_date()" in toggled
+
+
+def test_the_return_calendar_locks_days_before_departure():
+    """오는 날 달력은 가는 날보다 이전인 날을 애초에 못 고르게 잠급니다."""
+    panel = _ui_function("open_for")
+    assert "self._minimum = minimum" in panel
+    draw = _ui_function("_draw")
+    assert "self._minimum is not None and current < self._minimum" in draw
+
+    open_cal = _ui_function("open_calendar")
+    assert "minimum = date.fromisoformat(self.date.get().strip())" in open_cal
+    # 가는 날 달력은 이 기준이 없어야 합니다(오늘 이전만 잠금).
+    assert open_cal.index("if for_return:") < open_cal.index(
+        "minimum=minimum"
+    )
+
+
 def test_a_half_bought_transfer_is_not_recorded_as_the_whole_journey():
     """구간별 홀드는 전체 여정이 아니라 그 구간으로 적혀야 합니다.
 
@@ -3878,3 +3912,38 @@ def test_the_calendar_manages_its_own_disabled_days():
     helper = _ui_function("_set_widget_locked")
     assert "if child in exempt:" in helper
     assert "continue" in helper
+
+
+def test_a_midsearch_transfer_station_refresh_does_not_unlock_the_panel():
+    """조회 스레드가 환승역 후보를 받아 와 화면 상태를 다시 맞출 때도, 조회
+    조건 잠금이 도로 풀리면 안 됩니다.
+
+    실제로 이런 일이 있었습니다: [조회] 를 누르면 환승 조건 칸이 잠기는데,
+    조금 있으면(조회 스레드가 ``_refresh_transfer_stations`` 로 그 구간의
+    환승역 후보를 받아 와 :meth:`sync_transfer_state` 를 다시 부르는
+    순간) 그 칸이 도로 골라지게 바뀌었습니다 — "환승이 켜져 있으니까" 라는
+    판단만 하고 "조회가 도는 중인가" 는 보지 않았기 때문입니다.
+    """
+    # 잠금 값을 먼저 바꿔야, 그 사이에 끼어든 mid-search 호출이 옛 값을
+    # 보고 도로 푸는 일이 없습니다.
+    lock = _ui_function("_lock_query_fields")
+    assert lock.index("self._query_locked = locked") < lock.index(
+        "self._set_widget_locked(self.query_frame"
+    )
+
+    transfer = _ui_function("sync_transfer_state")
+    assert "self._query_locked" in transfer
+    assert (
+        "unlocked = self.include_transfer.get() and (not self._query_locked)" in transfer
+    )
+    # 라디오·칸·단추 전부 include_transfer 만이 아니라 unlocked 를 씁니다.
+    assert "self.include_transfer.get() else" not in transfer
+
+    round_trip = _ui_function("sync_round_trip_state")
+    assert "self._query_locked" in round_trip
+
+
+def test_query_locked_flag_starts_false_and_is_set_before_widgets_move():
+    """플래그 자체가 있어야 하고, 초기값은 잠겨 있지 않은 상태입니다."""
+    source = _ui_source()
+    assert "self._query_locked = False" in source

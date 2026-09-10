@@ -332,6 +332,10 @@ class CalendarPanel(tk.Frame):
         self._shown = now_kst().date().replace(day=1)
         self._header = tk.StringVar()
         self._title = tk.StringVar(value="가는 날")
+        #: 오는 날 달력을 열 때, 가는 날보다 앞선 날은 이 값 때문에 잠깁니다.
+        #: ``None`` 이면 오늘보다 이전인 날만 잠급니다(가는 날 달력, 또는
+        #: 편도).
+        self._minimum: date | None = None
         top = tk.Frame(self, background=CALENDAR_BG)
         top.grid(row=0, column=0, padx=8, pady=(6, 2), sticky="ew")
         tk.Label(top, textvariable=self._title, foreground="#1f6feb",
@@ -362,14 +366,27 @@ class CalendarPanel(tk.Frame):
         """
         return now_kst().date()
 
-    def open_for(self, title: str, current: date, *, over: tk.Misc, x: int, y: int) -> None:
+    def open_for(
+        self,
+        title: str,
+        current: date,
+        *,
+        over: tk.Misc,
+        x: int,
+        y: int,
+        minimum: date | None = None,
+    ) -> None:
         """조회 묶음 위에 겹쳐 띄웁니다.
 
         ``grid`` 로 한 줄을 차지하면 열릴 때마다 아래의 결과 표가 밀려 내려가고,
         창 밖으로 나가기까지 합니다. ``place`` 는 배치를 건드리지 않습니다 —
         팝업 창이 아니라 같은 창 안에 겹치는 것입니다.
+
+        ``minimum`` 은 오는 날 달력에서 씁니다 — 가는 날보다 이전인 날은
+        골라도 서버가 거절하는 왕복이 되므로, 애초에 못 고르게 잠급니다.
         """
         self._title.set(title)
+        self._minimum = minimum
         self._shown = current.replace(day=1)
         self._draw()
         self.place(in_=over, x=x, y=y)
@@ -417,7 +434,11 @@ class CalendarPanel(tk.Frame):
                     command=lambda picked=current: self._choose(picked),
                 )
                 # 지난 날짜는 조회할 수 없습니다 — 서버가 주지 않습니다.
-                if current < self._today:
+                # 오는 날 달력이면, 가는 날보다 이전인 날도 마찬가지로
+                # 잠급니다 — 그런 왕복은 서버가 받지 않습니다.
+                if current < self._today or (
+                    self._minimum is not None and current < self._minimum
+                ):
                     button.state(["disabled"])
                 button.grid(row=row, column=column, padx=1, pady=1)
 
@@ -502,6 +523,14 @@ class BookerApp:
         self._search_serial = 0
         self._search_token: int | None = None
         self._search_cancelled: set[int] = set()
+        #: 조회 조건·환승 조건 칸이 지금 통째로 잠겨 있는지
+        #: (:meth:`_lock_query_fields`). :meth:`sync_transfer_state` 와
+        #: :meth:`sync_round_trip_state` 가 이것을 봅니다 — 조회 스레드가
+        #: 그 구간의 환승역 후보를 스스로 받아 와 이 두 함수를 다시 부르는데
+        #: (:meth:`_refresh_transfer_stations` → :meth:`_server_candidates_loaded`),
+        #: 그 호출이 이 값을 안 보면 "환승이 켜져 있으니까" 라는 이유만으로
+        #: 조회가 도는 중인데도 환승 조건 칸이 도로 풀립니다 — 실제로 그랬습니다.
+        self._query_locked = False
         #: 서버가 이 구간 후보로 준 역들. 목록에 (검증) 을 붙이는 데 씁니다.
         self._server_stations: set[str] = set()
         #: 떠 있는 로그인 팝업. 없으면 ``None``.
@@ -560,6 +589,10 @@ class BookerApp:
             self.round_trip,
             *self.passenger_vars.values(),
         )
+        # 가는 날짜가 오는 날짜를 넘어서면 오는 날짜를 따라 옮깁니다 —
+        # :meth:`_watch_for_changes` 와는 별개의 trace 입니다(그쪽은
+        # mark_stale 만 합니다).
+        self.date.trace_add("write", lambda *_args: self._clamp_return_date())
         self.root.after(120, self._drain)
         # 결제 기한 카운트다운. 1초마다 목록의 '남은 시간' 칸만 다시 씁니다.
         self.root.after(1000, self._tick_holds)
@@ -1265,6 +1298,15 @@ class BookerApp:
         except ValueError:
             # 기준은 한국 시각입니다 — 달력의 '오늘' 과 같아야 합니다.
             current = now_kst().date()
+        # 오는 날 달력은 가는 날보다 이전을 못 고르게 잠급니다 — 그런
+        # 왕복은 서버가 거절합니다. 가는 날을 못 읽으면(칸이 비었거나
+        # 모양이 틀렸으면) 잠글 기준이 없으니 그냥 둡니다.
+        minimum: date | None = None
+        if for_return:
+            try:
+                minimum = date.fromisoformat(self.date.get().strip())
+            except ValueError:
+                minimum = None
         self.calendar.open_for(
             "오는 날" if for_return else "가는 날",
             current,
@@ -1272,15 +1314,40 @@ class BookerApp:
             # 날짜 칸 바로 아래입니다. 조회 조건 위에 겹칩니다.
             x=330 if not for_return else 560,
             y=36,
+            minimum=minimum,
         )
 
     def _calendar_picked(self, picked: date) -> None:
         variable = self.return_date if self._calendar_for_return else self.date
         variable.set(picked.isoformat())
 
+    def _clamp_return_date(self) -> None:
+        """오는 날짜가 가는 날짜보다 앞서지 않게 합니다.
+
+        왕복인데 가는 날짜를 뒤로 미루면, 오는 날짜가 그보다 이전인 채로
+        남아 서버가 거절하는 조합이 됩니다(도착이 출발보다 이른 왕복).
+        그래서 가는 날짜가 오는 날짜를 넘어서면 오는 날짜를 가는 날짜와
+        같게 맞춥니다. 편도면 손대지 않습니다 — 오는 날짜가 뜻이 없고,
+        칸도 잠겨 있습니다.
+
+        어느 한쪽이라도 날짜 모양이 아니면(사람이 치는 중일 수 있습니다)
+        건드리지 않습니다 — 잘못 읽고 지어낸 날짜를 넣는 것보다 그대로
+        두는 편이 낫습니다.
+        """
+        if not self.round_trip.get():
+            return
+        try:
+            departure = date.fromisoformat(self.date.get().strip())
+            arrival = date.fromisoformat(self.return_date.get().strip())
+        except ValueError:
+            return
+        if arrival < departure:
+            self.return_date.set(departure.isoformat())
+
     def _round_trip_toggled(self) -> None:
         self.sync_round_trip_panes()
         self.sync_round_trip_state()
+        self._clamp_return_date()
         self.mark_stale()
 
     def sync_round_trip_state(self) -> None:
@@ -1290,8 +1357,13 @@ class BookerApp:
         조건 칸 잠금을 풀 때도 이 상태를 다시 맞춰야 하는데, 그때
         ``mark_stale()`` 까지 함께 부르면 방금 받은 결과를 "조건이
         바뀌었다" 며 그 자리에서 낡게 만듭니다.
+
+        :attr:`_query_locked` 도 봅니다 — :meth:`sync_transfer_state` 와 같은
+        이유입니다. 지금은 이 함수를 조회 중에 다시 부르는 자리가 없지만,
+        "잠겨 있으면 무조건 잠긴다" 는 것을 여기서도 지켜 두면 나중에 그런
+        자리가 생겨도 같은 버그가 되살아나지 않습니다.
         """
-        enabled = self.round_trip.get()
+        enabled = self.round_trip.get() and not self._query_locked
         entry, button, after, before = self.return_widgets
         entry.configure(state="normal" if enabled else "disabled")
         button.configure(state="normal" if enabled else "disabled")
@@ -1788,6 +1860,11 @@ class BookerApp:
         [조회] 와 [조회 중지] 는 뺍니다 — 잠그는 동안에도 중지는 눌러야
         하고, [조회] 자체는 ``search_button.configure`` 가 따로 관리합니다.
         """
+        # 다른 함수(:meth:`sync_transfer_state`, :meth:`sync_round_trip_state`)
+        # 가 이 값을 보고서야 옳게 잠그므로, 위젯을 만지기 **전에** 먼저
+        # 바꿔 둡니다 — 조회 스레드가 이 사이에 끼어들어(환승역 후보를
+        # 받아 와 그 두 함수를 다시 부릅니다) 옛 값을 보면 도로 풀립니다.
+        self._query_locked = locked
         exempt = {
             self.search_button,
             self.search_stop_button,
@@ -2466,9 +2543,17 @@ class BookerApp:
         self._in_thread(work, "korail-transfer-stations")
 
     def sync_transfer_state(self) -> None:
-        """환승 조건은 환승을 켰을 때만 만질 수 있습니다.
+        """환승 조건은 환승을 켰을 때만, 그리고 **조회가 도는 중이 아닐 때만**
+        만질 수 있습니다.
 
         고른 환승역의 구실도 여기서 갱신합니다 — 모드에 따라 뜻이 다릅니다.
+
+        조회 스레드가 그 구간의 환승역 후보를 스스로 받아 와 이 함수를 다시
+        부릅니다(:meth:`_refresh_transfer_stations` →
+        :meth:`_server_candidates_loaded`/:meth:`_transfer_stations_loaded`).
+        그 호출이 :attr:`_query_locked` 를 안 보면 "환승이 켜져 있으니까" 라는
+        이유만으로, 조회가 아직 도는 중인데도 이 칸이 도로 풀립니다 — 실제로
+        그랬습니다. 그래서 잠겨 있으면 무엇을 골랐든 무조건 잠급니다.
         """
         if not self.include_transfer.get():
             self.transfer_role.set("‘환승’을 켜야 환승 조건을 쓸 수 있습니다.")
@@ -2481,7 +2566,8 @@ class BookerApp:
                 "서버가 준 환승 여정 중 고른 역을 지나는 것만 봅니다"
                 " (고르지 않으면 전부)."
             )
-        state = "normal" if self.include_transfer.get() else "disabled"
+        unlocked = self.include_transfer.get() and not self._query_locked
+        state = "normal" if unlocked else "disabled"
         for widget in (
             self.server_radio,
             self.custom_radio,
@@ -2495,17 +2581,14 @@ class BookerApp:
         # 모드에서 없는 역을 넣으면 결과를 0편으로 만드는 필터가 될 뿐입니다.
         adding = (
             "normal"
-            if self.include_transfer.get()
-            and self.transfer_mode.get() == TRANSFER_CUSTOM
+            if unlocked and self.transfer_mode.get() == TRANSFER_CUSTOM
             else "disabled"
         )
         self.transfer_entry.configure(state=adding)
         self.transfer_add_button.configure(state=adding)
         # 빼기는 서버 추천 모드에서도 됩니다 — 그쪽에서 고른 역은 필터라,
         # 목록에서 지우는 것이 곧 필터에서 빼는 것입니다.
-        self.transfer_remove_button.configure(
-            state="normal" if self.include_transfer.get() else "disabled"
-        )
+        self.transfer_remove_button.configure(state="normal" if unlocked else "disabled")
         self.transfer_list.configure(state=state)
 
     def selected_transfer_stations(self) -> tuple[str, ...]:
