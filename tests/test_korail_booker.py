@@ -2663,6 +2663,33 @@ def test_the_batch_builders_icon_path_is_absolute():
     assert '--specpath "%CD%\\build"' in script
 
 
+def test_both_batch_files_reread_themselves_once_utf8_is_active():
+    """``chcp 65001`` 을 이 줄에서 걸어도, cmd 가 파일을 미리 읽어 둔 뭉치
+    안의 한글 섞인 줄은 이전 코드 페이지로 남습니다 — 실제로
+    "'습니다' 는 내부 또는 외부 명령이 아닙니다" 로 나타났습니다. 그래서
+    codepage 가 이미 바뀐 뒤에 새 cmd 로 자신을 다시 읽게 합니다.
+
+    먼저 BOM 을 붙여 봤지만 소용없었고(재현 로그로 확인) 오히려
+    ``@echo off`` 자체가 안 먹혀 매 줄이 프롬프트와 함께 그대로 찍혔습니다
+    — 그래서 BOM 은 없어야 합니다.
+    """
+    for name in ("실행 (Windows).bat", "exe 만들기 (Windows).bat"):
+        data = (REPO_ROOT / name).read_bytes()
+        assert not data.startswith(b"\xef\xbb\xbf"), name
+        text = data.decode("utf-8")
+        assert text.startswith("@echo off\n"), name
+        assert 'if /I "%~1"=="--utf8" goto reinvoked' in text, name
+        assert 'cmd /d /c ""%~f0" --utf8"' in text, name
+        assert "\n:reinvoked\nshift\n" in text, name
+        # errorlevel 은 괄호 블록 밖, goto 로 건너뛴 평범한 줄에서 읽습니다
+        # — 괄호 안이면 delayed expansion 없이는 블록이 펼쳐지는 시점의
+        # 값으로 굳습니다.
+        assert "( chcp 65001" not in text.replace("\n", " "), name
+        order = text.index('goto reinvoked')
+        assert order < text.index("exit /b %errorlevel%"), name
+        assert text.index("exit /b %errorlevel%") < text.index(":reinvoked"), name
+
+
 def test_the_local_exe_builder_stands_on_its_own():
     """더블클릭 하나로 끝나야 합니다 — 다른 것부터 누르라고 시키지 않습니다.
 

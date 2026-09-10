@@ -1,4 +1,4 @@
-﻿@echo off
+@echo off
 rem ============================================================================
 rem  코레일 예매 도우미 — Windows 실행기
 rem
@@ -13,8 +13,23 @@ rem    3. app\main.py 를 실행한다
 rem
 rem  창이 그냥 닫히면 안 됩니다. 무엇이 잘못됐는지 읽을 수 있어야 하므로
 rem  실패하는 모든 갈래가 pause 로 끝납니다.
-rem ============================================================================
+rem
+rem  --utf8 로 저 자신을 한 번 다시 부르는 것은 장식이 아닙니다. cmd 는 이
+rem  파일을 미리 한 뭉치 읽어 두는데, chcp 를 이 줄에서 걸어도 그 뭉치 안의
+rem  한글 섞인 줄들은 **이전 코드 페이지로 이미 읽힌 채로 남습니다.** 새
+rem  cmd 를 하나 더 열어 이 파일을 처음부터 다시 읽게 하면, 그때는 코드
+rem  페이지가 이미 65001 이라 처음부터 제대로 읽힙니다.
+rem
+rem  괄호 블록이 아니라 goto 로 짭니다. 괄호 안에서 cmd 의 종료 코드를 바로
+rem  읽으면, delayed expansion 없이는 그 값이 그 줄이 도는 시점이 아니라
+rem  괄호 블록이 펼쳐지는 시점의 것으로 굳어 진짜 종료 코드를 놓칩니다.
+if /I "%~1"=="--utf8" goto reinvoked
 chcp 65001 >nul
+cmd /d /c ""%~f0" --utf8"
+exit /b %errorlevel%
+
+:reinvoked
+shift
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
