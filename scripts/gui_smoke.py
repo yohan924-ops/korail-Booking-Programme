@@ -198,6 +198,10 @@ def main() -> int:
     check("비어 있으면 조회가 채운다",
           app.transfer_names() == ("대전", "김천구미"), app.transfer_names())
 
+    class _Click:
+        def __init__(self, x: int, y: int, widget: object) -> None:
+            self.x, self.y, self.widget = x, y, widget
+
     # -- 묶음과 담기 ---------------------------------------------------------
     app._show_journeys(results)
     root.update()
@@ -213,9 +217,46 @@ def main() -> int:
     app.tree.selection_set(parent_row)
     app.add_targets()
     root.update()
-    row = app.target_list.item(app.target_list.get_children()[0], "values")
+    # 예매 대상도 조회 결과처럼 1구간이 같으면 묶입니다.
+    target_top = app.target_list.get_children()
+    check("1구간이 같은 예매 대상은 한 부모 줄로 묶인다",
+          len(target_top) == 1
+          and app.target_list.item(target_top[0], "tags") == ("group",),
+          target_top)
+    target_children = app.target_list.get_children(target_top[0])
+    check("그 아래 후보가 다 들어 있다", len(target_children) == len(results),
+          len(target_children))
+    row = app.target_list.item(target_children[0], "values")
     check("상태 칸이 구간별 예약임을 말한다", "구간별" in row[0], row[0])
     check("환승 대기 칸이 촉박한 환승을 경고한다", "촉박" in row[2], row[2])
+
+    # 부모 줄을 고르면 그 아래 전부를 고른 것으로 칩니다.
+    app.target_list.selection_set(target_top[0])
+    check("예매 대상 부모를 고르면 그 아래 전부가 골라진다",
+          len(app.selected_indices()) == len(results), app.selected_indices())
+
+    # +/- 자리를 두 번 눌러도 빼지 않습니다 — 접고 펴는 기본 동작만 삽니다.
+    root.update()
+    box = app.target_list.bbox(target_top[0])
+    if box:
+        top_y, height = int(box[1]), int(box[3])
+        middle = top_y + height // 2
+        before = len(app.targets)
+        verdict = app._target_double_clicked(_Click(8, middle, app.target_list))
+        root.update()
+        check("예매 대상도 +/- 자리는 빼지 않는다(접고 펴기가 살아 있다)",
+              verdict is None and len(app.targets) == before, f"return={verdict!r}")
+
+        # 글자 자리를 두 번 누르면 묶음 부모 전체가 함께 빠집니다.
+        verdict = app._target_double_clicked(_Click(120, middle, app.target_list))
+        root.update()
+        check("글자 자리를 두 번 누르면 묶음 전체가 빠진다",
+              verdict == "break" and len(app.targets) == 0,
+              f"return={verdict!r} targets={len(app.targets)}")
+        # 되돌립니다 — 뒤의 확인들이 이 목록을 또 씁니다.
+        app.tree.selection_set(parent_row)
+        app.add_targets()
+        root.update()
 
     # -- 두 번 눌러도 접히지 않는가 ------------------------------------------
     app._show_journeys(results)
@@ -226,10 +267,6 @@ def main() -> int:
     assert box, "묶음 머리 줄이 화면에 보이지 않습니다"
     top, height = int(box[1]), int(box[3])
     middle = top + height // 2
-
-    class _Click:
-        def __init__(self, x: int, y: int, widget: object) -> None:
-            self.x, self.y, self.widget = x, y, widget
 
     was_open = bool(app.tree.item(head, "open"))
     verdict = app._result_double_clicked(_Click(120, middle, app.tree))
@@ -310,6 +347,49 @@ def main() -> int:
     check("설정 파일에는 쓰지 않는다",
           app.settings.telegram_token == "" and app.settings.telegram_chat_id == "")
     check("알림이 그 값을 쓴다", app._make_notifier() is not None)
+
+    # -- 잡은 예약: 구간별 홀드를 한 묶음으로 접는가 --------------------------
+    app.holds = [
+        Held(
+            label="", summary="[1구간] 서울 → 대전", pnr="P1001", fare="10000",
+            deadline=None, deadline_text="모름", kind="좌석 예약(1구간)",
+            group="batch-1", full_summary="서울 → 동대구",
+        ),
+        Held(
+            label="", summary="[2구간] 대전 → 동대구", pnr="P1002", fare="12000",
+            deadline=None, deadline_text="모름", kind="좌석 예약(2구간)",
+            group="batch-1", full_summary="서울 → 동대구",
+        ),
+        # 묶지 않는(단독) 홀드 — 다른 batch 의 홀드와 섞이면 안 됩니다.
+        Held(
+            label="", summary="부산 → 광주", pnr="P2001", fare="20000",
+            deadline=None, deadline_text="모름", group="batch-2",
+        ),
+    ]
+    app.sync_holds()
+    root.update()
+    hold_top = app.hold_tree.get_children()
+    check("같은 batch 의 구간별 홀드는 한 부모 줄로 묶인다",
+          len(hold_top) == 2, hold_top)
+    group_parent = next(
+        item for item in hold_top
+        if app.hold_tree.item(item, "tags") == ("group",)
+    )
+    group_children = app.hold_tree.get_children(group_parent)
+    check("그 부모 아래 두 구간이 다 들어 있다", len(group_children) == 2,
+          len(group_children))
+    check("묶지 않는 홀드는 최상위에 혼자 남는다",
+          len(hold_top) - 1 == 1
+          and any(
+              app.hold_tree.item(item, "values")[3] == "P2001" for item in hold_top
+          ))
+    check("부모 줄은 선택해도 취소 대상이 되지 않는다(PNR 칸이 비어 있다)",
+          app.hold_tree.item(group_parent, "values")[3] == "")
+    app.hold_tree.selection_set(group_parent)
+    check("부모를 고르고 취소를 찾으면 못 찾는다(안전하게 막힌다)",
+          app._selected_hold_index() is None)
+    app.holds = []
+    app.sync_holds()
 
     # -- 로그인 팝업: 감시 중 잠금, 하이픈 안내, [비로그인] 목록 초기화 ------
 

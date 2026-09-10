@@ -1707,7 +1707,7 @@ def test_the_target_table_carries_the_seat_columns_too():
     for name in ("일반실", "특실", "입석·자유석·대기"):
         assert f'("{name}"' in source, name
 
-    body = _ui_function("sync_target_list")
+    body = _ui_function("_insert_target_row")
     assert "target.journey.seat_text(KorailSeatClass.GENERAL)" in body
     assert "target.journey.seat_text(KorailSeatClass.SPECIAL)" in body
     assert "target.journey.extras()" in body
@@ -2016,20 +2016,21 @@ def test_every_booking_log_line_says_which_watch_it_came_from():
 
 
 def test_the_target_list_shows_what_is_running():
-    body = _ui_function("sync_target_list")
+    row = _ui_function("_insert_target_row")
+    sync = _ui_function("sync_target_list")
     state = _ui_function("_target_state")
     assert "▶ 감시 중" in state and "대기" in state
     # 도는 것과 안 도는 것을 색으로도 가릅니다.
-    assert "'watching' if watch else 'idle'" in body
+    assert "'watching' if watch else 'idle'" in row
     # 다시 그린 뒤에도 고른 줄은 그대로 있어야 합니다.
-    assert "self.target_list.selection_add(item)" in body
+    assert "self.target_list.selection_add(item)" in sync
 
 
 def test_each_target_row_shows_its_own_interval_and_countdown():
     """여럿을 돌리면 묶음마다 주기와 남은 시간이 다릅니다."""
-    body = _ui_function("sync_target_list")
+    body = _ui_function("_insert_target_row")
     assert "watch.options.poll_interval_s" in body
-    assert "watch.remaining(now)" in body
+    assert "watch.remaining(time.monotonic())" in body
 
     source = _ui_source()
     assert '("조회 주기", 80, "center")' in source
@@ -3093,7 +3094,9 @@ def test_the_watcher_buys_a_custom_combination_one_leg_at_a_time():
         [_target(journey, _request(include_direct=False, include_transfer=True))],
         BookingOptions(poll_interval_s=10.0, live=True),
         log=lambda message: None,
-        on_hold=lambda label, summary, kind, direction, hold: made.append(kind),
+        on_hold=lambda label, summary, kind, direction, hold, group, full: made.append(
+            kind
+        ),
     )
 
     result = booker.run(threading.Event())
@@ -3579,6 +3582,126 @@ def test_the_leg_hold_label_names_which_leg_it_is():
     # 부분 실패는 문구가 갈립니다 — "구간만" 은 나머지를 못 잡았다는 뜻입니다.
     assert journey.leg_hold_label(0, partial=True).startswith("[1구간만] ")
     assert "원래 여정:" in journey.leg_hold_label(0, partial=True)
+
+
+def test_held_carries_a_group_and_a_full_summary():
+    """구간별 홀드를 묶어 보여 주는 데 필요한 두 값 — 기본은 안 묶입니다."""
+    held = H.Held(
+        label="", summary="[1구간] 서울 → 대전", pnr="P1", fare="10000",
+        deadline=None, deadline_text="모름",
+    )
+    assert held.group == ""
+    assert held.full_summary == ""
+
+    grouped = H.Held(
+        label="", summary="[1구간] 서울 → 대전", pnr="P1", fare="10000",
+        deadline=None, deadline_text="모름", group="abc123", full_summary="서울 → 동대구",
+    )
+    assert grouped.group == "abc123"
+    assert grouped.full_summary == "서울 → 동대구"
+
+
+def test_a_batch_id_ties_split_holds_together():
+    """구간마다 홀드가 따로 나와도, 같은 시도에서 나왔다는 표는 같이 갑니다.
+
+    방향만으로는 안 됩니다 — 기한 지난 옛 홀드가 목록에 남은 채 같은 방향에
+    새로 예약하면 서로 다른 시도인데 방향이 같아 뒤섞입니다. 그래서 매
+    시도마다 새 ``uuid`` 를 만들어 그 시도의 홀드 전부에 같이 넘깁니다.
+    """
+    booker = (APP_DIR / "korail_booker" / "autobook.py").read_text(encoding="utf-8")
+    tree = ast.parse(booker)
+    functions = {
+        node.name: ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+    }
+    assert "import uuid" in booker
+    for name in ("_settle", "_settle_partial"):
+        body = functions[name]
+        assert "uuid.uuid4()" in body, name
+        # 콜백에 batch 와 (전체) journey.summary() 를 함께 넘깁니다.
+        assert "batch" in body, name
+        assert "journey.summary()" in body, name
+
+    # HoldWatcher 의 모양 자체가 이 둘을 요구합니다 — 콜백을 나중에 새로
+    # 심어도 이 계약을 잊을 수 없게.
+    assert (
+        "HoldWatcher = Callable[\n"
+        "    [str, str, str, tuple[str, str, str], ReservationHoldResponse, str, str], None\n"
+        "]" in booker
+    )
+
+
+def test_reserve_now_partial_also_names_the_leg_not_the_whole_journey():
+    """[바로 예약] 이 반만 잡혔을 때도, 여정 전체가 아니라 그 구간이어야
+    합니다 — ``_settle_partial`` 에서 고친 것과 같은 버그가 여기 따로
+    남아 있었습니다(같은 문구를 두 번 써서 생긴 것이라 한쪽만 고치고
+    잊기 쉬웠습니다)."""
+    body = _ui_function("_reserve_now_partial")
+    assert "target.journey.leg_hold_label(number - 1, partial=True)" in body
+    assert "batch, target.journey.summary())" in body  # full_summary 로 넘어갑니다
+
+
+def test_reserve_now_functions_also_generate_a_batch_id():
+    """[바로 예약] 도 자동예매와 같은 방식으로 묶습니다."""
+    for name in ("_reserve_now_done", "_reserve_now_partial"):
+        body = _ui_function(name)
+        assert "uuid.uuid4()" in body, name
+        assert "batch" in body, name
+
+
+def test_sync_holds_groups_holds_that_share_a_batch():
+    """묶는 열쇠는 ``group`` 입니다. 비어 있으면(``""``) 절대 묶지 않고
+    저마다 유일한 열쇠를 받습니다 — 지어낸 값으로 엉뚱하게 묶기보다는
+    안 묶는 쪽이 안전합니다."""
+    body = _ui_function("sync_holds")
+    assert "held.group if held.group else" in body
+    assert "self._insert_hold_row(indices[0], parent='')" in body
+    assert "self._insert_hold_group(indices)" in body
+
+
+def test_hold_group_parent_row_cannot_be_selected_for_cancel():
+    """부모 줄은 PNR 하나를 가리키지 않으므로 취소 대상이 될 수 없습니다.
+
+    ``_hold_items`` 에 부모를 넣지 않으면, 부모를 고르고 [선택 취소] 를
+    눌러도 :meth:`_selected_hold_index` 가 찾지 못해 "고르세요" 로 막힙니다
+    — 어느 PNR 을 취소하는지 헷갈리면 안 되는 일이기 때문입니다.
+    """
+    group_fn = _ui_function("_insert_hold_group")
+    assert "self._hold_items[parent]" not in group_fn
+    row_fn = _ui_function("_insert_hold_row")
+    assert "self._hold_items[index] = item" in row_fn
+
+
+def test_sync_target_list_groups_same_first_leg_custom_transfers():
+    """1구간이 같은 직접 조합은 조회 결과와 같은 모양으로 접습니다.
+
+    직통·서버 추천 환승은 묶지 않습니다 — 조회 결과를 묶을 때(:func:`journeys.
+    group_by_first_leg`)와 같은 이유이고, 라벨(가는 편/오는 편)이 다르면
+    다른 묶음입니다.
+    """
+    body = _ui_function("sync_target_list")
+    assert "JourneySource.CUSTOM_TRANSFER" in body
+    assert "first_leg_key(journey)" in body
+    assert "target.label" in body
+    assert "self._insert_target_row(indices[0], parent='')" in body
+    assert "self._insert_target_group(indices)" in body
+
+
+def test_selected_indices_expands_a_target_group_parent():
+    """묶음의 부모 줄을 고르면 그 아래 후보 전부를 고른 것으로 칩니다 —
+    [빼기]·[고른 것만 시작]·[고른 것만 중지] 모두 이 함수를 거칩니다."""
+    body = _ui_function("selected_indices")
+    assert "self._target_group_children.get(item)" in body
+
+
+def test_target_double_click_also_respects_the_expander():
+    """예매 대상 표도 이제 접히므로, 조회 결과와 같은 방비가 필요합니다 —
+    +/- 를 두 번 눌러도 빼지 않고, 접고 펴는 기본 동작을 그대로 둡니다."""
+    body = _ui_function("_target_double_clicked")
+    assert body.index("self._on_expander(widget, event)") < body.index(
+        "self.remove_targets()"
+    )
 
 
 def test_a_stale_row_number_never_indexes_past_the_list():

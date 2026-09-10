@@ -18,6 +18,7 @@ import queue
 import threading
 import time
 import tkinter as tk
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime
@@ -57,6 +58,7 @@ from .journeys import (
     JourneySource,
     SeatPreference,
     books_as_one_reservation,
+    first_leg_key,
     format_clock,
     format_duration,
     group_by_first_leg,
@@ -507,8 +509,17 @@ class BookerApp:
         #: 잡아 둔 예약들. 결제 기한 카운트다운이 이것을 봅니다.
         self.holds: list[Held] = []
         self._hold_items: dict[int, str] = {}
+        #: 잡은 예약 표에서 묶은 부모 줄의 항목 id → 그 아래 번호들.
+        #: 예매 대상 표의 :attr:`_target_group_children` 과 같은 구실입니다.
+        self._hold_group_children: dict[str, list[int]] = {}
         #: 예매 대상 표의 줄 번호 → 항목 id.
         self._target_items: dict[int, str] = {}
+        #: 예매 대상 표에서 묶은 부모 줄의 항목 id → 그 아래 번호들.
+        #:
+        #: 조회 결과처럼 1구간이 같은 직접 조합을 접습니다 — :attr:`_group_children`
+        #: 과 같은 구실이지만, 이 표는 트리가 하나뿐이라 ``(트리, 항목)`` 쌍이
+        #: 필요 없습니다.
+        self._target_group_children: dict[str, list[int]] = {}
         #: 붙인 칸들 — (담은 PanedWindow, 묶음, 지정된 최소 높이 또는 None).
         self._panes: list[tuple[tk.PanedWindow, ttk.Widget, int | None]] = []
         #: 각 칸의 최소 높이. 본문 높이를 여기서 더해 냅니다.
@@ -1408,10 +1419,14 @@ class BookerApp:
         self.target_list = ttk.Treeview(
             frame,
             columns=TARGET_COLUMNS,
-            show="headings",
+            # "tree" 도 켭니다 — 1구간이 같은 후보를 묶으면(:meth:`sync_target_list`)
+            # 그 부모 줄을 접고 펼 +/- 표시가 이 칸에서 나옵니다. 조회 결과와
+            # 같은 자리(``Treeitem.indicator``)입니다.
+            show="tree headings",
             selectmode="extended",
             height=4,
         )
+        self.target_list.column("#0", width=20, stretch=False)
         for name, width, anchor in TARGET_LAYOUT:
             self.target_list.heading(name, text=name)
             self.target_list.column(
@@ -1431,6 +1446,7 @@ class BookerApp:
         self.target_list.tag_configure("watching", foreground="#1a7f37")
         self.target_list.tag_configure("idle", foreground="#666666")
         self.target_list.tag_configure("tight", foreground="#d1242f")
+        self.target_list.tag_configure("group", foreground="#1f6feb")
         buttons = ttk.Frame(frame)
         buttons.grid(row=0, column=2, sticky="n", padx=6, pady=4)
         # 예약은 **담은 것** 중에서 합니다. 조회 결과에 두면 담기 전 줄까지
@@ -1645,6 +1661,9 @@ class BookerApp:
             self._write_log("바로 예약: 미리보기라 아무것도 보내지 않았습니다.", "warn")
             return
         split = len(holds) > 1
+        # 구간마다 홀드가 따로 나와도 이번 한 번의 [바로 예약] 시도에서
+        # 나온 것임을 표시해야 화면이 묶어 보여 줄 수 있습니다.
+        batch = uuid.uuid4().hex[:12]
         lines = []
         for number, result in enumerate(holds, start=1):
             kind = f"좌석 예약({number}구간)" if split else "좌석 예약"
@@ -1657,7 +1676,13 @@ class BookerApp:
                 else target.journey.summary()
             )
             held = self._held_from(
-                target.label, summary, kind, result, target.direction
+                target.label,
+                summary,
+                kind,
+                result,
+                target.direction,
+                batch,
+                target.journey.summary(),
             )
             self.remember_hold(held)
             self._write_log(
@@ -1707,13 +1732,19 @@ class BookerApp:
     def _reserve_now_partial(self, target: Target, exc: PartialTransferError) -> None:
         """앞 구간만 잡히고 뒤 구간에서 막혔습니다. 크게 알립니다."""
         holds = [h for h in exc.held if isinstance(h, ReservationHoldResponse)]
+        # 한 번의 [바로 예약] 시도입니다 — 같은 batch 로 묶습니다.
+        batch = uuid.uuid4().hex[:12]
         for number, hold in enumerate(holds, start=1):
             held = self._held_from(
                 target.label,
-                target.journey.summary(),
+                # **여정 전체가 아니라 그 구간**입니다. summary() 를 그대로
+                # 쓰면 앞 구간만 잡혔는데도 전체를 산 것처럼 적힙니다.
+                target.journey.leg_hold_label(number - 1, partial=True),
                 f"좌석 예약({number}구간)",
                 hold,
                 target.direction,
+                batch,
+                target.journey.summary(),
             )
             self.remember_hold(held)
         pnrs = ", ".join(h.pnr_no or "?" for h in holds) or "(없음)"
@@ -1841,10 +1872,13 @@ class BookerApp:
         self.hold_tree = ttk.Treeview(
             frame,
             columns=HOLD_COLUMNS,
-            show="headings",
+            # "tree" 도 켭니다 — 구간별 홀드를 묶으면(:meth:`sync_holds`) 그
+            # 부모 줄을 접고 펼 +/- 표시가 이 칸에서 나옵니다.
+            show="tree headings",
             selectmode="browse",
             height=3,
         )
+        self.hold_tree.column("#0", width=20, stretch=False)
         for name, width, anchor in HOLD_LAYOUT:
             self.hold_tree.heading(name, text=name)
             self.hold_tree.column(
@@ -1861,6 +1895,7 @@ class BookerApp:
         # 착각하지 않도록 남기되, 살아 있는 것과 구별합니다.
         self.hold_tree.tag_configure("urgent", foreground="#b3261e")
         self.hold_tree.tag_configure("expired", foreground="#8a8a8a")
+        self.hold_tree.tag_configure("group", foreground="#1f6feb")
         buttons = ttk.Frame(frame)
         buttons.grid(row=0, column=2, sticky="n", padx=6, pady=4)
         # 이 프로그램이 취소 요청을 만드는 **유일한** 자리입니다. 자동예매는
@@ -1914,6 +1949,8 @@ class BookerApp:
         kind: str,
         hold: ReservationHoldResponse,
         direction: tuple[str, str, str] = ("", "", ""),
+        group: str = "",
+        full_summary: str = "",
     ) -> Held:
         """서버 응답에서 화면이 쓸 것만 뽑습니다. 없는 값은 지어내지 않습니다."""
         return Held(
@@ -1931,6 +1968,8 @@ class BookerApp:
             # (지금 코드 경로로는 없지만) 취소 버튼만 조용히 못 쓰게 둡니다 —
             # 표시나 카운트다운은 그것과 무관하게 그대로 돕니다.
             hold_response=hold if type(hold) is ReservationHoldResponse else None,
+            group=group,
+            full_summary=full_summary or summary,
         )
 
     def on_hold_made(
@@ -1940,9 +1979,11 @@ class BookerApp:
         kind: str,
         direction: tuple[str, str, str],
         hold: ReservationHoldResponse,
+        group: str = "",
+        full_summary: str = "",
     ) -> None:
         """자동예매 스레드에서 불립니다 — 큐를 거쳐 화면에 올립니다."""
-        held = self._held_from(label, summary, kind, hold, direction)
+        held = self._held_from(label, summary, kind, hold, direction, group, full_summary)
         self.events.put(lambda: self.remember_hold(held))
 
     def remember_hold(self, held: Held) -> None:
@@ -1959,15 +2000,70 @@ class BookerApp:
         취소·지우기 둘 다 목록 가운데를 뺄 수 있습니다. 줄 하나만 지우고
         번호를 밀어 쓰면 어긋나기 쉬우므로, :meth:`sync_target_list` 와
         같은 방식으로 **통째로 다시 그립니다.**
+
+        구간별로 따로 산 홀드는 조회 결과·예매 대상과 같은 모양으로 한 부모
+        줄 아래에 접습니다 — :attr:`~korail_booker.holds.Held.group` 이 같은
+        것끼리입니다. 묶지 않는(``group`` 이 빈) 홀드는 그대로 혼자 한 줄입니다.
         """
         self.hold_tree.delete(*self.hold_tree.get_children())
         self._hold_items = {}
-        now = now_kst()
+        self._hold_group_children = {}
+
+        order: list[str] = []
+        buckets: dict[str, list[int]] = {}
         for index, held in enumerate(self.holds):
-            item = self.hold_tree.insert(
-                "", "end", values=held.row(now), tags=(held.tag(now),)
-            )
-            self._hold_items[index] = item
+            # 빈 group 은 절대 묶지 않습니다 — 저마다 유일한 열쇠를 줘서
+            # 서로 다른 "묶지 않는" 홀드끼리 우연히 섞이지 않게 합니다.
+            key = held.group if held.group else f"\0solo{index}"
+            if key not in buckets:
+                buckets[key] = []
+                order.append(key)
+            buckets[key].append(index)
+
+        for key in order:
+            indices = buckets[key]
+            if len(indices) == 1:
+                self._insert_hold_row(indices[0], parent="")
+            else:
+                self._insert_hold_group(indices)
+
+    def _insert_hold_row(self, index: int, *, parent: str) -> None:
+        """잡은 예약 한 줄. 묶음 아래(자식)든 최상위(단독)든 같은 모양입니다."""
+        held = self.holds[index]
+        now = now_kst()
+        item = self.hold_tree.insert(
+            parent, "end", values=held.row(now), tags=(held.tag(now),)
+        )
+        self._hold_items[index] = item
+
+    def _insert_hold_group(self, indices: list[int]) -> None:
+        """구간별로 따로 산 홀드 여럿을 한 부모 줄 아래에 접습니다.
+
+        부모 줄은 PNR 하나를 가리키지 않으므로 :attr:`_hold_items` 에 넣지
+        않습니다 — 골라도 :meth:`_selected_hold_index` 가 찾지 못해 [선택
+        취소] 가 "고르세요" 로 막습니다. 취소는 구간(자식 줄)을 직접 골라야
+        합니다 — 어느 PNR 을 취소하는지 헷갈리면 안 되는 일이기 때문입니다.
+        """
+        first = self.holds[indices[0]]
+        parent = self.hold_tree.insert(
+            "",
+            "end",
+            values=(
+                first.label or "편도",
+                "구간별 예약",
+                f"{first.full_summary or first.summary} · 구간 {len(indices)}개로 "
+                "나누어 샀습니다 — 결제도 구간마다 따로입니다",
+                "",
+                "",
+                "",
+                "",
+            ),
+            tags=("group",),
+            open=True,
+        )
+        self._hold_group_children[parent] = list(indices)
+        for index in indices:
+            self._insert_hold_row(index, parent=parent)
 
     def _selected_hold_index(self) -> int | None:
         """잡은 예약 표에서 고른 한 줄의 번호. 여러 개는 고를 수 없습니다."""
@@ -3428,15 +3524,19 @@ class BookerApp:
         )
 
     def _target_double_clicked(self, event: tk.Event) -> str | None:
-        """두 번 누르면 뺍니다. 여기도 기본 동작은 막습니다.
-
-        이 표는 지금 평평하지만(자식 줄이 없습니다) 막아 두는 값이 있습니다 —
-        나중에 줄을 접게 만들면 같은 일이 조용히 되살아납니다.
+        """두 번 누르면 뺍니다. **접거나 펴지는 않습니다** — 조회 결과와 같은
+        이유입니다: 이 표도 이제 1구간이 같은 후보를 묶어 접습니다. 묶음의
+        부모 줄을 두 번 누르면 그 아래 후보 전부가 함께 빠집니다
+        (:meth:`selected_indices` 가 부모 선택을 자식들로 풀어 줍니다).
         """
-        item = self.target_list.identify_row(event.y)
+        widget = self.target_list
+        if self._on_expander(widget, event):
+            # +/- 를 누른 것입니다. 접고 펴는 일은 그대로 두고, 빼지 않습니다.
+            return None
+        item = widget.identify_row(event.y)
         if not item:
             return None
-        self.target_list.selection_set(item)
+        widget.selection_set(item)
         self.remove_targets()
         return "break"
 
@@ -3580,7 +3680,12 @@ class BookerApp:
         return None
 
     def sync_target_list(self) -> None:
-        """표를 다시 그립니다 — 상태·주기·남은 감시 시간까지."""
+        """표를 다시 그립니다 — 상태·주기·남은 감시 시간까지.
+
+        1구간이 같은 직접 조합은 조회 결과와 같은 모양으로 접습니다 — 2구간만
+        다른 후보 여럿을 평평하게 늘어놓으면, 조회 때는 한 줄이던 것이 여기서만
+        여러 줄로 흩어져 같은 묶음인지 알아보기 어려워집니다.
+        """
         # **줄 번호로** 기억합니다. 항목 id 는 다시 그릴 때마다 새로 매겨지므로,
         # 지우기 전의 id 를 지운 뒤의 목록에서 찾으면 하나도 맞지 않습니다 —
         # 그래서 다시 그릴 때마다 선택이 통째로 사라졌고, [고른 것만 시작]·
@@ -3593,30 +3698,32 @@ class BookerApp:
         }
         self.target_list.delete(*self.target_list.get_children())
         self._target_items = {}
-        now = time.monotonic()
+        self._target_group_children = {}
+
+        order: list[tuple[object, ...]] = []
+        buckets: dict[tuple[object, ...], list[int]] = {}
         for index, target in enumerate(self.targets):
-            watch = self._watch_of(target)
-            item = self.target_list.insert(
-                "",
-                "end",
-                values=(
-                    self._target_state(target, watch),
-                    target.journey.summary(),
-                    self._target_transfer(target),
-                    target.journey.seat_text(KorailSeatClass.GENERAL),
-                    target.journey.seat_text(KorailSeatClass.SPECIAL),
-                    " · ".join(target.journey.extras()) or "-",
-                    f"{watch.options.poll_interval_s:g}초" if watch else "-",
-                    watch.remaining(now) if watch else "-",
-                ),
-                # 촉박한 환승은 도는지 안 도는지보다 먼저 보여야 합니다.
-                tags=(
-                    "tight"
-                    if is_tight_transfer(target.journey)
-                    else ("watching" if watch else "idle"),
-                ),
+            journey = target.journey
+            # 직통·서버 추천 환승은 묶지 않습니다 — 조회 결과를 묶을 때와
+            # 같은 이유입니다(값어치가 있는 것은 경우의 수가 곱으로 늘어나는
+            # 직접 조합뿐입니다). 라벨(가는 편/오는 편)이 다르면 다른 묶음입니다.
+            key: tuple[object, ...] = (
+                ("solo", index)
+                if journey.source is not JourneySource.CUSTOM_TRANSFER
+                else ("group", target.label, *first_leg_key(journey))
             )
-            self._target_items[index] = item
+            if key not in buckets:
+                buckets[key] = []
+                order.append(key)
+            buckets[key].append(index)
+
+        for key in order:
+            indices = buckets[key]
+            if len(indices) == 1:
+                self._insert_target_row(indices[0], parent="")
+            else:
+                self._insert_target_group(indices)
+
         for index, target in enumerate(self.targets):
             if (target.journey.key(), target.label) not in chosen:
                 continue
@@ -3624,6 +3731,66 @@ class BookerApp:
             if item is not None:
                 self.target_list.selection_add(item)
         self.stop_button.configure(state="normal" if self.any_running() else "disabled")
+
+    def _insert_target_row(self, index: int, *, parent: str) -> None:
+        """예매 대상 한 줄. 묶음 아래(자식)든 최상위(단독)든 같은 모양입니다."""
+        target = self.targets[index]
+        watch = self._watch_of(target)
+        item = self.target_list.insert(
+            parent,
+            "end",
+            values=(
+                self._target_state(target, watch),
+                target.journey.summary(),
+                self._target_transfer(target),
+                target.journey.seat_text(KorailSeatClass.GENERAL),
+                target.journey.seat_text(KorailSeatClass.SPECIAL),
+                " · ".join(target.journey.extras()) or "-",
+                f"{watch.options.poll_interval_s:g}초" if watch else "-",
+                watch.remaining(time.monotonic()) if watch else "-",
+            ),
+            # 촉박한 환승은 도는지 안 도는지보다 먼저 보여야 합니다.
+            tags=(
+                "tight"
+                if is_tight_transfer(target.journey)
+                else ("watching" if watch else "idle"),
+            ),
+        )
+        self._target_items[index] = item
+
+    def _insert_target_group(self, indices: list[int]) -> None:
+        """1구간이 같은 예매 대상 여럿을 한 부모 줄 아래에 접습니다.
+
+        부모 줄을 고르면(:meth:`selected_indices`) 그 아래 후보 전부를 고른
+        것으로 칩니다 — [빼기]·[고른 것만 시작]·[고른 것만 중지] 가 조회
+        결과의 묶음 부모와 같은 뜻으로 동작하게 하려는 것입니다.
+        """
+        first = self.targets[indices[0]].journey
+        leg = first.first
+        parent = self.target_list.insert(
+            "",
+            "end",
+            values=(
+                "1구간 고정",
+                one_line(
+                    f"[1구간] {(leg.train_class_name or '').strip()} "
+                    f"{(leg.train_no or '').strip().lstrip('0')} "
+                    f"{leg.departure_station_name}→{leg.arrival_station_name} · "
+                    f"이어지는 후보 {len(indices)}개"
+                ),
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+            ),
+            tags=("group",),
+            open=True,
+        )
+        self._target_group_children[parent] = list(indices)
+        for index in indices:
+            self._insert_target_row(index, parent=parent)
 
     def _target_state(self, target: Target, watch: Watch | None) -> str:
         """상태 칸. 도는지와 **어떻게 사는지**를 함께 적습니다.
@@ -3651,16 +3818,24 @@ class BookerApp:
     def selected_indices(self) -> list[int]:
         """표에서 고른 줄의 번호. Treeview 는 항목 id 로 말하므로 되짚습니다.
 
+        **묶음의 부모 줄을 골랐으면 그 아래 후보 전부**를 고른 것으로 칩니다 —
+        조회 결과에서 묶음 머리를 고르는 것과 같은 뜻입니다.
+
         **지금 목록에 있는 번호만** 돌려줍니다. 이 짝(``_target_items``)은 표를
         다시 그릴 때 갱신되는데, 목록이 줄어든 직후에는 아직 옛 번호를 들고
         있습니다 — 그대로 쓰면 ``self.targets[index]`` 가 범위를 벗어납니다.
         """
         by_item = {item: index for index, item in self._target_items.items()}
-        return sorted(
-            index
-            for item in self.target_list.selection()
-            if (index := by_item.get(item)) is not None and index < len(self.targets)
-        )
+        chosen: set[int] = set()
+        for item in self.target_list.selection():
+            members = self._target_group_children.get(item)
+            if members:
+                chosen.update(i for i in members if i < len(self.targets))
+                continue
+            index = by_item.get(item)
+            if index is not None and index < len(self.targets):
+                chosen.add(index)
+        return sorted(chosen)
 
     def on_start_selected(self) -> None:
         self.on_start(selected_only=True)

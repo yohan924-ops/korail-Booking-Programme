@@ -136,6 +136,20 @@ class Held:
     #: 시험하는 데는 안 쓰이므로 ``None`` 이어도 이 조각의 나머지는 그대로
     #: 돌아갑니다 — 취소 버튼만 못 씁니다.
     hold_response: ReservationHoldResponse | None = None
+    #: 같은 예약 시도에서 나온 홀드끼리 묶는 값. 구간별로 따로 사면 홀드가
+    #: 구간 수만큼 나오는데, 그것들을 화면에서 한 묶음으로 접으려면 "어느
+    #: 시도에서 나왔는지" 가 필요합니다. 방향(:attr:`direction`)만으로는
+    #: 안 됩니다 — 같은 방향에 기한이 지난 옛 홀드가 남은 채 새로 예약하면
+    #: 서로 다른 시도인데 방향이 같아져 잘못 묶입니다. 비어 있으면(``""``)
+    #: 묶지 않고 혼자 한 줄입니다 — 지어낸 값으로 엉뚱하게 묶기보다는
+    #: 안 묶는 쪽이 안전합니다.
+    group: str = ""
+    #: 구간별로 나뉘어도 **원래 여정 전체**를 가리키는 한 줄
+    #: (``Journey.summary()``). :attr:`summary` 는 구간마다 다르지만
+    #: (:meth:`~korail_booker.journeys.Journey.leg_hold_label`), 묶음의
+    #: 머리글에는 "이 묶음이 원래 어느 여정이었는지" 가 필요합니다. 비어
+    #: 있으면 :attr:`summary` 를 대신 씁니다.
+    full_summary: str = ""
 
     def row(self, now: datetime) -> tuple[str, ...]:
         """표 한 줄. 남은 시간은 부를 때마다 다시 셉니다."""

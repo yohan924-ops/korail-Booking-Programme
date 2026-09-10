@@ -18,6 +18,7 @@ from __future__ import annotations
 import random
 import threading
 import time
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -65,12 +66,15 @@ MAX_CONSECUTIVE_TRANSPORT_FAILURES = 5
 
 Logger = Callable[[str], None]
 Notifier = Callable[[str], None]
-#: 홀드 하나가 잡힐 때마다 불립니다 — (구분, 여정 한 줄, 종류, 방향, 응답).
+#: 홀드 하나가 잡힐 때마다 불립니다 — (구분, 여정 한 줄, 종류, 방향, 응답,
+#: 묶음 값, 원래 여정 전체 한 줄).
 #:
 #: 방향까지 넘기는 것은 화면이 "이 방향은 이미 잡았다" 를 판단해야 하기
 #: 때문입니다. 여정 한 줄로는 목록에서 그 줄을 뺀 뒤 판단할 길이 없습니다.
+#: 묶음 값은 구간별로 따로 산 홀드 여럿을 화면이 한 시도로 묶어 보여 주기
+#: 위한 것입니다 — 방향만으로는 기한 지난 옛 홀드와 새 홀드가 뒤섞입니다.
 HoldWatcher = Callable[
-    [str, str, str, tuple[str, str, str], ReservationHoldResponse], None
+    [str, str, str, tuple[str, str, str], ReservationHoldResponse, str, str], None
 ]
 
 
@@ -708,6 +712,8 @@ class AutoBooker:
         """
         held = tuple(h for h in exc.held if isinstance(h, ReservationHoldResponse))
         self._settled[target.direction] = held
+        # 반만 잡혀도 한 번의 시도입니다 — 같은 batch 로 묶습니다.
+        batch = uuid.uuid4().hex[:12]
         for number, hold in enumerate(held, start=1):
             if self._on_hold is not None:
                 # **여정 전체가 아니라 그 구간**입니다. 여정 한 줄로 적으면
@@ -719,6 +725,8 @@ class AutoBooker:
                     f"좌석 예약({number}구간)",
                     target.direction,
                     hold,
+                    batch,
+                    journey.summary(),
                 )
         pnrs = ", ".join((hold.pnr_no or "?") for hold in held) or "(없음)"
         self.announce(
@@ -847,6 +855,11 @@ class AutoBooker:
             self.say(f"{kind} 응답에 예약이 없습니다 — 코레일 앱에서 확인하세요")
             return self._finish(kind)
         split = len(holds) > 1
+        # 구간마다 홀드가 따로 나와도 **이번 한 번의 예약 시도**에서 나온
+        # 것임을 화면이 알아야 묶어 보여 줄 수 있습니다. 방향만으로는 안
+        # 됩니다 — 기한 지난 옛 홀드가 목록에 남은 채 같은 방향에 새로
+        # 예약하면 서로 다른 시도인데 방향이 같아져 뒤섞입니다.
+        batch = uuid.uuid4().hex[:12]
         for number, hold in enumerate(holds, start=1):
             # 구간마다 따로 샀으면 '여정' 칸도 '종류' 칸도 구간별로 다르게
             # 적습니다. 여정 한 줄을 그대로 두 번 쓰면 PNR 도 운임도 다른데
@@ -857,7 +870,13 @@ class AutoBooker:
             )
             if self._on_hold is not None:
                 self._on_hold(
-                    target.label, hold_summary, hold_kind, target.direction, hold
+                    target.label,
+                    hold_summary,
+                    hold_kind,
+                    target.direction,
+                    hold,
+                    batch,
+                    journey.summary(),
                 )
             where = f" [{number}구간]" if split else ""
             self.announce(
