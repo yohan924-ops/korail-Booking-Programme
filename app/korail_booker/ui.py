@@ -2020,6 +2020,60 @@ class BookerApp:
         """환승 체크나 모드가 바뀌었을 때. 상태를 맞추고 결과를 낡음으로."""
         self.sync_transfer_state()
         self.mark_stale()
+        self._offer_transfer_candidates()
+
+    def _reset_transfer_load_button(self) -> None:
+        """[후보 갱신] 을 지금 상태에 맞춰 되돌립니다."""
+        self.transfer_load_button.configure(
+            state="normal" if self.include_transfer.get() else "disabled"
+        )
+
+    def _offer_transfer_candidates(self) -> None:
+        """모드를 바꿨을 때 서버 후보를 **비어 있으면만** 채웁니다.
+
+        두 모드에서 이 목록의 뜻이 다릅니다 — 서버 추천에서는 결과를 거르는
+        필터, 직접 지정에서는 조회할 역 그 자체. 그래서 모드를 바꾸고 나면
+        대개 후보가 필요합니다.
+
+        그렇다고 **덮지는 않습니다.** 이 저장소가 이미 정한 규칙이 있습니다:
+        [조회] 는 목록이 비어 있을 때만 채우고, [후보 갱신] 은 더하기만 하며,
+        지우는 것은 [빼기]·[비우기] 뿐입니다. 모드 전환이 그 규칙을 뒤로
+        돌아 손으로 만든 목록을 지우면, 빼 둔 역이 조용히 되살아납니다 —
+        고쳐 놓은 버그가 새 경로로 되살아나는 것입니다.
+
+        구간이 비어 있거나 불러오다 실패해도 조용히 넘어갑니다. 모드를 바꾸는
+        일이 네트워크 때문에 막히면 안 됩니다.
+        """
+        if not self.include_transfer.get():
+            return
+        if self.transfer_names():
+            # 사람이 만든 목록이 있습니다. 표시만 다시 그리고 길을 알려 줍니다.
+            self._redraw_transfer_marks()
+            self._write_log(
+                "환승 모드를 바꿨습니다 — 환승역 목록은 그대로 둡니다. "
+                "서버 후보를 더하려면 [후보 갱신], 지우려면 [빼기]·[비우기]."
+            )
+            return
+        departure = self.departure.get().strip()
+        arrival = self.arrival.get().strip()
+        if not departure or not arrival:
+            return
+        self.transfer_load_button.configure(state="disabled")
+
+        def work() -> None:
+            try:
+                client = self._ensure_client()
+                names = transfer_station_candidates(client, departure, arrival)
+            except (KorailApiError, ValueError) as exc:
+                # 곁가지입니다. 모드 전환은 이미 끝났고, 목록은 손으로도
+                # 채울 수 있습니다.
+                self.log(f"환승역 후보를 불러오지 못했습니다: {exc}")
+                self.events.put(self._reset_transfer_load_button)
+                return
+            self._transfer_route = (departure, arrival)
+            self.events.put(lambda: self._transfer_stations_loaded(names))
+
+        self._in_thread(work, "korail-transfer-stations")
 
     def sync_transfer_state(self) -> None:
         """환승 조건은 환승을 켰을 때만 만질 수 있습니다.
@@ -2900,11 +2954,27 @@ class BookerApp:
 
     def selected_results(self) -> list[Target]:
         """두 표에서 고른 것들. 구간 행을 골랐으면 그 여정을 씁니다."""
+        chosen, _groups = self._selected_results_with_groups()
+        return chosen
+
+    def _selected_results_with_groups(
+        self,
+    ) -> tuple[list[Target], list[tuple[Target, int]]]:
+        """고른 것들과, 그중 **묶음 부모로 통째로 딸려 온 것**의 목록.
+
+        부모 줄은 1구간만 정해 주고 2구간은 가능한 것이 전부 담깁니다. 그
+        사실을 화면이 말해 주어야 사람이 "왜 이렇게 많이 담겼지" 로 끝나지
+        않습니다. 그래서 어느 묶음이 몇 편을 데려왔는지도 함께 돌려줍니다.
+        """
         chosen: list[Target] = []
+        groups: list[tuple[Target, int]] = []
         for tree in (self.tree, self.return_tree):
             for item in tree.selection():
                 # 묶음의 부모를 골랐으면 그 아래 전부를 고른 것으로 봅니다.
-                for index in self._group_children.get((str(tree), item), []):
+                members = self._group_children.get((str(tree), item), [])
+                if members:
+                    groups.append((self.results[members[0]], len(members)))
+                for index in members:
                     if self.results[index] not in chosen:
                         chosen.append(self.results[index])
                 index = self.item_journeys.get((str(tree), item))
@@ -2912,20 +2982,41 @@ class BookerApp:
                     index = self.item_journeys.get((str(tree), tree.parent(item)))
                 if index is not None and self.results[index] not in chosen:
                     chosen.append(self.results[index])
-        return chosen
+        return chosen, groups
 
-    def _result_double_clicked(self, event: tk.Event) -> None:
+    @staticmethod
+    def _on_expander(tree: ttk.Treeview, event: tk.Event) -> bool:
+        """두 번 누른 자리가 왼쪽 **+/- 표시**인가.
+
+        Tk 는 그 자리를 ``Treeitem.indicator`` 로 부릅니다(Xvfb 에서 확인:
+        폭 40px 짜리 ``#0`` 칸에서 x<20 이 indicator, 그 뒤는 text). 이름 앞에
+        스타일 이름이 붙으므로 통째로 비교하지 않고 끝만 봅니다.
+        """
+        return str(tree.identify_element(event.x, event.y)).endswith("indicator")
+
+    def _result_double_clicked(self, event: tk.Event) -> str | None:
+        """두 번 누르면 담습니다. **접거나 펴지는 않습니다.**
+
+        Treeview 는 두 번 누르면 그 줄을 접었다 폈다 하는 것이 기본입니다.
+        그래서 환승 여정을 담을 때마다 구간 줄이 제멋대로 접히고 펴졌습니다 —
+        접고 펴는 것은 왼쪽 +/- 를 눌러서만 되어야 합니다. ``"break"`` 를
+        돌려주면 그 기본 동작이 이어지지 않습니다.
+        """
         widget = event.widget
         if not isinstance(widget, ttk.Treeview):
-            return
+            return None
+        if self._on_expander(widget, event):
+            # +/- 를 누른 것입니다. 접고 펴는 일은 그대로 두고, 담지 않습니다.
+            return None
         item = widget.identify_row(event.y)
         if not item:
-            return
+            return None
         widget.selection_set(item)
         self.add_targets()
+        return "break"
 
     def add_targets(self) -> None:
-        picked = self.selected_results()
+        picked, groups = self._selected_results_with_groups()
         if not picked:
             messagebox.showwarning("예매 대상", "위 목록에서 열차를 고르고 [담기] 를 누르세요")
             return
@@ -2961,13 +3052,55 @@ class BookerApp:
             if added
             else "이미 담긴 열차입니다."
         )
+        if added:
+            self._explain_groups(groups)
 
-    def _target_double_clicked(self, event: tk.Event) -> None:
+    def _explain_groups(self, groups: list[tuple[Target, int]]) -> None:
+        """묶음 부모로 담았을 때 무엇이 담긴 것인지 말해 줍니다.
+
+        부모 줄은 여정이 아니라 **1구간 머리글**입니다. 그것을 고르면 그
+        1구간에 이어지는 2구간이 전부 담깁니다 — 그게 이 묶음의 값어치이지만,
+        말해 주지 않으면 고른 적 없는 열차가 목록에 쌓인 것처럼 보입니다.
+
+        자식 줄만 고른 경우에는 아무 말도 하지 않습니다.
+        """
+        if not groups:
+            return
+        lines = []
+        for head, count in groups:
+            leg = head.journey.first
+            name = one_line(f"{(leg.train_class_name or '').strip()} "
+                            f"{(leg.train_no or '').strip().lstrip('0')}").strip()
+            lines.append(
+                f"· 1구간 {name} "
+                f"{format_clock(normalize_clock(leg.departure_time))}-"
+                f"{format_clock(normalize_clock(leg.arrival_time))} "
+                f"({leg.departure_station_name}→{leg.arrival_station_name})\n"
+                f"  → 이어지는 2구간 {count}편이 모두 담겼습니다."
+            )
+        messagebox.showinfo(
+            "1구간만 정해졌습니다",
+            "묶음의 머리 줄을 고르셨습니다. 그 줄은 여정이 아니라 1구간이라,\n"
+            "이어질 수 있는 2구간이 전부 예매 대상에 담깁니다.\n\n"
+            + "\n\n".join(lines)
+            + "\n\n한 편만 노리시려면 예매 대상에서 나머지를 [빼기] 하거나, "
+            "위 표에서 원하는 '└ 이어서' 줄만 골라 담으세요.\n"
+            "그대로 두어도 됩니다 — 자동예매는 한 방향에 한 건만 잡으므로, "
+            "여럿을 담아 두면 먼저 열리는 것을 잡을 기회가 그만큼 늘어납니다.",
+        )
+
+    def _target_double_clicked(self, event: tk.Event) -> str | None:
+        """두 번 누르면 뺍니다. 여기도 기본 동작은 막습니다.
+
+        이 표는 지금 평평하지만(자식 줄이 없습니다) 막아 두는 값이 있습니다 —
+        나중에 줄을 접게 만들면 같은 일이 조용히 되살아납니다.
+        """
         item = self.target_list.identify_row(event.y)
         if not item:
-            return
+            return None
         self.target_list.selection_set(item)
         self.remove_targets()
+        return "break"
 
     def remove_targets(self) -> None:
         """고른 것을 뺍니다. **감시 중인 것은 빼지 않습니다.**
@@ -3315,25 +3448,77 @@ class BookerApp:
             "계속할까요?",
         )
 
-    def _make_notifier(self) -> Callable[[str], None] | None:
+    def _telegram_config(self) -> TelegramConfig | None:
+        """지금 이 순간의 텔레그램 설정. 없거나 꺼져 있으면 ``None``.
+
+        이번만 쓰기로 한 값이 있으면 그것이 먼저입니다. 저장된 값이 있어도
+        사람이 방금 넣은 쪽을 쓰겠다는 뜻이기 때문입니다.
+        """
         if not self.notify_enabled.get():
             return None
-        # 이번만 쓰기로 한 값이 있으면 그것이 먼저입니다. 저장된 값이 있어도
-        # 사람이 방금 넣은 쪽을 쓰겠다는 뜻이기 때문입니다.
         config = self._telegram_once or TelegramConfig(
             token=self.settings.telegram_token,
             chat_id=self.settings.telegram_chat_id,
         )
-        if not config.enabled:
-            self._write_booking("텔레그램 설정이 없어 알림은 보내지 않습니다.", "warn")
-            return None
+        return config if config.enabled else None
 
-        def send(message: str) -> None:
+    def _notify_now(self, message: str) -> None:
+        """알림 한 통. **부를 때마다 지금 설정을 읽습니다.**
+
+        예전에는 감시를 시작할 때 설정을 한 번 구워 넘겼습니다. 그래서 감시를
+        걸어 놓고 나서 텔레그램을 채우면 그 묶음은 끝까지 알림이 오지
+        않았습니다 — 밤새 도는 프로그램에서 그것을 알아채는 길이 없습니다.
+
+        알림이 실패해도 예약을 죽이지 않습니다. 이 함수는 예외를 밖으로
+        내보내지 않습니다.
+        """
+        config = self._telegram_config()
+        if config is None:
+            return
+        try:
             with TelegramNotifier(config) as notifier:
                 if not notifier.send(message):
-                    self.log_booking("텔레그램 전송에 실패했습니다.")
+                    detail = f" ({notifier.last_error})" if notifier.last_error else ""
+                    self.log_booking(f"텔레그램 전송에 실패했습니다{detail}.")
+        except Exception as exc:
+            self.log_booking(f"텔레그램 전송에 실패했습니다: {type(exc).__name__}")
 
-        return send
+    def _make_notifier(self) -> Callable[[str], None] | None:
+        """감시에 넘길 알림 함수. **설정을 굽지 않습니다.**
+
+        늘 :meth:`_notify_now` 를 돌려줍니다 — 설정이 지금 비어 있어도
+        마찬가지입니다. 나중에 채워 넣으면 그때부터 알림이 갑니다.
+        """
+        if self._telegram_config() is None:
+            self._write_booking(
+                "텔레그램 설정이 아직 없습니다. 지금은 알림을 보내지 않지만, "
+                "도는 중에 [텔레그램 설정] 을 채우면 그때부터 갑니다.",
+                "warn",
+            )
+        return self._notify_now
+
+    def announce_watches(self) -> None:
+        """도는 묶음마다 "지금부터 이렇게 지켜본다" 를 한 통씩 보냅니다.
+
+        텔레그램을 뒤늦게 채운 사람에게 필요한 것입니다 — 설정이 먹혔는지,
+        그리고 지금 무엇이 얼마나 남았는지. 감시 시간은 **시작할 때의 값이
+        아니라 남은 값**으로 말합니다.
+        """
+        running = [watch for watch in self.watches if watch.running]
+        if not running or self._telegram_config() is None:
+            return
+        now = time.monotonic()
+        for watch in running:
+            window = watch.remaining(now)
+            self._notify_now(
+                f"🔔 텔레그램 알림을 켰습니다 [{watch.tag}]\n"
+                f"{len(watch.keys)}편을 {watch.options.poll_interval_s:g}초마다 "
+                f"다시 조회합니다. 감시 {window}.\n"
+                f"{watch.title}"
+            )
+        self._write_booking(
+            f"도는 감시 {len(running)}묶음에 텔레그램 알림을 알렸습니다."
+        )
 
     def on_stop(self, selected_only: bool = False) -> None:
         """돌고 있는 감시를 멈춥니다. 고른 것만 멈출 수도 있습니다."""
@@ -3590,6 +3775,9 @@ class BookerApp:
                 else "설정을 저장하지 못했습니다(권한을 확인하세요)."
             )
             window.destroy()
+            # 이미 도는 묶음이 있으면 그쪽에도 알립니다. 뒤늦게 채운 사람은
+            # 설정이 먹혔는지, 지금 무엇이 얼마나 남았는지를 알아야 합니다.
+            self.announce_watches()
 
         def use_once() -> None:
             """이번 실행에만 씁니다. 파일에는 아무것도 쓰지 않습니다.
@@ -3609,6 +3797,7 @@ class BookerApp:
                 "않았습니다. 프로그램을 끄면 사라집니다."
             )
             window.destroy()
+            self.announce_watches()
 
         def forget() -> None:
             """저장된 값을 지웁니다. 이번 실행의 일회용 값도 같이 치웁니다."""

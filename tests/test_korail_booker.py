@@ -2785,8 +2785,10 @@ def test_the_screen_draws_bundles_and_expands_them_when_picked():
     assert "group_by_first_leg" in source
     assert "def _insert_group" in source
     assert "self._group_children" in source
-    body = _ui_function("selected_results")
+    body = _ui_function("_selected_results_with_groups")
     assert "_group_children" in body
+    # 부모로 통째로 딸려 온 것은 화면이 말해 줍니다.
+    assert "groups.append((self.results[members[0]], len(members)))" in body
 
 
 # --- 텔레그램: 저장할지 이번만 쓸지 --------------------------------------------
@@ -2805,8 +2807,12 @@ def test_telegram_settings_can_be_used_without_touching_the_disk():
 
 def test_a_one_time_telegram_setting_wins_over_the_stored_one():
     """방금 넣은 값을 쓰겠다는 뜻입니다. 저장된 값이 있어도 그렇습니다."""
-    body = _ui_function("_make_notifier")
+    body = _ui_function("_telegram_config")
     assert "self._telegram_once or TelegramConfig(" in body
+    # 설정을 굽지 않습니다 — 감시가 도는 중에 채워 넣어도 그때부터 갑니다.
+    maker = _ui_function("_make_notifier")
+    assert "return self._notify_now" in maker
+    assert "self._telegram_config()" in _ui_function("_notify_now")
 
 
 def test_saving_clears_the_one_time_value():
@@ -3452,3 +3458,71 @@ def test_a_stale_row_number_never_indexes_past_the_list():
     """
     body = _ui_function("selected_indices")
     assert "index < len(self.targets)" in body
+
+
+# --- 화면 개선 4건 --------------------------------------------------------------
+
+
+def test_double_click_adds_without_folding_the_transfer_row():
+    """Treeview 는 두 번 누르면 접었다 폈다 하는 것이 기본입니다.
+
+    그래서 환승 여정을 담을 때마다 구간 줄이 제멋대로 접히고 펴졌습니다.
+    접고 펴는 것은 왼쪽 +/- 를 눌러서만 되어야 합니다.
+    """
+    body = _ui_function("_result_double_clicked")
+    assert "return 'break'" in body
+    # +/- 자리에서는 막지 않습니다 — 막으면 접고 펴는 것이 죽습니다.
+    assert "if self._on_expander(widget, event):" in body
+    expander = _ui_function("_on_expander")
+    # Tk 가 그 자리를 부르는 이름. 앞에 스타일 이름이 붙으므로 끝만 봅니다.
+    assert "identify_element(event.x, event.y)).endswith('indicator')" in expander
+    # 예매 대상 표도 같은 규칙입니다.
+    assert "return 'break'" in _ui_function("_target_double_clicked")
+
+
+def test_the_notifier_reads_the_settings_when_it_fires():
+    """감시를 걸어 놓고 나서 텔레그램을 채우면 그때부터 알림이 가야 합니다."""
+    source = _ui_source()
+    # 설정을 구워 넘기지 않습니다.
+    assert "notify=self._make_notifier()" in source
+    assert "return self._notify_now" in _ui_function("_make_notifier")
+    now = _ui_function("_notify_now")
+    assert "config = self._telegram_config()" in now
+    # 알림 실패가 예약을 죽이지 않습니다.
+    assert "except Exception" in now
+
+
+def test_a_late_telegram_setting_tells_the_running_watches():
+    """뒤늦게 채운 사람은 설정이 먹혔는지, 지금 얼마나 남았는지를 알아야 합니다."""
+    body = _ui_function("announce_watches")
+    # 남은 시간으로 말합니다 — 시작할 때의 총 감시 시간이 아니라.
+    assert "watch.remaining(now)" in body
+    assert "watch.options.poll_interval_s" in body
+    source = _ui_source()
+    # 저장하기와 이번만 쓰기 둘 다에서 걸립니다.
+    assert source.count("self.announce_watches()") == 2
+
+
+def test_picking_a_bundle_head_says_what_it_just_added():
+    """부모 줄은 1구간만 정합니다. 2구간은 가능한 것이 전부 담깁니다."""
+    body = _ui_function("_explain_groups")
+    assert "1구간" in body and "2구간" in body
+    assert "if not groups:" in body            # 자식만 골랐으면 조용합니다
+    # Tk 에 찍히는 글에 마크다운이 없는지는 저장소 전체 시험이 봅니다
+    # (test_no_screen_text_carries_markdown_asterisks). 여기서 다시 보면
+    # 주석의 강조까지 걸립니다.
+    assert "self._explain_groups(groups)" in _ui_function("add_targets")
+
+
+def test_switching_transfer_mode_never_overwrites_a_curated_list():
+    """모드 전환이 [조회]·[후보 갱신] 규칙을 뒤로 돌아가면 안 됩니다."""
+    body = _ui_function("_offer_transfer_candidates")
+    # 사람이 만든 목록이 있으면 표시만 다시 그립니다.
+    assert "if self.transfer_names():" in body
+    assert "self._redraw_transfer_marks()" in body
+    # 비어 있을 때만 불러옵니다.
+    assert "transfer_station_candidates(client, departure, arrival)" in body
+    # 구간이 없거나 실패해도 모드 전환을 막지 않습니다.
+    assert "if not departure or not arrival:" in body
+    assert "except (KorailApiError, ValueError)" in body
+    assert "self._offer_transfer_candidates()" in _ui_function("_transfer_toggled")

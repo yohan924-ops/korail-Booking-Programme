@@ -121,6 +121,19 @@ def main() -> int:
         Target(journey=combination("00203", "064900", "073100"), request=request),
     ]
 
+    # 대화상자를 가로챕니다. 그대로 두면 모달이 제 이벤트 고리를 돌려 이
+    # 스크립트가 사람이 [확인] 을 누를 때까지 영영 멈춥니다 — 실제로 그랬습니다.
+    # 가로채 두면 "그 창이 떴는가" 까지 확인할 수 있습니다.
+    shown: list[tuple[str, str]] = []
+
+    def _record(title: str = "", message: str = "", **_kw: object) -> str:
+        shown.append((title, message))
+        return "ok"
+
+    for _name in ("showinfo", "showwarning", "showerror"):
+        setattr(ui_module.messagebox, _name, _record)
+    ui_module.messagebox.askyesno = lambda *_a, **_k: True  # type: ignore[assignment]
+
     root = tk.Tk()
     # 로그인 팝업은 이 확인의 대상이 아닙니다. 본 창을 막으면 아무것도 못 누릅니다.
     ui_module.BookerApp.open_login = lambda self: None  # type: ignore[method-assign]
@@ -198,6 +211,56 @@ def main() -> int:
     row = app.target_list.item(app.target_list.get_children()[0], "values")
     check("상태 칸이 구간별 예약임을 말한다", "구간별" in row[0], row[0])
     check("환승 대기 칸이 촉박한 환승을 경고한다", "촉박" in row[2], row[2])
+
+    # -- 두 번 눌러도 접히지 않는가 ------------------------------------------
+    app._show_journeys(results)
+    root.update()
+    head = app.tree.get_children()[0]
+    # bbox 는 (x, y, 폭, 높이). Tk 는 줄이 안 보이면 빈 문자열을 돌려줍니다.
+    box = app.tree.bbox(head)
+    assert box, "묶음 머리 줄이 화면에 보이지 않습니다"
+    top, height = int(box[1]), int(box[3])
+    middle = top + height // 2
+
+    class _Click:
+        def __init__(self, x: int, y: int, widget: object) -> None:
+            self.x, self.y, self.widget = x, y, widget
+
+    was_open = bool(app.tree.item(head, "open"))
+    verdict = app._result_double_clicked(_Click(120, middle, app.tree))
+    root.update()
+    check("글자 자리를 두 번 눌러도 접히거나 펴지지 않는다",
+          verdict == "break" and bool(app.tree.item(head, "open")) == was_open,
+          f"return={verdict!r} open={app.tree.item(head, 'open')}")
+    check("그러면서 담기기는 한다", len(app.targets) == len(results), len(app.targets))
+    before = len(app.targets)
+    verdict = app._result_double_clicked(_Click(8, middle, app.tree))
+    root.update()
+    check("+/- 자리는 막지 않는다(접고 펴기가 살아 있다)",
+          verdict is None and len(app.targets) == before, f"return={verdict!r}")
+
+    # -- 감시 중에 텔레그램을 채워도 알림이 가는가 ----------------------------
+    # 묶음 머리로 담으면 무엇이 담긴 것인지 말해 주는가
+    app.targets = []
+    app.sync_target_list()
+    shown.clear()
+    app.tree.selection_set(head)
+    app.add_targets()
+    root.update()
+    check("묶음 머리로 담으면 1구간만 정해졌다고 알려 준다",
+          any("1구간" in title for title, _m in shown), [t for t, _ in shown])
+    app.targets = []
+    app.sync_target_list()
+    shown.clear()
+    app.tree.selection_set(app.tree.get_children(head)[0])
+    app.add_targets()
+    root.update()
+    check("자식 줄만 고르면 그 창이 뜨지 않는다",
+          not any("1구간" in title for title, _m in shown), [t for t, _ in shown])
+
+    # 바인딩된 메서드는 볼 때마다 새 객체라 `is` 로는 비교되지 않습니다.
+    check("알림 함수는 설정을 굽지 않는다",
+          app._make_notifier().__func__ is type(app)._notify_now)
 
     # -- 텔레그램: 이번만 쓰기 -----------------------------------------------
     app.on_telegram_settings()
