@@ -28,6 +28,7 @@ from korail_mobile_api import (
     KorailClient,
     KorailPassengerCounts,
     KorailSeatClass,
+    KorailTransportError,
     MutationPreview,
     ReservationHoldResponse,
 )
@@ -214,7 +215,9 @@ def parse_date_field(text: str) -> str:
         date(int(raw[:4]), int(raw[4:6]), int(raw[6:]))
     except ValueError:
         raise ValueError("달력에 없는 날짜입니다") from None
-    if raw < time.strftime("%Y%m%d"):
+    # 코레일의 '오늘' 은 한국 시각입니다. 노트북 시계로 보면, 한국에서는 아직
+    # 오늘인 날짜를 "지난 날짜" 라고 거절하는 시간대가 생깁니다.
+    if raw < now_kst().strftime("%Y%m%d"):
         raise ValueError("지난 날짜는 조회할 수 없습니다")
     return raw
 
@@ -305,7 +308,7 @@ class CalendarPanel(tk.Frame):
             borderwidth=1,
         )
         self._on_pick = on_pick
-        self._shown = date.today().replace(day=1)
+        self._shown = now_kst().date().replace(day=1)
         self._header = tk.StringVar()
         self._title = tk.StringVar(value="가는 날")
         top = tk.Frame(self, background=CALENDAR_BG)
@@ -330,13 +333,13 @@ class CalendarPanel(tk.Frame):
 
     @property
     def _today(self) -> date:
-        """**부를 때마다** 다시 봅니다.
+        """**부를 때마다** 다시 봅니다. 기준은 한국 시각입니다.
 
         생성 시점에 잡아 두었더니, 밤새 켜 둔 창에서는 자정을 넘긴 뒤 [오늘]
         이 어제를 넣고 지난 날짜의 회색 처리도 하루씩 밀렸습니다. 어제를 넣은
         조회는 ``parse_date_field`` 가 거절합니다.
         """
-        return date.today()
+        return now_kst().date()
 
     def open_for(self, title: str, current: date, *, over: tk.Misc, x: int, y: int) -> None:
         """조회 묶음 위에 겹쳐 띄웁니다.
@@ -412,6 +415,9 @@ class Watch:
     tag: str
     session: BookingSession
     keys: frozenset[JourneyKey]
+    #: 이 묶음이 노리는 방향들. 예매 대상 목록에서 그 줄을 빼도 남습니다 —
+    #: 화면에 줄이 있는지와 "지금 그 방향을 노리는 중인지" 는 다른 이야기입니다.
+    directions: frozenset[tuple[str, str, str]]
     #: 사람이 읽는 이름. 알림과 기록에 씁니다.
     title: str
     #: 시작할 때 읽은 조건. 도는 중에 화면을 고쳐도 이 묶음은 이것으로 돕니다.
@@ -496,6 +502,9 @@ class BookerApp:
         self._last_return_before = ""
         #: [바로 예약] 요청이 나가 있는 중인지. 닫기 전에 이것을 봅니다.
         self._reserving = False
+        #: 답을 기다리는 [바로 예약]의 방향들. 그 몇 초 사이에 같은 방향에
+        #: 감시를 걸거나 또 예약하는 것을 막습니다.
+        self._reserving_directions: set[tuple[str, str, str]] = set()
         #: 클라이언트를 만드는 것은 한 번뿐이어야 합니다 — 스레드 둘이 동시에
         #: 만들면 로그인이 버려지는 쪽에 붙습니다.
         self._client_lock = threading.Lock()
@@ -960,13 +969,17 @@ class BookerApp:
         )
 
         seats = self._section(frame, 4, "좌석")
-        ttk.Combobox(
+        seat_box = ttk.Combobox(
             seats,
             textvariable=self.seat_choice,
             values=[label for label, _ in SEAT_CHOICES],
             width=6,
             state="readonly",
-        ).pack(side="left", padx=(0, 14))
+        )
+        # 휠이 값을 바꾸지 못하게 막습니다. 창 전체가 굴러가는 화면이라, 굴리려던
+        # 휠이 좌석 등급을 조용히 바꾸고 바뀐 값은 스크롤 밖으로 밀려납니다.
+        AutocompleteCombobox.swallow_wheel(seat_box)
+        seat_box.pack(side="left", padx=(0, 14))
         ttk.Checkbutton(
             seats, text="직통", variable=self.include_direct, command=self.mark_stale
         ).pack(side="left")
@@ -1148,12 +1161,14 @@ class BookerApp:
             parent, textvariable=after_var, values=CLOCK_CHOICES, width=7,
             state="readonly",
         )
+        AutocompleteCombobox.swallow_wheel(after)
         after.pack(side="left", padx=2)
         ttk.Label(parent, text="~").pack(side="left")
         before = ttk.Combobox(
             parent, textvariable=before_var, values=CLOCK_CHOICES, width=7,
             state="readonly",
         )
+        AutocompleteCombobox.swallow_wheel(before)
         before.pack(side="left", padx=2)
         return (entry, button, after, before)
 
@@ -1197,7 +1212,8 @@ class BookerApp:
         try:
             current = date.fromisoformat(variable.get().strip())
         except ValueError:
-            current = date.today()
+            # 기준은 한국 시각입니다 — 달력의 '오늘' 과 같아야 합니다.
+            current = now_kst().date()
         self.calendar.open_for(
             "오는 날" if for_return else "가는 날",
             current,
@@ -1494,6 +1510,7 @@ class BookerApp:
 
         self.reserve_now_button.configure(state="disabled")
         self._reserving = True
+        self._reserving_directions = {target.direction for target, _seat in plan}
         for target, _seat in plan:
             self._write_log(f"바로 예약 시도 — {target.describe()}")
 
@@ -1512,6 +1529,14 @@ class BookerApp:
                     # 아무것도 안 됐다고 믿은 채 기한을 넘깁니다.
                     self.events.put(
                         lambda t=target, e=exc: self._reserve_now_partial(t, e)
+                    )
+                    continue
+                except KorailTransportError as exc:
+                    # 요청이 나간 뒤 끊긴 것인지 나가기 전인지 알 수 없습니다.
+                    # "실패" 라고만 적으면 사람이 다시 눌러 중복 예약을
+                    # 만듭니다 — 엔진 쪽(_settle_broken)과 같은 규칙입니다.
+                    self.events.put(
+                        lambda t=target, e=exc: self._reserve_now_broken(t, e)
                     )
                     continue
                 except KorailApiError as exc:
@@ -1533,6 +1558,7 @@ class BookerApp:
 
     def _reserve_now_finished(self) -> None:
         self._reserving = False
+        self._reserving_directions = set()
         self.reserve_now_button.configure(state="normal")
 
     def _split_warning(self, targets: Sequence[Target]) -> str:
@@ -1573,7 +1599,7 @@ class BookerApp:
         for number, result in enumerate(holds, start=1):
             kind = f"좌석 예약({number}구간)" if split else "좌석 예약"
             held = self._held_from(
-                target.label, target.journey.summary(), kind, result
+                target.label, target.journey.summary(), kind, result, target.direction
             )
             self.remember_hold(held)
             self._write_log(
@@ -1599,6 +1625,27 @@ class BookerApp:
             "결제하세요.",
         )
 
+    def _reserve_now_broken(self, target: Target, exc: Exception) -> None:
+        """예약 요청이 전송 중에 끊겼습니다. **결과를 알 수 없습니다.**
+
+        서버가 받아 예약을 만들었는지 판단할 근거가 없습니다. "실패했습니다"
+        라고만 적으면 사람이 한 번 더 누르고, 이미 생겼다면 그것이 중복
+        예약입니다 — 이 프로그램은 취소를 하지 않습니다.
+        """
+        self._write_log(
+            f"바로 예약: 요청이 전송 중에 끊겼습니다 — {target.describe()}\n"
+            f"{type(exc).__name__}: {exc}",
+            "bad",
+        )
+        messagebox.showwarning(
+            "예약 요청이 끊겼습니다",
+            f"{target.journey.summary()}\n\n"
+            f"{type(exc).__name__}: {exc}\n\n"
+            "서버에 예약이 생겼는지 여기서는 알 수 없습니다.\n"
+            "**다시 누르기 전에** 코레일 앱에서 예약 내역을 확인하세요 — "
+            "이미 생겼다면 한 번 더 누르는 것이 중복 예약입니다.",
+        )
+
     def _reserve_now_partial(self, target: Target, exc: PartialTransferError) -> None:
         """앞 구간만 잡히고 뒤 구간에서 막혔습니다. 크게 알립니다."""
         holds = [h for h in exc.held if isinstance(h, ReservationHoldResponse)]
@@ -1608,6 +1655,7 @@ class BookerApp:
                 target.journey.summary(),
                 f"좌석 예약({number}구간)",
                 hold,
+                target.direction,
             )
             self.remember_hold(held)
         pnrs = ", ".join(h.pnr_no or "?" for h in holds) or "(없음)"
@@ -1727,12 +1775,14 @@ class BookerApp:
         summary: str,
         kind: str,
         hold: ReservationHoldResponse,
+        direction: tuple[str, str, str] = ("", "", ""),
     ) -> Held:
         """서버 응답에서 화면이 쓸 것만 뽑습니다. 없는 값은 지어내지 않습니다."""
         return Held(
             label=label,
             summary=summary,
             kind=kind,
+            direction=direction,
             pnr=(hold.pnr_no or "").strip() or "(PNR 없음)",
             fare=fare_text(hold),
             deadline=parse_deadline(
@@ -1746,10 +1796,11 @@ class BookerApp:
         label: str,
         summary: str,
         kind: str,
+        direction: tuple[str, str, str],
         hold: ReservationHoldResponse,
     ) -> None:
         """자동예매 스레드에서 불립니다 — 큐를 거쳐 화면에 올립니다."""
-        held = self._held_from(label, summary, kind, hold)
+        held = self._held_from(label, summary, kind, hold, direction)
         self.events.put(lambda: self.remember_hold(held))
 
     def remember_hold(self, held: Held) -> None:
@@ -2307,7 +2358,10 @@ class BookerApp:
 
     def _reset_buttons(self) -> None:
         self.login_button.configure(state="normal")
-        self.reserve_now_button.configure(state="normal")
+        # 요청이 아직 나가 있으면 되살리지 않습니다. 한 번 더 누르면 같은
+        # 열차에 두 번째 예약이 나갑니다.
+        if not self._reserving:
+            self.reserve_now_button.configure(state="normal")
         # 조회가 아직 돌고 있으면 건드리지 않습니다. 다른 일이 실패했다고
         # [조회] 를 되살리고 진행 막대를 거두면, 도는 조회가 없는 것처럼
         # 보여 사람이 하나 더 겁니다.
@@ -2532,7 +2586,6 @@ class BookerApp:
         except (ValueError, TypeError) as exc:
             messagebox.showwarning("조회 조건", str(exc))
             return
-        self._remember(request)
         self.search_button.configure(state="disabled")
         self._searching(True)
         self.results_status.set("조회 중…")
@@ -2552,6 +2605,10 @@ class BookerApp:
                 self._searching(False)
                 return
 
+        # **오는 편까지 다 읽은 뒤에** 저장합니다. 앞서 저장하면 오는 편
+        # 시간대가 늘 한 번 전 조회의 값으로 남았습니다(build_return_request 가
+        # 그 값을 여기서야 채우기 때문입니다).
+        self._remember(request)
         self._search_serial += 1
         token = self._search_serial
         self._search_token = token
@@ -2651,6 +2708,9 @@ class BookerApp:
         # 갇힌 채 개수만 세어집니다.
         if any(target.label == "오는 편" for target in results):
             self.round_trip.set(True)
+            # 체크만 되돌리면 오는 편 날짜·시간 칸은 잠긴 채로 남습니다 —
+            # 표에는 오는 편이 있는데 그 조건은 못 고치는 화면이 됩니다.
+            self._round_trip_toggled()
         self.sync_round_trip_panes()
         self.item_journeys.clear()
         self._group_children.clear()
@@ -3017,15 +3077,17 @@ class BookerApp:
         """
         busy: set[tuple[str, str, str]] = set()
         for watch in self.watches:
-            if not watch.running:
-                continue
-            for target in self.targets:
-                if target.journey.key() in watch.keys:
-                    busy.add(target.direction)
-        for held in self.holds:
-            for target in self.targets:
-                if held.summary == target.journey.summary():
-                    busy.add(target.direction)
+            # 멈춘 묶음은 풀어 줍니다. 안 그러면 한 번 돌린 방향을 다시는
+            # 못 노립니다.
+            if watch.running:
+                busy |= watch.directions
+        # 잡아 둔 예약은 **그 예약이 아는 방향**으로 셉니다. 예전에는 여정
+        # 한 줄을 예매 대상 목록과 맞춰 봤는데, 그 줄을 빼는 순간 맞출 것이
+        # 없어져 같은 구간에 두 번째 예약이 나갔습니다.
+        busy |= {held.direction for held in self.holds if any(held.direction)}
+        # 아직 답을 못 받은 [바로 예약]도 셉니다. 요청이 나가 있는 몇 초
+        # 사이에 감시를 걸면, 같은 열차를 두 번 잡습니다.
+        busy |= self._reserving_directions
         return busy
 
     def _watch_of(self, target: Target) -> Watch | None:
@@ -3042,7 +3104,12 @@ class BookerApp:
         # 지우기 전의 id 를 지운 뒤의 목록에서 찾으면 하나도 맞지 않습니다 —
         # 그래서 다시 그릴 때마다 선택이 통째로 사라졌고, [고른 것만 시작]·
         # [고른 것만 중지]·[조건 바꿔 재시작] 이 조용히 '전부' 가 됐습니다.
-        chosen = set(self.selected_indices())
+        # **어느 열차였는지**로 기억합니다. 줄 번호로 되돌리면 [빼기] 로 앞줄이
+        # 사라진 뒤 그 번호에 온 다른 열차가 골라집니다 — 고른 적 없는 열차에
+        # [고른 것만 시작] 이 걸립니다.
+        chosen = {
+            (target.journey.key(), target.label) for target in self.selected_targets()
+        }
         self.target_list.delete(*self.target_list.get_children())
         self._target_items = {}
         now = time.monotonic()
@@ -3069,7 +3136,9 @@ class BookerApp:
                 ),
             )
             self._target_items[index] = item
-        for index in chosen:
+        for index, target in enumerate(self.targets):
+            if (target.journey.key(), target.label) not in chosen:
+                continue
             item = self._target_items.get(index)
             if item is not None:
                 self.target_list.selection_add(item)
@@ -3099,10 +3168,17 @@ class BookerApp:
         return _transfer_text(journey.transfer_station_name or "환승역", journey)
 
     def selected_indices(self) -> list[int]:
-        """표에서 고른 줄의 번호. Treeview 는 항목 id 로 말하므로 되짚습니다."""
+        """표에서 고른 줄의 번호. Treeview 는 항목 id 로 말하므로 되짚습니다.
+
+        **지금 목록에 있는 번호만** 돌려줍니다. 이 짝(``_target_items``)은 표를
+        다시 그릴 때 갱신되는데, 목록이 줄어든 직후에는 아직 옛 번호를 들고
+        있습니다 — 그대로 쓰면 ``self.targets[index]`` 가 범위를 벗어납니다.
+        """
         by_item = {item: index for index, item in self._target_items.items()}
         return sorted(
-            by_item[item] for item in self.target_list.selection() if item in by_item
+            index
+            for item in self.target_list.selection()
+            if (index := by_item.get(item)) is not None and index < len(self.targets)
         )
 
     def on_start_selected(self) -> None:
@@ -3182,6 +3258,7 @@ class BookerApp:
             tag=tag,
             session=BookingSession(booker),
             keys=frozenset(target.journey.key() for target in targets),
+            directions=frozenset(target.direction for target in targets),
             title=title,
             options=options,
             # 엔진과 같은 자로 잽니다(`AutoBooker._run` 도 monotonic 입니다).
@@ -3308,6 +3385,18 @@ class BookerApp:
 
         self.root.after(400, when_stopped)
 
+    def _show_later(self, kind: str, title: str, body: str) -> None:
+        """모달을 **큐를 비운 뒤에** 엽니다.
+
+        :meth:`_drain` 안에서 바로 열면 모달이 제 이벤트 고리를 돌리는 동안
+        다음 회차가 예약되지 않아, 사람이 [확인] 을 누를 때까지 화면 갱신이
+        통째로 멈춥니다 — 도는 감시의 기록도 카운트다운도 함께 멈춥니다.
+        """
+        show = {"info": messagebox.showinfo, "warn": messagebox.showwarning}.get(
+            kind, messagebox.showerror
+        )
+        self.root.after(0, lambda: show(title, body))
+
     def _booking_done(self, watch: Watch, result: BookingResult) -> None:
         levels = {
             Outcome.HELD: "good",
@@ -3322,9 +3411,9 @@ class BookerApp:
         # 창은 잡았을 때와 실패했을 때만 띄웁니다. 여럿을 돌리는데 중지·시간
         # 끝마다 창이 뜨면 그것부터 치우느라 정작 볼 것을 못 봅니다.
         if result.outcome is Outcome.HELD:
-            messagebox.showinfo(f"예약됨 [{watch.tag}]", result.message)
+            self._show_later("info", f"예약됨 [{watch.tag}]", result.message)
         elif result.outcome is Outcome.FAILED:
-            messagebox.showerror(f"자동예매 실패 [{watch.tag}]", result.message)
+            self._show_later("error", f"자동예매 실패 [{watch.tag}]", result.message)
 
     # -- 동작: 텔레그램 ------------------------------------------------------
 

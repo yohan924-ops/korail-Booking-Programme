@@ -573,6 +573,11 @@ def search_custom_transfer(
             continue
         try:
             first_legs = _first_leg_candidates(client, request, name)
+        except KorailTransportError:
+            # 전송 실패는 이 역만의 문제가 아닙니다. 여기서 삼키면 자동예매의
+            # "연속 전송 실패면 멈춤" 이 영영 안 걸리고, 인터넷이 끊긴 밤새
+            # "환승역마다 조회 실패" 만 찍힙니다. 위(_isolated)가 정하게 둡니다.
+            raise
         except KorailApiError as exc:
             if log:
                 log(f"{name} 경유 조회 실패({type(exc).__name__}): {exc}")
@@ -589,6 +594,8 @@ def search_custom_transfer(
         earliest = min(arrivals) if arrivals else request.depart_after or "000000"
         try:
             second_legs = _second_leg_candidates(client, request, name, earliest)
+        except KorailTransportError:
+            raise
         except KorailApiError as exc:
             # 이 역 하나가 실패했다고 앞서 만들어 둔 다른 역의 조합까지
             # 버리지 않습니다.
@@ -620,6 +627,13 @@ def search_custom_transfer(
                 # 2구간이 1구간 도착보다 이르면 elapsed_minutes 가 +24시간으로
                 # 돌려줍니다. 그것은 환승이 아니라 하루 뒤입니다.
                 if wait >= 12 * 60:
+                    continue
+                # **사용자의 환승시간 조건을 여기서 먼저 봅니다.** 나중에
+                # 거르면 예산 40편을 조건에 걸릴 조합이 다 먹어 버려, 정작
+                # 조건에 맞는 조합이 화면에 하나도 안 나옵니다.
+                if wait < request.min_transfer_minutes:
+                    continue
+                if request.max_transfer_minutes and wait > request.max_transfer_minutes:
                     continue
                 if made >= per_station:
                     if log:

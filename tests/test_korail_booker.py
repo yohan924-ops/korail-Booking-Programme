@@ -1296,7 +1296,8 @@ def test_a_preview_run_says_out_loud_that_nothing_was_sent():
     assert len(done) == 1
     body = ast.unparse(done[0])
     assert "Outcome.PREVIEW" in body
-    assert "showinfo" in body
+    # 모달은 큐를 비운 뒤에 엽니다 — _drain 안에서 바로 열면 화면이 멈춥니다.
+    assert "self._show_later('info'" in body
 
 
 def test_the_program_always_reserves_for_real_and_still_gates_it():
@@ -2995,7 +2996,7 @@ def test_the_watcher_buys_a_custom_combination_one_leg_at_a_time():
         [_target(journey, _request(include_direct=False, include_transfer=True))],
         BookingOptions(poll_interval_s=10.0, live=True),
         log=lambda message: None,
-        on_hold=lambda label, summary, kind, hold: made.append(kind),
+        on_hold=lambda label, summary, kind, direction, hold: made.append(kind),
     )
 
     result = booker.run(threading.Event())
@@ -3241,8 +3242,10 @@ def test_one_direction_is_never_watched_or_reserved_twice():
 def test_the_target_selection_survives_a_redraw():
     """항목 id 는 다시 그릴 때마다 새로 매겨집니다. 그걸로 찾으면 늘 빗나갑니다."""
     body = _ui_function("sync_target_list")
-    assert "chosen = set(self.selected_indices())" in body
-    assert "item = self._target_items.get(index)" in body
+    # 줄 번호가 아니라 **어느 열차였는지**로 되돌립니다. 번호로 되돌리면
+    # [빼기] 로 앞줄이 사라진 뒤 그 번호에 온 다른 열차가 골라집니다.
+    assert "(target.journey.key(), target.label) for target in self.selected_targets()" in body
+    assert "if (target.journey.key(), target.label) not in chosen:" in body
 
 
 def test_a_second_search_cannot_overwrite_the_first():
@@ -3291,3 +3294,161 @@ def test_stopping_a_search_lets_the_next_one_start():
     assert "self._search_token = None" in body
     # 버림 표시는 그대로 남아 늦게 끝난 조회가 화면을 덮지 못합니다.
     assert body.index("_search_cancelled.add") < body.index("self._search_token = None")
+
+
+# --- 실행 기반 2차 감사에서 나온 결함들 ------------------------------------------
+
+
+def test_a_broken_reserve_never_ends_as_a_preview():
+    """진짜로 보냈는데 "아무것도 보내지 않았습니다" 로 끝나면 안 됩니다."""
+    recorder = _Recorder({SEARCH: _search_reply([_row("00101", general="11")])})
+    client = _client(recorder)
+
+    def explode(*_a: Any, **_k: Any) -> Any:
+        raise KorailTransportError("synthetic connection reset")
+
+    client.reserve = explode  # type: ignore[method-assign]
+    told: list[str] = []
+    result = AutoBooker(
+        client,
+        [_target(_journey(_summary(general="11")))],
+        BookingOptions(poll_interval_s=10.0, live=True),
+        log=told.append,
+        notify=told.append,
+    ).run(threading.Event())
+
+    assert result.outcome is Outcome.FAILED
+    assert "결과를 알 수 없습니다" in result.message
+    assert result.outcome is not Outcome.PREVIEW
+
+
+def test_a_standby_post_that_is_cut_never_kills_the_watch():
+    """예약대기는 곁가지입니다. 그 전송 실패가 좌석 감시를 죽이면 안 됩니다."""
+    recorder = _Recorder({SEARCH: _search_reply([_row("00101", h_wait_rsv_flg=" 9")])})
+    client = _client(recorder)
+    calls: list[str] = []
+
+    def explode(*_a: Any, **kwargs: Any) -> Any:
+        calls.append(str(kwargs.get("job_type")))
+        raise KorailTransportError("synthetic connection reset")
+
+    client.reserve = explode  # type: ignore[method-assign]
+    told: list[str] = []
+    result = AutoBooker(
+        client,
+        [_target(_journey(_summary(h_wait_rsv_flg=" 9")))],
+        BookingOptions(poll_interval_s=10.0, live=True, allow_standby=True),
+        log=told.append,
+        notify=told.append,
+    ).run(threading.Event())
+
+    # 예외가 새지 않고 결과가 돌아옵니다.
+    assert result.outcome in (Outcome.FAILED, Outcome.STOPPED, Outcome.TIMEOUT)
+    assert any("전송 중에 끊겼습니다" in line for line in told)
+
+
+def test_a_failed_relogin_does_not_kill_the_watch():
+    """비밀번호가 바뀌었을 수 있습니다. 첫 회차에 죽으면 남은 횟수가 무의미합니다."""
+    def explode() -> None:
+        raise RuntimeError("synthetic login failure")
+
+    booker = AutoBooker(
+        _client(_Recorder({SEARCH: _search_reply([_row("00101")])})),
+        [_target(_journey(_summary()))],
+        BookingOptions(poll_interval_s=10.0),
+        log=lambda _m: None,
+        relogin=explode,
+    )
+    assert booker._try_relogin() is False
+
+
+def test_the_deadline_is_read_by_one_parser_only():
+    """화면 글과 카운트다운이 따로 읽어 12시간 다른 기한을 말했습니다."""
+    booker = (APP_DIR / "korail_booker" / "autobook.py").read_text(encoding="utf-8")
+    assert "from .holds import parse_deadline" in booker
+    text = next(
+        ast.unparse(n) for n in ast.walk(ast.parse(booker))
+        if isinstance(n, ast.FunctionDef) and n.name == "payment_deadline_text"
+    )
+    assert "parse_deadline(" in text
+    assert "normalize_clock" not in text
+    # 두 곳이 같은 값을 말합니다.
+    hold = parse_reservation_hold_response(
+        _reserve_reply(h_ntisu_lmt_dt="20990101", h_ntisu_lmt_tm="0016")
+    )
+    shown = payment_deadline_text(hold)
+    counted = H.parse_deadline(hold.payment_deadline_date, hold.payment_deadline_time)
+    assert counted is not None
+    assert shown == counted.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def test_a_direction_stays_blocked_even_when_its_row_is_gone():
+    """줄을 빼면 막을 근거가 사라져 같은 구간에 두 번째 예약이 나갔습니다."""
+    source = _ui_source()
+    assert "direction: tuple[str, str, str] = ('', '', '')" in ast.unparse(
+        ast.parse((APP_DIR / "korail_booker" / "holds.py").read_text(encoding="utf-8"))
+    )
+    body = _ui_function("_busy_directions")
+    # 화면 목록이 아니라 예약과 감시가 아는 방향을 봅니다.
+    assert "self.targets" not in body
+    assert "busy |= watch.directions" in body
+    assert "held.direction for held in self.holds" in body
+    assert "busy |= self._reserving_directions" in body
+    # 멈춘 묶음은 풀어 줍니다 — 안 그러면 한 번 돌린 방향을 다시 못 노립니다.
+    assert "if watch.running:" in body
+    assert "directions: frozenset[tuple[str, str, str]]" in source
+
+
+def test_a_cut_reserve_from_the_button_is_not_reported_as_a_plain_failure():
+    """"실패" 라고만 적으면 사람이 다시 눌러 중복 예약을 만듭니다."""
+    source = _ui_source()
+    assert "def _reserve_now_broken" in source
+    body = _ui_function("_reserve_now_broken")
+    assert "다시 누르기 전에" in body
+    now = _ui_function("on_reserve_now")
+    assert "except KorailTransportError as exc:" in now
+
+
+def test_the_reserve_button_stays_disabled_while_a_request_is_out():
+    body = _ui_function("_reset_buttons")
+    assert "if not self._reserving:" in body
+
+
+def test_every_combobox_refuses_the_wheel():
+    """역 칸만 막으면 좌석 등급과 시각 칸이 그대로 굴러갑니다."""
+    source = _ui_source()
+    assert source.count("swallow_wheel(") >= 4
+
+
+def test_today_is_korean_time_everywhere():
+    """코레일의 '오늘' 은 한국 시각입니다. 노트북 시계로 보면 오늘을 거절합니다."""
+    source = _ui_source()
+    assert "now_kst().strftime('%Y%m%d')" in ast.unparse(ast.parse(source))
+    assert "date.today()" not in source
+
+
+def test_the_return_window_is_saved_after_it_is_read():
+    """앞서 저장하면 오는 편 시간대가 늘 한 번 전 조회의 값으로 남습니다."""
+    body = _ui_function("on_search")
+    assert body.index("build_return_request") < body.index("self._remember(request)")
+
+
+def test_a_half_bought_transfer_is_not_recorded_as_the_whole_journey():
+    booker = (APP_DIR / "korail_booker" / "autobook.py").read_text(encoding="utf-8")
+    partial = next(
+        ast.unparse(n) for n in ast.walk(ast.parse(booker))
+        if isinstance(n, ast.FunctionDef) and n.name == "_settle_partial"
+    )
+    assert "구간만]" in partial
+    assert "journey.leg_summary(number - 1)" in partial
+
+
+def test_a_stale_row_number_never_indexes_past_the_list():
+    """표를 다시 그리기 전의 번호는 줄어든 목록의 범위를 벗어납니다.
+
+    [빼기] 로 목록이 짧아진 직후 ``sync_target_list`` 가 옛 번호로 ``self.targets``
+    를 짚어 IndexError 로 죽었습니다 — 선택을 열차로 되돌리게 고치면서 생긴
+    구멍입니다.
+    """
+    body = _ui_function("selected_indices")
+    assert "index < len(self.targets)" in body

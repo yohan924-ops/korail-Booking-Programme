@@ -26,6 +26,7 @@ from korail_mobile_api import (
     KORAIL_STANDBY_HOLD_MESSAGE_CODE,
     BaseKorailResponse,
     KorailAppError,
+    KorailAuthError,
     KorailClient,
     KorailPassengerCounts,
     KorailProtocolError,
@@ -41,13 +42,13 @@ from korail_mobile_api import (
 )
 from korail_mobile_api.constants import KORAIL_STANDBY_WAIT_FLAG
 
+from .holds import parse_deadline
 from .journeys import (
     Journey,
     JourneyKey,
     SeatPreference,
     books_as_one_reservation,
     format_duration,
-    normalize_clock,
 )
 from .search import SearchRequest, search_journeys
 
@@ -64,6 +65,13 @@ MAX_CONSECUTIVE_TRANSPORT_FAILURES = 5
 
 Logger = Callable[[str], None]
 Notifier = Callable[[str], None]
+#: 홀드 하나가 잡힐 때마다 불립니다 — (구분, 여정 한 줄, 종류, 방향, 응답).
+#:
+#: 방향까지 넘기는 것은 화면이 "이 방향은 이미 잡았다" 를 판단해야 하기
+#: 때문입니다. 여정 한 줄로는 목록에서 그 줄을 뺀 뒤 판단할 길이 없습니다.
+HoldWatcher = Callable[
+    [str, str, str, tuple[str, str, str], ReservationHoldResponse], None
+]
 
 
 class Outcome(Enum):
@@ -172,17 +180,13 @@ def payment_deadline_text(hold: ReservationHoldResponse | None) -> str:
     """서버가 준 결제 기한만 씁니다. 지어내지 않습니다."""
     if hold is None:
         return "알 수 없음"
-    date = (hold.payment_deadline_date or "").strip()
-    # 서버는 이 시각을 JSON 숫자로도 보냅니다 — 09:30 이 93000 으로 옵니다.
-    # 자르기만 하면 "93:00:0" 같은 없는 시각이 알림과 목록에 찍히고, 카운트다운
-    # (holds.parse_deadline)은 같은 값을 거절해 "기한 모름" 이라고 적습니다.
-    # 둘이 어긋나면 사람이 진짜 기한을 알 방법이 없어집니다.
-    clock = normalize_clock(hold.payment_deadline_time)
-    if len(date) == 8 and date.isdigit() and len(clock) == 6:
-        return (
-            f"{date[:4]}-{date[4:6]}-{date[6:]} "
-            f"{clock[:2]}:{clock[2:4]}:{clock[4:6]}"
-        )
+    # **카운트다운과 같은 파서를 씁니다.** 따로 읽던 때에는 서버가 09:30 을
+    # 숫자 93000 으로 보내면 여기서 "93:00:0" 이 찍히고 카운트다운은 "기한 모름"
+    # 이라고 적었고, 네 자리로 오면 둘이 12시간 다른 시각을 말했습니다. 사람이
+    # 진짜 기한을 알 방법이 없어집니다 — 그래서 해석은 한 곳에만 둡니다.
+    moment = parse_deadline(hold.payment_deadline_date, hold.payment_deadline_time)
+    if moment is not None:
+        return moment.strftime("%Y-%m-%d %H:%M:%S")
     notice = (hold.payment_deadline_notice or "").strip()
     return notice or "서버가 알려주지 않았습니다(앱에서 확인하세요)"
 
@@ -318,7 +322,7 @@ class AutoBooker:
         log: Logger | None = None,
         notify: Notifier | None = None,
         relogin: Callable[[], None] | None = None,
-        on_hold: Callable[[str, str, str, ReservationHoldResponse], None] | None = None,
+        on_hold: HoldWatcher | None = None,
     ) -> None:
         if not targets:
             raise ValueError("자동예매에는 열차를 하나 이상 골라야 합니다")
@@ -345,6 +349,9 @@ class AutoBooker:
         #: 예약 폼 자체가 만들어지지 않는 대상. 되풀이해도 달라지지 않으므로
         #: 한 번 걸리면 빼고 갑니다(서버가 그 행에 필요한 값을 안 준 경우).
         self._unusable: set[JourneyKey] = set()
+        #: 예약 요청이 전송 중에 끊긴 방향. 결과를 알 수 없는 상태이므로
+        #: "미리보기라 아무것도 안 보냈다" 와 섞이면 안 됩니다.
+        self._broken: set[tuple[str, str, str]] = set()
 
     @property
     def directions(self) -> tuple[tuple[str, str, str], ...]:
@@ -618,7 +625,10 @@ class AutoBooker:
         except (KorailSeatUnavailableError, KorailSoldOutError) as exc:
             self.say(f"    놓쳤습니다({exc.code}). 계속 지켜봅니다")
             return None
-        except KorailSessionExpiredError:
+        except (KorailSessionExpiredError, KorailAuthError):
+            # 다른 스레드가 다시 로그인하는 사이에 세션이 비어 있으면 만료가
+            # 아니라 **인증 오류**로 옵니다. 안 잡으면 감시가 그 자리에서
+            # 죽습니다 — 클라이언트를 여럿이 나눠 쓰므로 실제로 일어납니다.
             self.say("    세션이 끊겨 예약을 못 보냈습니다. 다시 로그인합니다")
             if not self._try_relogin():
                 return self._result(
@@ -658,6 +668,7 @@ class AutoBooker:
         그래서 이 방향은 여기서 끝내고 크게 알립니다 — 다시 보내면 중복 예약이
         될 수 있고, 조용히 넘어가면 사람이 생긴 예약을 모른 채 기한을 넘깁니다.
         """
+        self._broken.add(target.direction)
         self._settled[target.direction] = ()
         self.announce(
             "⚠️ 예약 요청이 전송 중에 끊겼습니다\n"
@@ -667,7 +678,19 @@ class AutoBooker:
             "않습니다 — 이미 생겼다면 중복 예약이 되기 때문입니다.\n"
             "코레일 앱에서 예약 내역을 확인하세요."
         )
-        return self._finish("좌석 예약")
+        finished = self._finish("좌석 예약")
+        if finished is None:
+            return None
+        if finished.outcome is Outcome.PREVIEW:
+            # **미리보기가 아닙니다.** 진짜로 보냈고 답을 못 받았을 뿐입니다.
+            # 여기서 "아무것도 보내지 않았습니다" 라고 끝내면, 서버에 예약이
+            # 생겼는데도 사람은 안 생긴 줄 알고 기한을 넘깁니다.
+            return self._result(
+                Outcome.FAILED,
+                "예약 요청이 전송 중에 끊겨 결과를 알 수 없습니다. "
+                "코레일 앱에서 예약 내역을 확인하세요.",
+            )
+        return finished
 
     def _settle_partial(
         self,
@@ -685,9 +708,19 @@ class AutoBooker:
         """
         held = tuple(h for h in exc.held if isinstance(h, ReservationHoldResponse))
         self._settled[target.direction] = held
-        for hold in held:
+        for number, hold in enumerate(held, start=1):
             if self._on_hold is not None:
-                self._on_hold(target.label, journey.summary(), "좌석 예약(구간별)", hold)
+                # **여정 전체가 아니라 그 구간**입니다. 여정 한 줄로 적으면
+                # 잡은 예약 목록이 동탄→동대구를 다 샀다고 말하는데, 실제로는
+                # 동탄→대전 하나뿐입니다.
+                self._on_hold(
+                    target.label,
+                    f"[{number}구간만] {journey.leg_summary(number - 1)}"
+                    f"  (원래 여정: {journey.summary()})",
+                    "좌석 예약(구간별)",
+                    target.direction,
+                    hold,
+                )
         pnrs = ", ".join((hold.pnr_no or "?") for hold in held) or "(없음)"
         self.announce(
             "⚠️ 환승 일부만 잡혔습니다\n"
@@ -736,6 +769,16 @@ class AutoBooker:
         except (KorailSeatUnavailableError, KorailSoldOutError) as exc:
             self.say(f"    예약대기 실패({exc.code})")
             return None
+        except KorailSessionExpiredError:
+            # 예약대기는 곁가지지만 세션은 공통입니다. 여기서 새면 좌석 감시도
+            # 함께 죽고, 다시 로그인은 한 번도 시도되지 않습니다.
+            self.say("    세션이 끊겨 예약대기를 못 보냈습니다. 다시 로그인합니다")
+            self._try_relogin()
+            return None
+        except KorailTransportError as exc:
+            # 좌석 예약과 같은 이유로 되풀이하지 않습니다 — 서버에 예약대기가
+            # 생겼는지 알 수 없고, 다시 보내면 그 위에 하나 더 만듭니다.
+            return self._settle_broken(target, journey, exc)
         except KorailProtocolError as exc:
             self.say(f"    예약대기 조건이 아닙니다: {exc}")
             return None
@@ -807,7 +850,9 @@ class AutoBooker:
         split = len(holds) > 1
         for number, hold in enumerate(holds, start=1):
             if self._on_hold is not None:
-                self._on_hold(target.label, journey.summary(), kind, hold)
+                self._on_hold(
+                    target.label, journey.summary(), kind, target.direction, hold
+                )
             where = f" [{number}구간]" if split else ""
             self.announce(
                 f"🚆 {kind} 성공{where} (아직 결제 전)\n"
@@ -836,7 +881,14 @@ class AutoBooker:
         if self._relogins > MAX_RELOGIN:
             return False
         self.say(f"세션이 끊겨 다시 로그인합니다({self._relogins}회차)")
-        self._relogin()
+        try:
+            self._relogin()
+        except Exception as exc:
+            # 비밀번호가 바뀌었거나 서버가 막았을 수 있습니다. 여기서 새면
+            # 감시가 첫 회차에 죽고, 남은 횟수도 전송 실패 카운터도 소용이
+            # 없어집니다. 실패로 세고 다음 회차에 다시 해 봅니다.
+            self.say(f"    다시 로그인에 실패했습니다: {type(exc).__name__}: {exc}")
+            return False
         return True
 
     def _sleep(self, stop: threading.Event, deadline: float | None) -> None:
