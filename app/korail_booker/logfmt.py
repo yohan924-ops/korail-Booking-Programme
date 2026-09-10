@@ -49,7 +49,10 @@ def format_entry(message: str, *, stamp: str, level: str = "info") -> LogEntry |
     body = message.rstrip("\n")
     if not body.strip():
         return None
-    detail = body.startswith(" ")
+    # **두 칸 이상**이어야 곁가지입니다. ``AutoBooker`` 는 네 칸으로 씁니다.
+    # 한 칸으로 보면, 값이 빈 f-string 때문에 우연히 공백으로 시작한 평범한
+    # 줄까지 시각을 잃고 흐리게 들여써집니다.
+    detail = body.startswith("  ")
     lines = [line.strip() for line in body.split("\n")]
     tag = "detail" if detail and level == "info" else level
     pad = " " * STAMP_WIDTH

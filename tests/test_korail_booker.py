@@ -20,12 +20,14 @@ from __future__ import annotations
 import ast
 import dataclasses
 import importlib.util
+import itertools
 import json
 import os
 import re
 import stat
 import sys
 import threading
+import time
 import tomllib
 import urllib.parse
 from collections.abc import Callable
@@ -40,6 +42,7 @@ from korail_booker import journeys as J
 from korail_booker import logfmt as LF
 from korail_booker import notify as N
 from korail_booker import search as S
+from korail_booker import session as ST_SESSION
 from korail_booker import settings as ST
 from korail_booker.autobook import (
     AutoBooker,
@@ -59,8 +62,10 @@ from korail_mobile_api import (
     KorailSeatClass,
     KorailSession,
     KorailSessionExpiredError,
+    KorailTransportError,
     TrainSummary,
 )
+from korail_mobile_api.mutation_parsers import parse_reservation_hold_response
 
 
 REPO_ROOT = Path(__file__).parents[1]
@@ -1902,9 +1907,12 @@ def test_watches_are_remembered_by_journey_not_by_row_number():
 
 def test_starting_again_never_watches_the_same_journey_twice():
     """같은 열차를 두 묶음이 노리면 예약이 두 번 나갑니다."""
-    body = _ui_function("on_start")
+    body = _ui_function("_start_targets")
     assert "watching = self.watching_keys()" in body
     assert "if t.journey.key() not in watching" in body
+    # 방향으로도 막습니다 — 묶음끼리는 서로를 모릅니다.
+    assert "busy = self._busy_directions()" in body
+    assert "if t.direction not in busy" in body
 
 
 def test_selected_only_start_and_stop_both_exist():
@@ -1974,7 +1982,10 @@ def test_conditions_are_read_at_start_and_a_restart_is_offered():
     # 멈춤은 즉시 걸리지 않습니다. 멈춘 것을 확인하고 다시 겁니다.
     # ast.unparse 는 제너레이터에 괄호를 하나 더 씌웁니다.
     assert "any((watch.running for watch in stopping))" in body
-    assert "self.on_start(selected_only=True)" in body
+    # 멈춘 뒤에 선택을 다시 읽지 않습니다 — 그 사이에 표가 다시 그려져
+    # 선택이 달라져 있을 수 있습니다.
+    assert "picked = self.selected_targets()" in body
+    assert "self._start_targets(picked)" in body
 
 
 def test_a_transfer_station_can_be_taken_out_again():
@@ -2369,7 +2380,12 @@ def test_a_script_exists_to_actually_open_the_window():
     text = script.read_text(encoding="utf-8")
     assert "BookerApp" in text
     # 진짜 설정 파일을 건드리면 안 됩니다 — 저장 갈래를 눌러 보기 때문입니다.
-    assert 'os.environ["HOME"] = tempfile.mkdtemp' in text
+    # HOME 만으로는 모자랍니다 — settings_dir() 는 XDG_CONFIG_HOME 을 먼저
+    # 보고 윈도우에서는 APPDATA 를 봅니다. 새는 순간 진짜 토큰이 찍힙니다.
+    assert 'for name in ("HOME", "XDG_CONFIG_HOME", "APPDATA")' in text
+    assert "os.environ[name] = sandbox" in text
+    # 진짜 KORAIL 요청이 나가면 안 됩니다.
+    assert "on_load_stations = lambda self: None" in text
 
 
 def test_the_whole_window_scrolls():
@@ -3040,3 +3056,229 @@ def test_how_a_target_is_bought_follows_what_the_user_agreed_to():
     )
     assert "journey = replace(journey, source=target.journey.source)" in body
     assert "one_go = books_as_one_reservation(journey)" in body
+
+
+# --- 감사에서 나온 결함들 -------------------------------------------------------
+
+
+def test_a_deadline_clock_that_lost_its_leading_zero_is_repaired():
+    """서버는 09:30 을 JSON 숫자 93000 으로도 보냅니다.
+
+    자르기만 하면 "93:00:0" 이라는 없는 시각이 알림과 목록에 찍히고, 카운트다운은
+    같은 값을 거절해 "기한 모름" 이라고 적습니다. 둘이 어긋나면 사람은 진짜 기한을
+    알 방법이 없습니다 — 그리고 그 시간대가 밤새 잡은 예약의 기한입니다.
+    """
+    hold = parse_reservation_hold_response(
+        _reserve_reply(h_ntisu_lmt_dt="20990101", h_ntisu_lmt_tm=93000)
+    )
+    assert payment_deadline_text(hold) == "2099-01-01 09:30:00"
+    assert H.parse_deadline("20990101", "93000") == datetime(2099, 1, 1, 9, 30)
+
+
+def test_the_countdown_uses_korean_time():
+    """기한은 서버가 한국 시각으로 줍니다. 컴퓨터 시계가 다르면 그대로 빼면 틀립니다."""
+    source = (APP_DIR / "korail_booker" / "holds.py").read_text(encoding="utf-8")
+    assert "KST = timezone(timedelta(hours=9))" in source
+    assert "def now_kst()" in source
+    assert "now_kst()" in _ui_source()
+
+
+def test_every_ending_carries_the_reservations_already_made():
+    """왕복에서 한쪽을 잡아 둔 채 시간이 끝나면, 그 예약을 결과가 잃으면 안 됩니다."""
+    booker = (APP_DIR / "korail_booker" / "autobook.py").read_text(encoding="utf-8")
+    tree = ast.parse(booker)
+    run = next(
+        ast.unparse(n) for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_run"
+    )
+    assert "BookingResult(" not in run          # 모든 끝은 _result 를 거칩니다
+    assert run.count("self._result(") >= 5
+    result = next(
+        ast.unparse(n) for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_result"
+    )
+    assert "for group in self._settled.values() for hold in group" in result
+
+
+def test_the_end_is_announced_even_when_the_loop_explodes():
+    """밤새 켜 둔 사람에게 시작 알림만 오고 아무 소식이 없으면 안 됩니다."""
+    booker = (APP_DIR / "korail_booker" / "autobook.py").read_text(encoding="utf-8")
+    tree = ast.parse(booker)
+    run = next(
+        ast.unparse(n) for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "run"
+    )
+    assert "except BaseException" in run
+    assert run.count("self.announce(") >= 3
+
+
+def test_a_broken_reserve_post_is_never_retried():
+    """전송이 끊기면 서버에 예약이 생겼는지 알 수 없습니다. 다시 보내면 중복입니다."""
+    recorder = _Recorder(
+        replies={SEARCH: _search_reply([_row("00101", general="11")])},
+        sequences={RESERVE: [_ok(), _ok()]},
+    )
+    client = _client(recorder)
+
+    def explode(*_a: Any, **_k: Any) -> Any:
+        raise KorailTransportError("synthetic connection reset")
+
+    client.reserve = explode  # type: ignore[method-assign]
+    told: list[str] = []
+    booker = AutoBooker(
+        client,
+        [_target(_journey(_summary(general="11")))],
+        BookingOptions(poll_interval_s=10.0, live=True),
+        log=told.append,
+        notify=told.append,
+    )
+
+    result = booker.run(threading.Event())
+
+    assert any("전송 중에 끊겼습니다" in line for line in told)
+    assert any("다시 보내지" in line for line in told)
+    assert result.outcome is not Outcome.HELD
+
+
+def test_a_direction_with_nothing_left_to_watch_does_not_spin():
+    """폼을 못 만들어 전부 빠진 방향을 '아직 안 끝남' 으로 세면 감시가 헛돕니다."""
+    booker = (APP_DIR / "korail_booker" / "autobook.py").read_text(encoding="utf-8")
+    assert "def _open_directions" in booker
+    assert "alive = {target.direction for target in self._pending()}" in booker
+
+
+def test_the_request_decides_which_targets_share_a_search():
+    """방향만 보고 묶으면 첫 대상의 조건으로만 물어, 나머지는 영영 안 잡힙니다."""
+    booker = (APP_DIR / "korail_booker" / "autobook.py").read_text(encoding="utf-8")
+    assert "for group in dict.fromkeys(target.request for target in pending)" in booker
+    assert "strict=True" in booker
+
+
+def test_the_journey_key_carries_the_date():
+    """같은 열차가 날짜만 달리해 옵니다. 날짜가 없으면 둘이 같은 열쇠가 됩니다."""
+    today = _journey(_summary(train_no="00101"))
+    tomorrow = _journey(
+        TrainSummary.from_raw({**_row("00101"), "h_dpt_dt": "20990102"})
+    )
+    assert today.key() != tomorrow.key()
+    assert today.key()[0][1] == "20990101"
+
+
+def test_the_pacer_holds_its_floor_under_many_threads():
+    """클라이언트 하나를 스레드 여럿이 씁니다. 잠금이 없으면 한꺼번에 쏩니다."""
+    pacer = ST_SESSION.Pacer(min_interval_s=0.05)
+    stamps: list[float] = []
+    lock = threading.Lock()
+
+    def hit() -> None:
+        pacer.wait()
+        with lock:
+            stamps.append(time.monotonic())
+
+    threads = [threading.Thread(target=hit) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    stamps.sort()
+    gaps = [b - a for a, b in itertools.pairwise(stamps)]
+    # 잠금이 없으면 이 간격이 전부 0 에 가깝습니다.
+    assert all(gap >= 0.04 for gap in gaps), gaps
+
+
+def test_settings_are_written_beside_and_swapped_in():
+    """제자리에 덮어쓰면 쓰다가 멈춘 순간 토큰까지 함께 잃습니다."""
+    source = (APP_DIR / "korail_booker" / "settings.py").read_text(encoding="utf-8")
+    assert "tempfile.mkstemp(" in source
+    assert "os.replace(temporary, target)" in source
+    # 만드는 순간부터 소유자 전용입니다 — umask 권한으로 만든 뒤 좁히면 늦습니다.
+    assert source.index("os.chmod(temporary") < source.index("os.fdopen(descriptor")
+
+
+def test_a_settings_file_full_of_nonsense_still_opens_the_window(tmp_path: Path):
+    """손으로 고칠 수 있는 파일입니다. 무엇이 들어 있든 창은 떠야 합니다."""
+    target = tmp_path / "settings.json"
+    target.write_text('{"watch_minutes": ' + "1" + "0" * 400 + "}", encoding="utf-8")
+    assert ST.load(target).watch_minutes == 60
+    target.write_text(
+        json.dumps({"poll_interval_s": float("nan"), "transfer_mode": "bogus"}),
+        encoding="utf-8",
+    )
+    restored = ST.load(target)
+    assert restored.poll_interval_s == 30.0
+    assert restored.transfer_mode == "server"
+
+
+def test_the_chat_id_lookup_asks_for_the_latest_update():
+    """limit 만 주면 텔레그램은 밀린 것 중 가장 오래된 쪽부터 돌려줍니다."""
+    source = (APP_DIR / "korail_booker" / "notify.py").read_text(encoding="utf-8")
+    assert '"offset": -1' in source
+
+
+def test_a_broken_token_never_escapes_the_notifier():
+    """httpx.InvalidURL 은 HTTPError 가 아닙니다. 새면 그날 밤 알림이 다 사라집니다."""
+    notifier = N.TelegramNotifier(N.TelegramConfig(token="a\nb", chat_id="1"))
+    try:
+        assert notifier.send("hi") is False
+        assert notifier.bot_username() is None
+        assert notifier.resolve_chat() is None
+    finally:
+        notifier.close()
+
+
+def test_one_direction_is_never_watched_or_reserved_twice():
+    """묶음끼리는 서로를 모릅니다. 방향으로 막지 않으면 예약이 두 번 나갑니다."""
+    source = _ui_source()
+    assert "def _busy_directions" in source
+    start = _ui_function("_start_targets")
+    assert "busy = self._busy_directions()" in start
+    now = _ui_function("on_reserve_now")
+    assert "busy = self._busy_directions()" in now
+    assert "conflicting" in now
+
+
+def test_the_target_selection_survives_a_redraw():
+    """항목 id 는 다시 그릴 때마다 새로 매겨집니다. 그걸로 찾으면 늘 빗나갑니다."""
+    body = _ui_function("sync_target_list")
+    assert "chosen = set(self.selected_indices())" in body
+    assert "item = self._target_items.get(index)" in body
+
+
+def test_a_second_search_cannot_overwrite_the_first():
+    """Enter 는 잠긴 단추도 그냥 지나갑니다."""
+    body = _ui_function("on_search")
+    assert "if self._search_token is not None:" in body
+
+
+def test_the_wheel_never_changes_a_combobox_value():
+    """창을 굴리려던 휠이 좌석 등급을 바꾸고 스크롤 밖으로 밀어냅니다."""
+    source = _ui_source()
+    assert "def swallow_wheel" in source
+    assert "self.swallow_wheel(self)" in source
+
+
+def test_a_date_that_is_not_on_the_calendar_is_refused():
+    from korail_booker.ui import parse_date_field
+
+    for bad in ("2026-11-31", "2026-13-01", "9999-99-99"):
+        with pytest.raises(ValueError):
+            parse_date_field(bad)
+
+
+def test_a_modal_never_stops_the_event_queue():
+    """_drain 안에서 모달을 열면 [확인] 을 누를 때까지 화면이 멈춥니다."""
+    body = _ui_function("_worker_failed")
+    assert "self.root.after(0, lambda: messagebox.showerror" in body
+
+
+def test_closing_asks_before_losing_a_deadline():
+    """잡은 예약 목록은 메모리에만 있습니다. 닫으면 PNR 과 기한이 사라집니다."""
+    body = _ui_function("on_close")
+    assert "self._reserving" in body
+    assert "is_expired(held.deadline, now_kst())" in body
+
+
+def test_the_client_is_built_once_even_under_two_threads():
+    body = _ui_function("_ensure_client")
+    assert "with self._client_lock:" in body

@@ -32,6 +32,7 @@ from korail_mobile_api import (
     KorailDynaPathError,
     KorailNoResultsError,
     KorailPassengerCounts,
+    KorailTransportError,
     TrainSearchQuery,
     TrainSearchResult,
     TrainSummary,
@@ -40,10 +41,12 @@ from korail_mobile_api import (
 
 from .journeys import (
     Journey,
+    JourneyKey,
     JourneySource,
     SeatPreference,
     clock_to_minutes,
     elapsed_minutes,
+    format_clock,
     normalize_clock,
 )
 
@@ -134,6 +137,9 @@ def return_request(
     """
     if date < outbound.date:
         raise ValueError("오는 날이 가는 날보다 빠릅니다")
+    # 환승역을 비우면서 모드도 서버 추천으로 되돌립니다. 직접 지정은 고른 역이
+    # 곧 조회 대상이라, 역이 하나도 없는 직접 지정은 **반드시 0편**입니다 —
+    # 오는 편 환승이 조용히 사라지고 사람은 이유를 알 수 없습니다.
     return replace(
         outbound,
         departure=outbound.arrival,
@@ -141,6 +147,7 @@ def return_request(
         date=date,
         depart_after=depart_after,
         depart_before=depart_before,
+        transfer_mode=TRANSFER_SERVER,
         transfer_stations=(),
     )
 
@@ -248,7 +255,10 @@ def _matches_transfer(journey: Journey, request: SearchRequest) -> bool:
         return True
     minutes = journey.transfer_minutes
     if minutes is None:
-        return False
+        # 셈할 수 없는 것은 "모름" 이지 "조건 밖" 이 아닙니다. 조건을 하나도
+        # 걸지 않았는데 서버가 준 여정을 버리면, 사람은 왜 안 나오는지 알 수
+        # 없습니다. 조건을 건 경우에만 버립니다.
+        return not (request.min_transfer_minutes or request.max_transfer_minutes)
     if minutes < request.min_transfer_minutes:
         return False
     if request.max_transfer_minutes and minutes > request.max_transfer_minutes:
@@ -305,7 +315,7 @@ def rejection_lines(
         numbers = "+".join(journey.train_numbers())
         lines.append(
             f"  · {names} {numbers} "
-            f"{journey.departure_clock[:2]}:{journey.departure_clock[2:4]}"
+            f"{format_clock(journey.departure_clock)}"
             f" 출발 — {', '.join(failed)} 때문에 빠짐"
         )
     if len(rejected) > samples:
@@ -502,10 +512,19 @@ def _leg_candidates(
     무궁화가 있어도 못 봅니다.
     """
     trains: list[TrainSummary] = []
+    # _walk 는 커서가 없으면 마지막 행의 시각부터 다시 묻습니다. 그래서 같은
+    # 열차가 두 페이지에 겹쳐 옵니다 — 걸러 내지 않으면 열두 자리를 같은
+    # 열차가 두 번 먹습니다.
+    seen: set[tuple[str, str]] = set()
     for result in _direct_pages(client, query, max_pages=CUSTOM_LEG_MAX_PAGES):
-        trains.extend(
-            train for train in result.trains if _wanted_kind(train, request)
-        )
+        for train in result.trains:
+            if not _wanted_kind(train, request):
+                continue
+            mark = ((train.train_no or "").strip(), normalize_clock(train.departure_time))
+            if mark in seen:
+                continue
+            seen.add(mark)
+            trains.append(train)
     return trains[:MAX_CUSTOM_LEGS_PER_SIDE]
 
 
@@ -543,6 +562,11 @@ def search_custom_transfer(
     첫 구간의 가장 이른 도착 시각부터 묻습니다.
     """
     journeys: list[Journey] = []
+    wanted = [s.strip() for s in request.transfer_stations if s.strip()]
+    # 예전에는 전체를 만든 뒤 앞에서 40편을 잘랐습니다. 그러면 첫 환승역이
+    # 예산을 다 먹고 나머지 역은 결과가 하나도 안 나옵니다 — 사람은 그 역을
+    # 고른 적이 없는 것처럼 보게 됩니다.
+    per_station = max(1, MAX_CUSTOM_JOURNEYS // max(1, len(wanted)))
     for station in request.transfer_stations:
         name = station.strip()
         if not name or name in (request.departure, request.arrival):
@@ -563,26 +587,53 @@ def search_custom_transfer(
             if normalize_clock(train.arrival_time)
         ]
         earliest = min(arrivals) if arrivals else request.depart_after or "000000"
-        second_legs = _second_leg_candidates(client, request, name, earliest)
+        try:
+            second_legs = _second_leg_candidates(client, request, name, earliest)
+        except KorailApiError as exc:
+            # 이 역 하나가 실패했다고 앞서 만들어 둔 다른 역의 조합까지
+            # 버리지 않습니다.
+            if log:
+                log(f"{name} 경유 2구간 조회 실패({type(exc).__name__}): {exc}")
+            continue
         if not second_legs:
             if log:
                 log(f"{name} 경유: 두 번째 구간이 없습니다")
             continue
+        made = 0
         for first in first_legs:
+            # 1구간이 자정을 넘겨 도착하면 갈아탈 열차는 **다음 날** 것입니다.
+            # 그런데 2구간 조회는 오늘 날짜로만 물어봤습니다. 그대로 붙이면
+            # 어제 떠난 열차를 "몇 시간 뒤 환승" 으로 내놓게 됩니다 —
+            # elapsed_minutes 가 자정을 넘긴 값을 +24시간으로 돌려주기
+            # 때문입니다. 다음 날을 조회할 방법이 없으므로 여기서 뺍니다.
+            if Journey(legs=(first,), source=JourneySource.DIRECT).crosses_midnight(0):
+                if log:
+                    log(
+                        f"{name} 경유: {(first.train_no or '').strip()} 은 자정을 넘겨 "
+                        "도착해 이 날짜의 2구간과 이을 수 없습니다."
+                    )
+                continue
             for second in second_legs:
                 wait = elapsed_minutes(first.arrival_time, second.departure_time)
                 if wait is None:
                     continue
-                # 하루를 넘겨 붙는 조합은 환승이 아닙니다. 자정을 넘긴 값은
-                # elapsed_minutes 가 +24시간으로 돌려주므로 여기서 자릅니다.
+                # 2구간이 1구간 도착보다 이르면 elapsed_minutes 가 +24시간으로
+                # 돌려줍니다. 그것은 환승이 아니라 하루 뒤입니다.
                 if wait >= 12 * 60:
                     continue
+                if made >= per_station:
+                    if log:
+                        log(f"{name} 경유: 조합이 많아 {per_station}편까지만 봅니다.")
+                    break
+                made += 1
                 journeys.append(
                     Journey(
                         legs=(first, second),
                         source=JourneySource.CUSTOM_TRANSFER,
                     )
                 )
+            if made >= per_station:
+                break
     return journeys
 
 
@@ -603,7 +654,7 @@ def deduplicate(journeys: Iterable[Journey]) -> list[Journey]:
     서버 환승과 직접 조합이 같은 두 구간을 낼 수 있습니다. 그때 남는 것은
     먼저 온 쪽 — 호출자가 검증된 것을 앞에 놓습니다.
     """
-    seen: set[tuple[tuple[str, str, str, str], ...]] = set()
+    seen: set[JourneyKey] = set()
     unique: list[Journey] = []
     for journey in journeys:
         key = journey.key()
@@ -618,6 +669,8 @@ def _isolated(
     label: str,
     produce: Callable[[], list[Journey]],
     log: Logger | None,
+    *,
+    strict: bool = False,
 ) -> list[Journey]:
     """한 갈래가 실패해도 다른 갈래의 결과를 버리지 않습니다.
 
@@ -633,6 +686,20 @@ def _isolated(
         # (자동예매가 그렇게 이어 갑니다), DynaPath 거절은 자동화로 표시됐다는
         # 뜻이라 되풀이할수록 나빠집니다.
         raise
+    except KorailTransportError:
+        # 사람이 [조회] 를 누른 것이라면 삼킵니다 — 환승 쪽이 끊겼다고 이미
+        # 받아 둔 직통 목록까지 지우는 것은 손해입니다. 자동예매는 다릅니다:
+        # 여기서 삼키면 "연속 전송 실패 다섯 번이면 멈춤" 이 영영 동작하지
+        # 않고, 인터넷이 끊긴 밤새 "고른 열차가 조회 결과에 없습니다" 만
+        # 찍힙니다. 그래서 부르는 쪽이 고릅니다.
+        if strict:
+            raise
+        if log:
+            log(
+                f"{label} 조회가 실패했습니다(전송 실패) "
+                "— 나머지 결과는 그대로 보여 줍니다."
+            )
+        return []
     except (KorailApiError, ValueError) as exc:
         if log:
             log(
@@ -647,15 +714,22 @@ def search_journeys(
     request: SearchRequest,
     *,
     log: Logger | None = None,
+    strict: bool = False,
 ) -> list[Journey]:
     """조회 조건 하나를 화면에 그릴 여정 목록으로.
 
     검증된 것을 먼저 담습니다 — 직통, 서버 환승, 그다음 직접 조합. 중복은 앞의
     것이 남으므로 같은 두 구간이 양쪽에서 나오면 서버가 짝지은 쪽이 이깁니다.
+
+    ``strict`` 는 자동예매가 씁니다. 참이면 전송 실패를 삼키지 않고 올려 보내
+    감시 고리가 "연속 실패" 를 셀 수 있게 합니다. 사람이 누른 조회는 거짓이라
+    한 갈래가 끊겨도 나머지 결과를 그대로 보여 줍니다.
     """
     journeys: list[Journey] = []
     if request.include_direct:
-        found = _isolated("직통", lambda: search_direct(client, request, log=log), log)
+        found = _isolated(
+            "직통", lambda: search_direct(client, request, log=log), log, strict=strict
+        )
         journeys.extend(found)
         if log:
             log(f"직통 {len(found)}편")
@@ -667,12 +741,14 @@ def search_journeys(
                     :MAX_CUSTOM_JOURNEYS
                 ],
                 log,
+                strict=strict,
             )
         else:
             found = _isolated(
                 "환승",
                 lambda: search_server_transfer(client, request, log=log),
                 log,
+                strict=strict,
             )
         journeys.extend(found)
         if log:

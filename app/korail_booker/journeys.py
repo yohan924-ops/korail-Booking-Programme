@@ -34,6 +34,10 @@ SOLD_OUT_SEAT_CODE = "13"
 
 MINUTES_PER_DAY = 24 * 60
 
+#: 여정 하나를 다시 알아보는 열쇠의 모양 — 구간마다
+#: ``(열차번호, 출발일, 출발시각, 출발역, 도착역)``.
+JourneyKey = tuple[tuple[str, str, str, str, str], ...]
+
 
 class SeatPreference(Enum):
     """사용자가 고른 객실. ``ANY`` 는 "구별 없이"입니다."""
@@ -350,6 +354,17 @@ class Journey:
         """첫 구간 출발부터 마지막 구간 도착까지. 환승 대기가 포함됩니다."""
         return elapsed_minutes(self.first.departure_time, self.last.arrival_time)
 
+    def crosses_midnight(self, index: int) -> bool:
+        """이 구간이 자정을 넘겨 도착하는가.
+
+        검색 행은 **출발일만** 줍니다(``h_dpt_dt``). 도착이 출발보다 이르면
+        하루를 넘긴 것이라고 볼 수밖에 없고, 앱이 화면에 그러는 것과 같습니다.
+        """
+        train = self.legs[index]
+        start = clock_to_minutes(train.departure_time)
+        end = clock_to_minutes(train.arrival_time)
+        return start is not None and end is not None and end < start
+
     @property
     def transfer_minutes(self) -> int | None:
         """환승역에서 기다리는 시간. 직통이면 ``None``."""
@@ -464,14 +479,19 @@ class Journey:
                 return seat_class
         return None
 
-    def key(self) -> tuple[tuple[str, str, str, str], ...]:
+    def key(self) -> JourneyKey:
         """다시 조회했을 때 같은 여정인지 알아보는 값.
 
         열차번호만으로는 부족합니다 — 같은 번호가 날짜와 구간을 달리해 옵니다.
+        **날짜가 들어 있어야 합니다.** 없으면 같은 열차를 오늘과 내일 두 줄로
+        담았을 때 둘이 같은 열쇠가 되어, 둘째 감시가 "이미 보고 있다" 로 조용히
+        시작되지 않습니다. 예약 폼을 못 만들어 뺀 열차도 그 번호의 다른 날짜까지
+        함께 빠집니다.
         """
         return tuple(
             (
                 (train.train_no or "").strip(),
+                (train.departure_date or "").strip(),
                 normalize_clock(train.departure_time),
                 (train.departure_station_code or train.departure_station_name or ""),
                 (train.arrival_station_code or train.arrival_station_name or ""),

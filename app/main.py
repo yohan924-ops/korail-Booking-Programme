@@ -29,7 +29,10 @@ def main() -> int:
         # 빠진 것이 무엇인지는 스택트레이스가 아니라 한 줄로 말해 줍니다.
         # 여기서 걸리는 사람은 대개 설치 단계를 건너뛴 것뿐입니다.
         missing = (getattr(exc, "name", "") or str(exc)).split(".")[0]
-        if missing == "tkinter":
+        # 리눅스에서 python3-tk 가 없으면 빠지는 것은 ``tkinter`` 가 아니라
+        # 그 안의 C 확장 ``_tkinter`` 입니다. 그 이름을 안 보면 정작 가장 흔한
+        # 경우에 안내가 안 나가고 스택트레이스만 뜹니다.
+        if missing in ("tkinter", "_tkinter"):
             print(
                 "Tkinter 가 없습니다.\n"
                 "  Windows/macOS: python.org 설치본을 쓰세요"

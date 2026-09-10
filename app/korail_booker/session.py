@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 
 from korail_mobile_api import (
@@ -34,19 +35,31 @@ MIN_REQUEST_INTERVAL_S = 1.5
 
 
 class Pacer:
-    """요청 사이의 최소 간격을 강제합니다."""
+    """요청 사이의 최소 간격을 강제합니다. **스레드 여럿이 같이 씁니다.**
+
+    이 프로그램은 클라이언트 하나를 조회 스레드와 감시 스레드 여럿이 나눠
+    씁니다. 잠금 없이 재고 자면, 스레드 N 개가 같은 ``_last`` 를 읽고 동시에
+    깨어나 요청 N 개를 한꺼번에 쏩니다 — 지키려던 1.5초 바닥이 그 순간
+    사라집니다. 그 바닥은 KORAIL 이 매크로성 트래픽에 IP 를 막기 때문에
+    있는 것입니다.
+
+    잠금을 잡은 채로 잡니다. 그래야 다음 스레드가 **내가 보낸 시각 이후로**
+    다시 재고, 간격이 정말 직렬로 지켜집니다.
+    """
 
     def __init__(self, min_interval_s: float = MIN_REQUEST_INTERVAL_S) -> None:
         self.min_interval_s = min_interval_s
         self._last: float | None = None
+        self._lock = threading.Lock()
 
     def wait(self) -> None:
-        now = time.monotonic()
-        if self._last is not None:
-            remaining = self.min_interval_s - (now - self._last)
-            if remaining > 0:
-                time.sleep(remaining)
-        self._last = time.monotonic()
+        with self._lock:
+            now = time.monotonic()
+            if self._last is not None:
+                remaining = self.min_interval_s - (now - self._last)
+                if remaining > 0:
+                    time.sleep(remaining)
+            self._last = time.monotonic()
 
 
 def install_pacing(client: KorailClient, pacer: Pacer | None = None) -> Pacer:

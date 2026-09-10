@@ -8,12 +8,25 @@ Tkinter 를 부르지 않습니다 — 화면 없이 시험할 수 있어야 하
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 
 #: 기한이 이만큼 남으면 급한 것으로 봅니다. 화면이 색을 바꾸는 기준입니다.
 URGENT_SECONDS = 3 * 60
+
+#: 서버가 주는 기한은 **한국 시각**입니다. 컴퓨터의 시계가 다른 시간대면
+#: 그대로 빼는 순간 카운트다운이 몇 시간씩 틀립니다 — 여행 중이거나 시간대를
+#: 바꿔 둔 노트북에서 실제로 그렇습니다. 한국은 서머타임이 없으므로 고정
+#: 오프셋이면 충분하고, ``zoneinfo`` 를 들이지 않아도 됩니다(윈도우에서는
+#: ``tzdata`` 가 따로 필요합니다).
+KST = timezone(timedelta(hours=9))
+
+
+def now_kst() -> datetime:
+    """지금을 한국 시각으로. 서버가 준 기한과 같은 자로 재기 위한 것입니다."""
+    return datetime.now(KST).replace(tzinfo=None)
 
 
 def parse_deadline(date_text: str | None, time_text: str | None) -> datetime | None:
@@ -27,10 +40,14 @@ def parse_deadline(date_text: str | None, time_text: str | None) -> datetime | N
     clock = (time_text or "").strip()
     if len(date) != 8 or not date.isdigit():
         return None
-    if len(clock) not in (4, 6) or not clock.isdigit():
+    # 서버는 이 값을 JSON 숫자로도 보냅니다 — 09:30:00 이 93000 으로 옵니다.
+    # 앞의 0 을 되살리지 않으면 오전 열 시 이전의 기한을 통째로 "모름" 으로
+    # 버리게 됩니다. 그런데 그 시간대가 밤새 잡은 예약의 기한입니다.
+    if not clock.isdigit() or len(clock) not in (4, 5, 6):
         return None
     if len(clock) == 4:
         clock += "00"
+    clock = clock.zfill(6)
     try:
         return datetime.strptime(date + clock, "%Y%m%d%H%M%S")
     except ValueError:
@@ -40,7 +57,9 @@ def parse_deadline(date_text: str | None, time_text: str | None) -> datetime | N
 def remaining_seconds(deadline: datetime | None, now: datetime) -> int | None:
     if deadline is None:
         return None
-    return int((deadline - now).total_seconds())
+    # 올림입니다. int() 는 0 쪽으로 자르므로 0.4초가 0 이 되어, 기한이 아직
+    # 남았는데도 "기한 지남" 으로 회색이 되는 순간이 생깁니다.
+    return math.ceil((deadline - now).total_seconds())
 
 
 def remaining_text(deadline: datetime | None, now: datetime) -> str:

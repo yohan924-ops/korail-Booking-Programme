@@ -90,6 +90,10 @@ class TelegramNotifier:
         self.config = config
         self._base_url = base_url.rstrip("/")
         self._client = httpx.Client(timeout=timeout, transport=transport)
+        #: 텔레그램이 마지막으로 알려 준 거절 사유. 없으면 빈 문자열입니다.
+        #: 화면이 "실패했습니다" 뒤에 이것을 붙여 줍니다 — 그것이 없으면
+        #: 사람은 무엇을 고쳐야 할지 알 수 없습니다.
+        self.last_error = ""
 
     def close(self) -> None:
         self._client.close()
@@ -101,7 +105,24 @@ class TelegramNotifier:
         self.close()
 
     def _url(self, method: str) -> str:
-        return f"{self._base_url}/bot{self.config.token}/{method}"
+        # 앞뒤 공백을 뗍니다. 다른 모든 검사는 ``token.strip()`` 을 보는데
+        # 주소만 원문을 쓰면, 설정 파일에 줄바꿈이 끼어든 토큰이 검사는
+        # 통과하고 요청만 조용히 실패합니다.
+        return f"{self._base_url}/bot{self.config.token.strip()}/{method}"
+
+    @staticmethod
+    def _body(response: httpx.Response) -> dict[str, object] | None:
+        """응답 본문을 사전으로. 사전이 아니면 ``None``.
+
+        200 인데 본문이 배열이나 문자열인 경우가 있습니다(중간의 프록시가
+        끼어들면 그렇습니다). ``.get`` 을 바로 부르면 AttributeError 가 새어
+        나가 알림 경로 전체가 죽습니다.
+        """
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        return payload if isinstance(payload, dict) else None
 
     def send(self, text: str) -> bool:
         """메시지 한 통. 보냈으면 참.
@@ -120,14 +141,22 @@ class TelegramNotifier:
                     "disable_web_page_preview": "true",
                 },
             )
-        except httpx.HTTPError:
+        except Exception:
+            # httpx.InvalidURL 은 HTTPError 가 아닙니다. 토큰에 줄바꿈이
+            # 하나 끼면 그것이 여기서 새어 나가 그날 밤 알림이 통째로
+            # 사라졌습니다. 알림 실패가 예약을 죽이면 안 됩니다.
             return False
         if response.status_code != 200:
             return False
-        try:
-            return bool(response.json().get("ok"))
-        except ValueError:
+        payload = self._body(response)
+        if payload is None:
             return False
+        if not payload.get("ok"):
+            # 텔레그램이 왜 거절했는지는 여기에만 옵니다. 버리면 사람은
+            # "안 와요" 말고는 아무 단서도 못 얻습니다.
+            self.last_error = str(payload.get("description") or "")[:200]
+            return False
+        return True
 
     def bot_username(self) -> str | None:
         """봇의 아이디(``@`` 없이). 토큰이 맞는지 확인하는 가장 싼 방법입니다.
@@ -140,15 +169,14 @@ class TelegramNotifier:
             return None
         try:
             response = self._client.get(self._url("getMe"))
-        except httpx.HTTPError:
+        except Exception:
             return None
         if response.status_code != 200:
             return None
-        try:
-            payload = response.json()
-        except ValueError:
-            return None
-        if not payload.get("ok"):
+        payload = self._body(response)
+        if payload is None or not payload.get("ok"):
+            if payload is not None:
+                self.last_error = str(payload.get("description") or "")[:200]
             return None
         result = payload.get("result")
         if not isinstance(result, dict):
@@ -168,16 +196,20 @@ class TelegramNotifier:
         if not self.config.token.strip():
             return None
         try:
-            response = self._client.get(self._url("getUpdates"), params={"limit": 10})
-        except httpx.HTTPError:
+            # ``offset=-1`` 이 **가장 마지막 것 하나**를 줍니다. ``limit`` 만
+            # 주면 텔레그램은 밀린 것 중 **가장 오래된** 쪽부터 돌려주므로,
+            # 밀린 메시지가 많으면 엉뚱한 옛 대화의 번호를 채워 넣습니다.
+            response = self._client.get(
+                self._url("getUpdates"), params={"offset": -1, "limit": 1}
+            )
+        except Exception:
             return None
         if response.status_code != 200:
             return None
-        try:
-            payload = response.json()
-        except ValueError:
-            return None
-        if not payload.get("ok"):
+        payload = self._body(response)
+        if payload is None or not payload.get("ok"):
+            if payload is not None:
+                self.last_error = str(payload.get("description") or "")[:200]
             return None
         updates = payload.get("result")
         if not isinstance(updates, list):

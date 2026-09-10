@@ -12,8 +12,10 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,9 @@ APP_DIR_NAME = "korail-booker"
 SETTINGS_FILE_NAME = "settings.json"
 #: 소유자만 읽고 쓰기. 토큰이 들어 있는 파일입니다.
 SETTINGS_FILE_MODE = 0o600
+#: 정수 칸의 상한. 승객 수도 분 수도 이보다 클 이유가 없고, 이보다 크면
+#: 나중에 산술에서 터집니다.
+MAX_INT_SETTING = 10_000_000
 
 
 def settings_dir() -> Path:
@@ -96,10 +101,23 @@ def _coerce(raw: dict[str, Any]) -> Settings:
         if isinstance(default, bool):
             values[name] = bool(value) if isinstance(value, bool) else default
         elif isinstance(default, int) and not isinstance(default, bool):
-            values[name] = value if type(value) is int else default
-        elif isinstance(default, float):
+            # 자릿수가 큰 정수는 그대로 두면 나중에 터집니다 — 감시 시간에
+            # 10**400 이 들어오면 ``time.monotonic() + 분*60`` 이 OverflowError
+            # 로 새어 나가 감시 시작이 통째로 실패합니다.
             values[name] = (
-                float(value) if isinstance(value, (int, float)) else default
+                value if type(value) is int and 0 <= value <= MAX_INT_SETTING
+                else default
+            )
+        elif isinstance(default, float):
+            # bool 은 int 의 하위형이라 그냥 통과합니다. NaN·Infinity 도
+            # JSON 이 실어 나릅니다 — NaN 은 모든 ``<`` 비교를 거짓으로 만들어
+            # 조회 주기 하한 검사를 통째로 무력화합니다(주기 0 초로 도는 감시).
+            values[name] = (
+                float(value)
+                if isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+                else default
             )
         elif isinstance(default, list):
             values[name] = (
@@ -107,6 +125,12 @@ def _coerce(raw: dict[str, Any]) -> Settings:
             )
         else:
             values[name] = value if isinstance(value, str) else default
+    # 값이 정해져 있는 칸은 모르는 글자를 받지 않습니다. 예전에는 손으로 고친
+    # transfer_mode 하나가 환승역 필터를 조용히 꺼 버렸습니다.
+    if values.get("transfer_mode") not in ("server", "custom"):
+        values["transfer_mode"] = defaults.transfer_mode
+    if values.get("seat_preference") not in ("any", "general", "special"):
+        values["seat_preference"] = defaults.seat_preference
     return Settings(**values)
 
 
@@ -115,11 +139,14 @@ def load(path: Path | None = None) -> Settings:
     target = path or settings_path()
     try:
         raw = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        if not isinstance(raw, dict):
+            return Settings()
+        return _coerce(raw)
+    except (OSError, ValueError, TypeError, OverflowError):
+        # 손으로 고칠 수 있는 파일입니다. 무엇이 들어 있든 창은 떠야 합니다 —
+        # 예전에는 자릿수가 큰 정수 하나가 OverflowError 로 새어 나와 프로그램이
+        # 아예 시작하지 못했습니다.
         return Settings()
-    if not isinstance(raw, dict):
-        return Settings()
-    return _coerce(raw)
 
 
 def save(settings: Settings, path: Path | None = None) -> Path | None:
@@ -128,13 +155,32 @@ def save(settings: Settings, path: Path | None = None) -> Path | None:
     저장 실패로 예매가 멈추면 안 됩니다 — 설정은 편의이고 예매가 본론입니다.
     """
     target = path or settings_path()
+    handle = None
+    temporary: Path | None = None
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(asdict(settings), ensure_ascii=False, indent=2)
-        target.write_text(payload, encoding="utf-8")
-        # 토큰이 든 파일이라 권한을 좁힙니다. Windows 에서는 chmod 가 사실상
-        # 무의미하지만 실패하지도 않습니다.
+        # 옆에 새로 쓰고 마지막에 갈아 끼웁니다. 제자리에 덮어쓰면 쓰다가
+        # 멈춘 순간 **원래 있던 설정과 토큰까지 함께 잃습니다.**
+        descriptor, name = tempfile.mkstemp(
+            dir=str(target.parent), prefix=".settings-", suffix=".tmp"
+        )
+        temporary = Path(name)
+        # 만드는 순간부터 소유자 전용입니다. 예전에는 umask 권한으로 만든 뒤에야
+        # 좁혔는데, 그 사이에 토큰이 남에게 읽힐 수 있었습니다.
+        os.chmod(temporary, SETTINGS_FILE_MODE)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+        temporary = None
         os.chmod(target, SETTINGS_FILE_MODE)
     except OSError:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
         return None
     return target

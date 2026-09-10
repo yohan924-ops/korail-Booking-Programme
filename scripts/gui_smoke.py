@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -81,7 +82,12 @@ def main() -> int:
     args = parser.parse_args()
 
     # 진짜 설정 파일을 건드리지 않습니다. 저장 갈래를 눌러 보기 때문입니다.
-    os.environ["HOME"] = tempfile.mkdtemp(prefix="korail-gui-smoke-")
+    # HOME 만 바꾸면 모자랍니다 — settings_dir() 는 XDG_CONFIG_HOME 을 먼저
+    # 보고, 윈도우에서는 APPDATA 를 봅니다. 그것을 안 막으면 진짜 설정을
+    # 읽어 **토큰을 화면에 찍고**, 저장 갈래가 그 파일을 덮어씁니다.
+    sandbox = tempfile.mkdtemp(prefix="korail-gui-smoke-")
+    for name in ("HOME", "XDG_CONFIG_HOME", "APPDATA"):
+        os.environ[name] = sandbox
 
     import tkinter as tk
 
@@ -118,6 +124,9 @@ def main() -> int:
     root = tk.Tk()
     # 로그인 팝업은 이 확인의 대상이 아닙니다. 본 창을 막으면 아무것도 못 누릅니다.
     ui_module.BookerApp.open_login = lambda self: None  # type: ignore[method-assign]
+    # 역 목록도 막습니다. 켜자마자 진짜 KORAIL 요청이 나가고, 실패하면 모달
+    # 오류창이 떠서 이 스크립트가 영영 안 끝납니다.
+    ui_module.BookerApp.on_load_stations = lambda self: None  # type: ignore[method-assign]
     app = ui_module.BookerApp(root)
     # 창이 처음 그려진 뒤에야 확정되는 것이 있습니다 — 화면 크기에 맞춘 첫
     # 크기와, 그 크기로 다시 잰 칸별 최소 높이. 한 박자 돌리고 봅니다.
@@ -216,7 +225,11 @@ def main() -> int:
             collect(child)
 
     collect(window)
+    # 비우고 넣습니다. 그냥 insert 하면 이미 있던 값 뒤에 붙어, 확인하려던
+    # 값이 아니라 이어 붙은 쓰레기를 확인하게 됩니다.
+    entries[0].delete(0, "end")  # type: ignore[attr-defined]
     entries[0].insert(0, "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ")  # type: ignore[attr-defined]
+    entries[1].delete(0, "end")  # type: ignore[attr-defined]
     entries[1].insert(0, "987654321")  # type: ignore[attr-defined]
     once = by_text(window, "이번만 쓰기")
     check("[이번만 쓰기] 단추가 있다", once is not None)
@@ -234,8 +247,15 @@ def main() -> int:
         root.update()
         root.after(300, root.quit)
         root.mainloop()
-        os.system(f"import -window root {args.shot}")
-        print(f"화면을 {args.shot} 에 찍었습니다.")
+        # 셸을 거치지 않습니다(경로에 공백이나 따옴표가 있어도 안전).
+        # 그리고 **정말 찍혔는지** 봅니다 — 예전에는 실패해도 찍었다고 적었습니다.
+        taken = subprocess.run(
+            ["import", "-window", "root", args.shot], check=False
+        )
+        if taken.returncode == 0:
+            print(f"화면을 {args.shot} 에 찍었습니다.")
+        else:
+            print(f"화면을 찍지 못했습니다(import 종료 코드 {taken.returncode}).")
 
     root.destroy()
     print(f"\n{sum(passed)}/{len(passed)} 통과")
