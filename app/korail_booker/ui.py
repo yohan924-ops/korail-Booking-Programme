@@ -124,6 +124,8 @@ CALENDAR_BG = "#e2e2e2"
 CALENDAR_BORDER = "#7a7a7a"
 #: 칸 하나가 최소 높이 말고도 먹는 몫 — 손잡이와 위아래 여백.
 PANE_CHROME = 13
+#: 열차 표 칸의 최소 높이 — 머리글·상태 줄에 네 줄 남짓.
+RESULTS_MIN_HEIGHT = 185
 #: 스스로 굴러가는 위젯. 이 위에서는 휠을 그쪽에 양보합니다.
 SELF_SCROLLING = frozenset({"Text", "Treeview", "Listbox"})
 #: 잡은 예약 표의 칸 — (이름, 폭, 정렬).
@@ -139,8 +141,12 @@ HOLD_LAYOUT = (
 HOLD_COLUMNS = tuple(name for name, _width, _anchor in HOLD_LAYOUT)
 #: 예매 대상 표의 칸.
 TARGET_LAYOUT = (
-    ("상태", 115, "center"),
-    ("여정", 430, "w"),
+    # 구간별로 사는 것인지가 상태 칸에 붙습니다 — 맨 앞이라 표를 아무리
+    # 좁혀도 잘리지 않습니다. 여정 칸 끝에 달았더니 실제로 안 보였습니다.
+    ("상태", 140, "center"),
+    ("여정", 360, "w"),
+    # 조회 결과와 같은 칸입니다. 촉박한 환승 경고가 여기서도 보여야 합니다.
+    ("환승 대기", 150, "center"),
     # 조회 결과에서 보던 것이 여기서 사라지면, 담고 나서 좌석이 어땠는지
     # 다시 위 표를 뒤져야 합니다.
     ("일반실", 165, "w"),
@@ -469,7 +475,8 @@ class BookerApp:
         키우고 조회 칸을 줄일 수 있습니다.
         """
         self.root.title("코레일 예매 도우미")
-        self.root.geometry("1240x1000")
+        # 첫 크기는 다 지은 뒤에 정합니다(:meth:`_fit_to_screen`) — 안에 무엇이
+        # 들어갈지 알아야 얼마가 필요한지 알 수 있고, 화면보다 커서도 안 됩니다.
         # 스크롤이 있으므로 최소 크기를 크게 잡을 이유가 없습니다. 작은
         # 노트북에서도 창이 화면 밖으로 나가지 않아야 합니다.
         self.root.minsize(900, 480)
@@ -480,7 +487,13 @@ class BookerApp:
         canvas.grid(row=0, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(self.root, orient="vertical", command=canvas.yview)
         scroll.grid(row=0, column=1, sticky="ns")
-        canvas.configure(yscrollcommand=scroll.set)
+        # 가로도 굴러갑니다. 없으면 창보다 넓은 묶음의 오른쪽이 **그냥
+        # 잘립니다** — 환승 조건 칸의 [후보 갱신]·[비우기] 가 실제로 그렇게
+        # 사라져 있었습니다. 세로만 굴러가는 창에서는 그 사실조차 보이지
+        # 않습니다.
+        hscroll = ttk.Scrollbar(self.root, orient="horizontal", command=canvas.xview)
+        hscroll.grid(row=1, column=0, sticky="ew")
+        canvas.configure(yscrollcommand=scroll.set, xscrollcommand=hscroll.set)
         self.canvas = canvas
 
         # ttk 가 아니라 tk 의 PanedWindow 입니다. ttk 쪽은 칸마다 **최소 높이를
@@ -499,9 +512,15 @@ class BookerApp:
             # 안쪽은 창보다 좁아지지 않고, 묶음들의 최소 높이 합보다 낮아지지도
             # 않습니다. 낮아지면 PanedWindow 가 묶음을 눌러 버리고, 그때는
             # 스크롤로 볼 것도 남지 않습니다.
+            #
+            # 가로도 같습니다 — 안쪽이 요구하는 폭보다 좁게 잡으면 오른쪽이
+            # 잘려 나가고, 잘렸다는 것조차 보이지 않습니다. 넓게 잡고
+            # 스크롤로 보게 합니다.
+            body.update_idletasks()
+            span = max(body.winfo_reqwidth(), width)
             height = max(self._body_height(), visible)
-            canvas.itemconfigure(window, width=width, height=height)
-            canvas.configure(scrollregion=(0, 0, width, height))
+            canvas.itemconfigure(window, width=span, height=height)
+            canvas.configure(scrollregion=(0, 0, span, height))
 
         canvas.bind("<Configure>", lambda event: fit(event.width, event.height))
         # 휠은 창 어디서 굴려도 듣습니다. 다만 스스로 굴러가는 위젯 위에서는
@@ -509,6 +528,10 @@ class BookerApp:
         canvas.bind_all("<MouseWheel>", self._on_wheel)
         canvas.bind_all("<Button-4>", self._on_wheel)
         canvas.bind_all("<Button-5>", self._on_wheel)
+        # Shift 를 누르고 굴리면 가로입니다 — 창 어디서나 쓰는 몸짓입니다.
+        canvas.bind_all("<Shift-MouseWheel>", lambda e: self._on_wheel(e, "x"))
+        canvas.bind_all("<Shift-Button-4>", lambda e: self._on_wheel(e, "x"))
+        canvas.bind_all("<Shift-Button-5>", lambda e: self._on_wheel(e, "x"))
 
         self._build_login(body)
         self._build_query(body)
@@ -519,7 +542,16 @@ class BookerApp:
         # 묶음을 다 붙인 뒤라야 최소 높이를 잴 수 있고, 그 합을 알아야 스크롤
         # 영역을 정할 수 있다 — 창이 그보다 작으면 굴려서 본다.
         self._settle_panes()
+        self._fit_to_screen(body)
+        # 창 크기가 바뀌면 감싸는 라벨이 줄 수를 다시 잡습니다 — 그러면 아까
+        # 잰 최소 높이가 틀리고, 그 칸의 아래쪽이 잘립니다. 실제로 [조회]
+        # 단추가 그렇게 잘렸습니다. 그래서 **새 크기로 배치가 끝난 뒤에**
+        # 다시 잽니다. ``update_idletasks`` 만으로는 이르고, 창이 처음 그려질
+        # 때까지 한 박자 더 걸리는 것이 있어 그 뒤에 한 번 더 잽니다.
+        self.root.update()
+        self._settle_panes()
         fit(canvas.winfo_width(), canvas.winfo_height())
+        self.root.after(80, lambda: self._resettle(fit))
         # Enter 는 칸마다 답니다. 창 전체에 걸면 어느 칸에 있든 조회가
         # 돌았습니다 — 눈이 가 있는 칸이 무엇을 뜻하는지가 사람의 기대입니다.
         # 로그인 칸의 Enter 는 팝업 안에서 따로 답니다.
@@ -527,6 +559,29 @@ class BookerApp:
             widget.bind("<Return>", lambda _event: self.on_search())
         # 켜자마자 로그인부터 묻습니다. 본 창은 그동안 눌리지 않습니다.
         self.root.after(300, self.open_login)
+
+    def _resettle(self, fit: Callable[[int, int], None]) -> None:
+        """다 그려진 뒤 최소 높이를 한 번 더 맞춥니다. 값이 같으면 아무 일도
+        일어나지 않습니다."""
+        self._settle_panes()
+        fit(self.canvas.winfo_width(), self.canvas.winfo_height())
+
+    def _fit_to_screen(self, body: tk.PanedWindow) -> None:
+        """첫 창 크기를 **안에 든 것과 화면 둘 다** 보고 정합니다.
+
+        고정값(``1240x1000``)으로 잡아 두었더니 두 가지가 한꺼번에 틀어졌습니다
+        — 넓은 화면에서도 환승 조건 칸의 오른쪽이 잘려 나갔고, 칸들의 최소
+        높이 합이 창보다 커서 열차 표가 켜자마자 한 줄로 눌렸습니다.
+
+        그래서 필요한 만큼 잡되 화면의 92% 를 넘지 않습니다. 모자라면 스크롤이
+        받습니다 — 화면 밖으로 나간 창은 스크롤로도 되돌릴 수 없습니다.
+        """
+        self.root.update_idletasks()
+        wanted_w = body.winfo_reqwidth() + 30
+        wanted_h = self._body_height() + 30
+        width = max(900, min(wanted_w, int(self.root.winfo_screenwidth() * 0.92)))
+        height = max(480, min(wanted_h, int(self.root.winfo_screenheight() * 0.92)))
+        self.root.geometry(f"{width}x{height}")
 
     def _add_pane(
         self,
@@ -576,7 +631,7 @@ class BookerApp:
         """
         return sum(self._pane_minimums) + PANE_CHROME * len(self._pane_minimums)
 
-    def _on_wheel(self, event: tk.Event) -> None:
+    def _on_wheel(self, event: tk.Event, axis: str = "y") -> None:
         widget = event.widget
         if not isinstance(widget, str) and widget.winfo_class() in SELF_SCROLLING:
             return
@@ -587,7 +642,10 @@ class BookerApp:
             step = 1
         else:
             step = -1 if event.delta > 0 else 1
-        self.canvas.yview_scroll(step, "units")
+        if axis == "x":
+            self.canvas.xview_scroll(step, "units")
+        else:
+            self.canvas.yview_scroll(step, "units")
 
     def _build_login(self, parent: tk.PanedWindow) -> None:
         """로그인 **상태**만 보이는 줄. 입력은 팝업이 받습니다.
@@ -898,9 +956,15 @@ class BookerApp:
         # 이 목록이 무엇이고 지금 무슨 구실을 하는지는 모드마다 다릅니다.
         # 화면이 그것을 말하지 않으면 고른 역이 필터인지 조회 대상인지 알 수
         # 없습니다.
-        ttk.Label(right, textvariable=self.transfer_role, foreground="#1f6feb").pack(
-            anchor="w"
-        )
+        # 감싸 주지 않으면 이 한 줄이 470px 을 먹고, 그만큼 조회 묶음이
+        # 오른쪽으로 삐져나가 잘립니다(창에는 가로 스크롤이 없습니다).
+        ttk.Label(
+            right,
+            textvariable=self.transfer_role,
+            foreground="#1f6feb",
+            wraplength=230,
+            justify="left",
+        ).pack(anchor="w")
         picker = ttk.Frame(right)
         picker.pack(anchor="w")
         self.transfer_list = tk.Listbox(
@@ -919,7 +983,7 @@ class BookerApp:
         # 어차피 두 구간을 따로 조회하는 것이라, 역 이름만 알면 됩니다.
         self.transfer_query = tk.StringVar()
         self.transfer_entry = AutocompleteCombobox(
-            adder, textvariable=self.transfer_query, width=12
+            adder, textvariable=self.transfer_query, width=9
         )
         self.transfer_entry.pack(side="left")
         self.transfer_entry.bind("<Return>", lambda _event: self.add_transfer_station())
@@ -933,31 +997,27 @@ class BookerApp:
             adder, text="빼기", width=5, command=self.remove_transfer_station
         )
         self.transfer_remove_button.pack(side="left")
-        # 목록 전체에 걸리는 단추는 아랫줄로 뗍니다. 한 줄에 다섯을 늘어놓으면
-        # 이 칸이 옆으로 부풀어 조회 묶음이 오른쪽으로 삐져나갑니다.
-        listwide = ttk.Frame(right)
-        listwide.pack(anchor="w", pady=(4, 0))
+        # 단추 넷이 한 줄입니다. 아랫줄로 떼면 이 묶음이 100px 높아지고, 그만큼
+        # 아래 표들이 눌립니다 — 실제로 그랬습니다. 이름을 줄여 한 줄에 넣습니다.
         self.transfer_load_button = ttk.Button(
-            listwide, text="구간 후보 갱신", width=14,
+            adder, text="후보 갱신", width=8,
             command=self.on_load_transfer_stations
         )
-        self.transfer_load_button.pack(side="left")
+        self.transfer_load_button.pack(side="left", padx=(4, 0))
         # 갱신이 더는 지우지 않으므로, 처음부터 다시 하려면 지우는 단추가
         # 따로 있어야 합니다.
         self.transfer_clear_button = ttk.Button(
-            listwide, text="목록 비우기", width=12,
+            adder, text="비우기", width=6,
             command=self.clear_transfer_stations
         )
-        self.transfer_clear_button.pack(side="left", padx=(4, 0))
+        self.transfer_clear_button.pack(side="left", padx=(2, 0))
         ttk.Label(
             right,
-            text="코레일이 이 구간에 답한 역입니다(qry.chtnStn.do) — 목록에서 "
-            "(검증) 이 붙습니다. [구간 후보 갱신] 은 서버 후보를 목록에 "
-            "더할 뿐, 있던 역을 지우지 않습니다. 지우려면 [빼기] 나 "
-            "[목록 비우기]. 직접 지정 모드에서는 서버 후보에 없는 역도 "
-            "[추가] 됩니다.",
+            text="코레일이 이 구간에 답한 역입니다(qry.chtnStn.do) — 목록에 "
+            "(검증) 이 붙습니다. [후보 갱신] 은 더하기만 하고 지우지 않습니다. "
+            "지우려면 [빼기]·[비우기].",
             foreground="#666666",
-            wraplength=260,
+            wraplength=230,
             justify="left",
         ).pack(anchor="w", pady=(2, 0))
 
@@ -1125,9 +1185,11 @@ class BookerApp:
     def _build_results(self, parent: tk.PanedWindow) -> None:
         frame = ttk.LabelFrame(parent, text="3. 열차 (고른 것을 [담기] 로 예매 대상에 넣습니다)")
         self.results_frame = frame
-        # 표는 줄여도 됩니다 — 보이는 줄 수만 줄어듭니다. 머리글과 상태 줄이
-        # 남는 높이입니다.
-        self._add_pane(parent, frame, minsize=110, stretch="always")
+        # 표는 줄여도 됩니다 — 보이는 줄 수만 줄어듭니다. 다만 **한 줄까지
+        # 줄어들면 쓸모가 없습니다.** 110 으로 두었더니 켜자마자 딱 한 줄만
+        # 보였습니다(칸들의 최소 높이 합이 창보다 커서 전부 최소로 눌립니다).
+        # 이 창에서 가장 자주 보는 표이므로 네 줄은 남깁니다.
+        self._add_pane(parent, frame, minsize=RESULTS_MIN_HEIGHT, stretch="always")
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(1, weight=1)
         self.outbound_title = ttk.Label(frame, text="가는 편", foreground="#1f6feb")
@@ -1875,7 +1937,7 @@ class BookerApp:
             self._write_log(
                 f"{route[0]}→{route[1]} 서버 환승역 후보 {len(names)}개를 "
                 "받아 (검증) 표시를 새로 달았습니다. 목록 자체는 그대로 "
-                "둡니다 — 서버 후보를 목록에 더하려면 [구간 후보 갱신] 을 누르세요."
+                "둡니다 — 서버 후보를 목록에 더하려면 [후보 갱신] 을 누르세요."
             )
             return
         self._transfer_stations_loaded(names)
@@ -2588,11 +2650,11 @@ class BookerApp:
         else:
             kind = "직통"
             transfer = "-"
-        names = " ".join(dict.fromkeys(name for name in journey.train_names() if name))
-        trains = "+".join(journey.train_numbers())
         return (
             f"{target.label[:2]}·{kind}" if target.label else kind,
-            f"{names} {trains}".strip(),
+            # 예매 대상·기록·알림과 같은 표기를 씁니다. 한 화면에서 같은
+            # 열차가 "00017" 과 "KTX 17" 로 갈리면 같은 것인지 알 수 없습니다.
+            one_line(journey.train_label()),
             format_clock(journey.departure_clock),
             format_clock(journey.arrival_clock),
             format_duration(journey.total_minutes),
@@ -2806,8 +2868,9 @@ class BookerApp:
                 "",
                 "end",
                 values=(
-                    f"▶ 감시 중 [{watch.tag}]" if watch else "○ 대기",
-                    self._target_summary(target),
+                    self._target_state(target, watch),
+                    target.journey.summary(),
+                    self._target_transfer(target),
                     target.journey.seat_text(KorailSeatClass.GENERAL),
                     target.journey.seat_text(KorailSeatClass.SPECIAL),
                     " · ".join(target.journey.extras()) or "-",
@@ -2827,19 +2890,28 @@ class BookerApp:
                 self.target_list.selection_add(item)
         self.stop_button.configure(state="normal" if self.any_running() else "disabled")
 
-    def _target_summary(self, target: Target) -> str:
-        """예매 대상 표의 여정 칸. 조회 결과와 같은 경고를 답니다.
+    def _target_state(self, target: Target, watch: Watch | None) -> str:
+        """상태 칸. 도는지와 **어떻게 사는지**를 함께 적습니다.
+
+        구간별로 산다는 것은 예약이 둘이 된다는 뜻입니다. 여정 칸 끝에 달아
+        두면 표가 조금만 좁아도 잘려 보이지 않습니다 — 실제로 그랬습니다.
+        맨 앞 칸은 잘리지 않습니다.
+        """
+        state = f"▶ 감시 중 [{watch.tag}]" if watch else "○ 대기"
+        if not books_as_one_reservation(target.journey):
+            state = f"{state} · 구간별"
+        return state
+
+    def _target_transfer(self, target: Target) -> str:
+        """예매 대상 표의 환승 대기 칸. 조회 결과와 같은 글입니다.
 
         담고 나면 위 표를 다시 보지 않습니다. 촉박한 환승이라는 사실이 담는
         순간 사라지면 경고를 한 셈이 되지 않습니다.
         """
-        text = target.describe()
         journey = target.journey
-        if is_tight_transfer(journey):
-            text = f"{TIGHT_MARK}{text}  ← 환승 {format_duration(journey.transfer_minutes)}, 촉박"
-        if not books_as_one_reservation(journey):
-            text = f"{text}  [구간별 예약]"
-        return text
+        if not journey.is_transfer:
+            return "-"
+        return _transfer_text(journey.transfer_station_name or "환승역", journey)
 
     def selected_indices(self) -> list[int]:
         """표에서 고른 줄의 번호. Treeview 는 항목 id 로 말하므로 되짚습니다."""

@@ -1570,7 +1570,7 @@ def test_the_manual_refresh_button_adds_and_never_deletes():
     assert "merged = existing + added" in body
 
     source = _ui_source()
-    assert 'text="목록 비우기"' in source
+    assert 'text="비우기", width=6' in source
     clear = _ui_function("clear_transfer_stations")
     assert "self._fill_transfer_stations([], select_all=False, keep=set())" in clear
 
@@ -1938,7 +1938,8 @@ def test_every_booking_log_line_says_which_watch_it_came_from():
 
 def test_the_target_list_shows_what_is_running():
     body = _ui_function("sync_target_list")
-    assert "▶ 감시 중" in body and "대기" in body
+    state = _ui_function("_target_state")
+    assert "▶ 감시 중" in state and "대기" in state
     # 도는 것과 안 도는 것을 색으로도 가릅니다.
     assert "'watching' if watch else 'idle'" in body
     # 다시 그린 뒤에도 고른 줄은 그대로 있어야 합니다.
@@ -2303,12 +2304,80 @@ def test_the_screen_learns_about_every_hold_the_booker_makes():
 # --- 창 크기 ------------------------------------------------------------------
 
 
+def test_the_window_scrolls_sideways_too():
+    """세로만 굴러가면 창보다 넓은 묶음의 오른쪽이 **그냥 잘립니다.**
+
+    환승 조건 칸의 [후보 갱신]·[비우기] 가 실제로 그렇게 사라져 있었고, 세로만
+    굴러가는 창에서는 잘렸다는 사실조차 보이지 않았습니다.
+    """
+    source = _ui_source()
+    assert 'orient="horizontal", command=canvas.xview' in source
+    assert "xscrollcommand=hscroll.set" in source
+    assert "self.canvas.xview_scroll(step, 'units')" in _ui_function("_on_wheel")
+    # 안쪽 폭은 창이 아니라 **안에 든 것**이 정합니다.
+    assert "span = max(body.winfo_reqwidth(), width)" in source
+
+
+def test_the_first_window_size_comes_from_the_content_and_the_screen():
+    """고정값으로 잡으면 넓은 화면에서도 잘리고, 좁은 화면에서는 삐져나갑니다."""
+    body = _ui_function("_fit_to_screen")
+    assert "body.winfo_reqwidth()" in body
+    assert "self.root.winfo_screenwidth() * 0.92" in body
+    assert "self.root.winfo_screenheight() * 0.92" in body
+    source = _ui_source()
+    assert 'self.root.geometry("1240x1000")' not in source
+    # 크기가 바뀌면 감싸는 라벨이 줄 수를 다시 잡습니다 — 다시 재야 합니다.
+    build = _ui_function("_build")
+    assert build.index("_fit_to_screen") < build.rindex("_settle_panes")
+    assert "self.root.after(80, lambda: self._resettle(fit))" in build
+
+
+def test_the_train_table_never_starts_at_one_row():
+    """이 창에서 가장 자주 보는 표입니다. 한 줄이면 쓸모가 없습니다."""
+    source = _ui_source()
+    assert "RESULTS_MIN_HEIGHT = 185" in source
+    assert "minsize=RESULTS_MIN_HEIGHT" in _ui_function("_build_results")
+
+
+def test_the_target_table_carries_the_warnings_where_they_cannot_be_cut():
+    """여정 칸 끝에 달았더니 표가 조금만 좁아도 안 보였습니다."""
+    source = _ui_source()
+    assert '("상태", 140, "center")' in source
+    assert '("환승 대기", 150, "center")' in source
+    state = _ui_function("_target_state")
+    assert "books_as_one_reservation(target.journey)" in state
+    assert "구간별" in state
+    transfer = _ui_function("_target_transfer")
+    assert "_transfer_text(" in transfer
+
+
+def test_one_train_is_written_the_same_way_everywhere():
+    """한 화면에서 같은 열차가 "00017" 과 "KTX 17" 로 갈리면 안 됩니다."""
+    body = _ui_function("_row_values")
+    assert "one_line(journey.train_label())" in body
+    assert "journey.train_numbers()" not in body
+
+
+def test_a_script_exists_to_actually_open_the_window():
+    """소스 확인은 "그렇게 쓰여 있다" 까지만 말해 줍니다.
+
+    그려 놓으니 [조회] 단추가 잘리더라는 것은 띄워 봐야 압니다. 시험 환경에는
+    tkinter 가 없으므로 그 확인은 스크립트로 두고 손으로 돌립니다.
+    """
+    script = REPO_ROOT / "scripts" / "gui_smoke.py"
+    assert script.exists()
+    text = script.read_text(encoding="utf-8")
+    assert "BookerApp" in text
+    # 진짜 설정 파일을 건드리면 안 됩니다 — 저장 갈래를 눌러 보기 때문입니다.
+    assert 'os.environ["HOME"] = tempfile.mkdtemp' in text
+
+
 def test_the_whole_window_scrolls():
     """기능이 늘면서 어떤 화면에서도 다 보이지는 않게 됐습니다."""
     source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
 
     assert "tk.Canvas(self.root" in source
-    assert 'canvas.configure(yscrollcommand=scroll.set)' in source
+    assert "canvas.configure(yscrollcommand=scroll.set, xscrollcommand=hscroll.set)" in source
     # 휠은 창 어디서 굴려도 듣되, 스스로 굴러가는 위젯에는 양보합니다.
     assert 'canvas.bind_all("<MouseWheel>", self._on_wheel)' in source
     assert 'canvas.bind_all("<Button-4>", self._on_wheel)' in source
@@ -2886,9 +2955,9 @@ def test_a_tight_connection_is_red_in_both_tables():
     assert "if is_tight_transfer(journey):" in tags
     assert "return ('tight',)" in tags
     # 담고 나면 위 표를 다시 보지 않습니다. 경고가 함께 따라와야 합니다.
-    summary = _ui_function("_target_summary")
-    assert "is_tight_transfer(journey)" in summary
-    assert "TIGHT_MARK" in summary
+    transfer = _ui_function("_target_transfer")
+    assert "_transfer_text(" in transfer
+    assert "is_tight_transfer(journey)" in _ui_function("_transfer_text")
 
 
 def test_the_watcher_buys_a_custom_combination_one_leg_at_a_time():

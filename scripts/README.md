@@ -35,6 +35,24 @@ The only one that touches no network and needs no account. It takes a built
 wheel and sdist and checks the packaging invariants (metadata, file modes,
 nothing forbidden inside). `docs/RELEASE.md` shows where it fits in a release.
 
+### `gui_smoke.py` — offline, safe
+
+Opens the desktop app's window for real and checks the things a source-reading
+test cannot see: that a pane actually gives its buttons the height they need,
+that hand-picked transfer stations survive a refresh, that picking a bundle's
+parent row adds every combination under it, and that the Telegram "use once"
+button leaves the settings file alone. It touches no network and points `HOME`
+at a temporary directory, so it cannot write your real settings.
+
+```bash
+xvfb-run -a --server-args="-screen 0 1600x1200x24" python3 scripts/gui_smoke.py
+xvfb-run -a python3 scripts/gui_smoke.py --shot /tmp/main.png
+```
+
+It is not part of the offline gate — the test environment has no tkinter, so
+`app/korail_booker/ui.py` cannot even be imported there. Run it by hand after
+changing the layout: the offline tests can pass while a button is clipped.
+
 ### `capture_live_read_surface.py` — live, reads only
 
 Drives the whole read surface once and records the untouched response body for
