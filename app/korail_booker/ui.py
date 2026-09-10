@@ -29,6 +29,7 @@ from korail_mobile_api import (
     KorailPassengerCounts,
     KorailSeatClass,
     KorailTransportError,
+    MutationConsent,
     MutationPreview,
     ReservationHoldResponse,
 )
@@ -161,6 +162,24 @@ TARGET_LAYOUT = (
 TARGET_COLUMNS = tuple(name for name, _width, _anchor in TARGET_LAYOUT)
 #: 촉박한 환승 앞에 붙는 표. 색만으로는 매진(빨강)과 구별되지 않습니다.
 TIGHT_MARK = "\u26a0 "
+
+
+def cancel_consent() -> MutationConsent:
+    """취소 하나만 여는 consent. **이 파일에서만 엽니다.**
+
+    ``autobook.py`` 는 자동으로 도는 감시라, 취소 consent 를 절대 만들지
+    않는다고 그 파일 스스로 약속합니다(파일 맨 위 docstring). 자동으로
+    무언가를 취소하면 사람이 모르는 사이에 표가 사라질 수 있기 때문입니다.
+    그래서 취소는 사람이 [잡은 예약] 목록에서 줄을 고르고 확인 창까지
+    지나야만 여기서 나갑니다 — 이 프로그램이 처음 여는 취소 consent 이므로
+    다른 범주는 절대 함께 켜지 않는다는 것을 단언으로 남깁니다.
+    """
+    consent = MutationConsent(allow_cancel=True, dry_run=False)
+    assert not consent.allow_reserve
+    assert not consent.allow_payment
+    assert not consent.allow_refund
+    assert not consent.allow_cart
+    return consent
 
 
 def _transfer_text(station: str, journey: Journey, *, suffix: str = "") -> str:
@@ -765,9 +784,20 @@ class BookerApp:
         """로그인 팝업. 떠 있는 동안 **본 창은 눌리지 않습니다.**
 
         ``grab_set`` 이 입력을 이 창으로 모읍니다. 뒤에서 조회를 눌러 놓고
-        로그인 창을 찾는 일이 없게 하려는 것입니다. 창을 닫거나 [조회만
-        하기] 를 누르면 비로그인 상태로 그냥 씁니다.
+        로그인 창을 찾는 일이 없게 하려는 것입니다. 창을 닫거나 [비로그인]
+        을 누르면 비로그인 상태로 그냥 씁니다.
+
+        **감시가 도는 중에는 열지 않습니다.** 여기서 로그인에 성공하면 목록을
+        통째로 비우는데(:meth:`_reset_session_lists`), 감시가 쓰고 있는
+        예매 대상·잡은 예약을 그 밑에서 지워 버리면 감시가 다음 순간 무엇을
+        예약하는지 알 수 없게 됩니다. :meth:`on_logout` 과 같은 이유의 같은
+        방비입니다.
         """
+        if self.any_running():
+            messagebox.showwarning(
+                "로그인", "자동예매가 돌고 있습니다. [중지] 를 먼저 누르세요"
+            )
+            return
         existing = self._login_window
         if existing is not None and existing.winfo_exists():
             # 두 번째 팝업을 쌓으면 첫 번째의 grab 이 남아 어느 쪽도 못 씁니다.
@@ -785,7 +815,8 @@ class BookerApp:
         ttk.Label(
             window,
             text="아이디·휴대폰번호·회원번호 중 아무거나 됩니다.\n"
-            "로그인하지 않아도 열차 조회는 됩니다 — 예약만 못 합니다.",
+            "휴대폰번호는 하이픈(-) 없이 숫자만 입력하세요.\n"
+            "로그인하지 않아도 열차 조회는 됩니다 — 예약과 결제는 못 합니다.",
             justify="left",
         ).grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(12, 8))
         ttk.Label(window, text="아이디").grid(row=1, column=0, sticky="e", padx=(12, 4))
@@ -799,7 +830,12 @@ class BookerApp:
         )
 
         buttons = ttk.Frame(window)
-        buttons.grid(row=4, column=0, columnspan=2, sticky="e", padx=12, pady=12)
+        buttons.grid(row=4, column=0, columnspan=2, sticky="e", padx=12, pady=(12, 0))
+        ttk.Label(
+            window,
+            text="[비로그인] 은 열차 조회만 됩니다 — 예약과 결제는 못 합니다.",
+            foreground="#666666",
+        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 12))
 
         def close() -> None:
             self._login_window = None
@@ -810,7 +846,11 @@ class BookerApp:
             self.sync_login_buttons()
 
         def skip() -> None:
-            self._write_log("로그인하지 않고 시작합니다 — 조회만 됩니다.")
+            self._write_log(
+                "비로그인으로 시작합니다 — 열차 조회만 됩니다 (예약·결제는 못 합니다)."
+            )
+            if not self.any_running():
+                self._reset_session_lists()
             close()
 
         def attempt() -> None:
@@ -846,7 +886,7 @@ class BookerApp:
 
         login_button = ttk.Button(buttons, text="로그인", command=attempt)
         login_button.pack(side="left", padx=(0, 6))
-        skip_button = ttk.Button(buttons, text="조회만 하기", command=skip)
+        skip_button = ttk.Button(buttons, text="비로그인", command=skip)
         skip_button.pack(side="left")
 
         for field in (id_entry, pw_entry):
@@ -1229,6 +1269,17 @@ class BookerApp:
 
     def _round_trip_toggled(self) -> None:
         self.sync_round_trip_panes()
+        self.sync_round_trip_state()
+        self.mark_stale()
+
+    def sync_round_trip_state(self) -> None:
+        """오는 편 칸을 왕복 여부에 맞춥니다. 결과를 낡게 만들지 않습니다.
+
+        :meth:`_round_trip_toggled` 에서 갈라낸 자리입니다 — 조회가 끝나고
+        조건 칸 잠금을 풀 때도 이 상태를 다시 맞춰야 하는데, 그때
+        ``mark_stale()`` 까지 함께 부르면 방금 받은 결과를 "조건이
+        바뀌었다" 며 그 자리에서 낡게 만듭니다.
+        """
         enabled = self.round_trip.get()
         entry, button, after, before = self.return_widgets
         entry.configure(state="normal" if enabled else "disabled")
@@ -1237,7 +1288,6 @@ class BookerApp:
         # 쳐 넣는 칸이 아닙니다.
         for combo in (after, before):
             combo.configure(state="readonly" if enabled else "disabled")
-        self.mark_stale()
 
     def _make_tree(self, parent: ttk.Frame) -> ttk.Treeview:
         """열차 표 하나. 왕복이면 이것이 둘, 편도면 하나입니다."""
@@ -1598,8 +1648,16 @@ class BookerApp:
         lines = []
         for number, result in enumerate(holds, start=1):
             kind = f"좌석 예약({number}구간)" if split else "좌석 예약"
+            # 구간마다 따로 샀으면 '여정' 칸도 구간별로 다르게 적습니다.
+            # 전체 여정 요약을 그대로 두 번 쓰면 PNR·운임이 다른데 칸만
+            # 똑같아 보여 중복 예약으로 오인하게 됩니다.
+            summary = (
+                target.journey.leg_hold_label(number - 1)
+                if split
+                else target.journey.summary()
+            )
             held = self._held_from(
-                target.label, target.journey.summary(), kind, result, target.direction
+                target.label, summary, kind, result, target.direction
             )
             self.remember_hold(held)
             self._write_log(
@@ -1676,7 +1734,13 @@ class BookerApp:
 
 
     def _searching(self, busy: bool) -> None:
-        """조회 중임을 막대로 보입니다. 끝나면 자리까지 거둡니다."""
+        """조회 중임을 막대로 보입니다. 끝나면 자리까지 거둡니다.
+
+        **조건 칸도 함께 잠급니다.** 조회는 시작할 때 조건을 한 번 읽어
+        나갑니다 — 도는 중에 구간이나 환승 조건을 바꾸면 화면은 새 조건을
+        보여 주는데 실제로 나간 요청은 옛 조건입니다. 결과가 도착했을 때
+        그것이 어느 조건의 것인지 사람이 알 방법이 없어집니다.
+        """
         if busy:
             self.search_progress.pack(side="left", padx=10)
             self.search_progress.start(12)
@@ -1685,6 +1749,62 @@ class BookerApp:
             self.search_progress.stop()
             self.search_progress.pack_forget()
             self.search_stop_button.pack_forget()
+        self._lock_query_fields(busy)
+
+    def _lock_query_fields(self, locked: bool) -> None:
+        """조회 조건·환승 조건 칸을 통째로 잠급니다/풉니다.
+
+        [조회] 와 [조회 중지] 는 뺍니다 — 잠그는 동안에도 중지는 눌러야
+        하고, [조회] 자체는 ``search_button.configure`` 가 따로 관리합니다.
+        """
+        exempt = {
+            self.search_button,
+            self.search_stop_button,
+            self.search_progress,
+            # 달력은 통째로 뺍니다 — 지난 날짜 단추를 저 스스로 잠가 두는데
+            # (``CalendarPanel._draw``), 여기서 한 번 더 풀면 지난 날짜를
+            # 다시 고를 수 있게 됩니다.
+            self.calendar,
+        }
+        self._set_widget_locked(self.query_frame, locked=locked, exempt=exempt)
+        if not locked:
+            # 통째로 풀면 왕복이 꺼져 있어도 오는 편 칸이, 환승이 꺼져
+            # 있거나 서버 추천이어도 직접 지정 전용 칸이 도로 눌리게 됩니다
+            # — 그 둘은 잠그기 전에도 조건에 따라 잠겨 있었습니다.
+            self.sync_round_trip_state()
+            self.sync_transfer_state()
+
+    def _set_widget_locked(
+        self, widget: tk.Misc, *, locked: bool, exempt: set[tk.Misc]
+    ) -> None:
+        """이 위젯 아래를 재귀적으로 잠급니다/풉니다.
+
+        ttk 위젯과 고전 tk 위젯(``tk.Listbox`` 등)이 상태를 다루는 방법이
+        다릅니다 — ttk 는 ``state()``, 고전 tk 는 ``configure(state=...)``.
+        둘 다 시도하고, 그 위젯이 상태 자체를 모르면(``ttk.Label`` 등)
+        조용히 넘어갑니다 — 잠글 것이 없을 뿐 오류가 아닙니다.
+
+        ``exempt`` 에 든 위젯은 **그 아래까지 통째로** 건드리지 않습니다 —
+        달력처럼 스스로 상태를 관리하는 것을 한 번 더 풀면, 지난 날짜처럼
+        원래 잠가 둬야 하는 것까지 함께 풀립니다.
+        """
+        for child in widget.winfo_children():
+            if child in exempt:
+                continue
+            if isinstance(child, ttk.Widget):
+                try:
+                    child.state(["disabled" if locked else "!disabled"])
+                except tk.TclError:
+                    pass
+            else:
+                # 고전 tk 위젯(``tk.Listbox`` 등)은 파이썬 쪽 타입 정의가
+                # ``state`` 를 모릅니다 — Tcl 수준에서는 있는 옵션이라
+                # 실행에는 문제가 없습니다.
+                try:
+                    child.configure(state="disabled" if locked else "normal")  # type: ignore[call-overload]
+                except tk.TclError:
+                    pass
+            self._set_widget_locked(child, locked=locked, exempt=exempt)
 
     def on_stop_search(self) -> None:
         """조회를 그만둡니다.
@@ -1741,12 +1861,30 @@ class BookerApp:
         # 착각하지 않도록 남기되, 살아 있는 것과 구별합니다.
         self.hold_tree.tag_configure("urgent", foreground="#b3261e")
         self.hold_tree.tag_configure("expired", foreground="#8a8a8a")
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=0, column=2, sticky="n", padx=6, pady=4)
+        # 이 프로그램이 취소 요청을 만드는 **유일한** 자리입니다. 자동예매는
+        # 절대 취소를 부르지 않습니다 — 사람이 줄을 고르고 확인 창을 지나야만
+        # 나갑니다.
+        self.cancel_hold_button = ttk.Button(
+            buttons, text="선택 취소", width=14, command=self.on_cancel_hold
+        )
+        self.cancel_hold_button.pack()
+        ttk.Button(
+            buttons, text="만료된 것 지우기", width=14, command=self.clear_expired_holds
+        ).pack(pady=(4, 0))
+        ttk.Button(
+            buttons, text="비우기", width=14, command=self.clear_holds
+        ).pack(pady=(4, 0))
         ttk.Label(
             frame,
             text="이 프로그램은 결제하지 않습니다. 기한이 지나면 코레일이 예약을 "
-            "스스로 취소합니다.",
+            "스스로 취소합니다. [만료된 것 지우기] 는 서버에 아무것도 보내지 "
+            "않고 이 목록에서만 지웁니다 — 이미 코레일이 취소했을 예약입니다.\n"
+            "[선택 취소] 는 코레일에 실제로 취소를 요청합니다. 되돌릴 수 없습니다.",
             foreground="#666666",
-        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 6))
+            justify="left",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 6))
 
     def _tick_holds(self) -> None:
         """1초마다 줄어드는 것들을 다시 셉니다. 다른 일은 걸지 않습니다."""
@@ -1789,6 +1927,10 @@ class BookerApp:
                 hold.payment_deadline_date, hold.payment_deadline_time
             ),
             deadline_text=payment_deadline_text(hold),
+            # 취소 폼은 정확히 이 타입만 받습니다. 다른 타입이 흘러들어 오면
+            # (지금 코드 경로로는 없지만) 취소 버튼만 조용히 못 쓰게 둡니다 —
+            # 표시나 카운트다운은 그것과 무관하게 그대로 돕니다.
+            hold_response=hold if type(hold) is ReservationHoldResponse else None,
         )
 
     def on_hold_made(
@@ -1805,13 +1947,165 @@ class BookerApp:
 
     def remember_hold(self, held: Held) -> None:
         """잡은 예약 하나를 목록에 올립니다."""
-        now = now_kst()
         self.holds.append(held)
-        item = self.hold_tree.insert(
-            "", "end", values=held.row(now), tags=(held.tag(now),)
+        self.sync_holds()
+        item = self._hold_items.get(len(self.holds) - 1)
+        if item is not None:
+            self.hold_tree.see(item)
+
+    def sync_holds(self) -> None:
+        """잡은 예약 표를 ``self.holds`` 에서 다시 그립니다.
+
+        취소·지우기 둘 다 목록 가운데를 뺄 수 있습니다. 줄 하나만 지우고
+        번호를 밀어 쓰면 어긋나기 쉬우므로, :meth:`sync_target_list` 와
+        같은 방식으로 **통째로 다시 그립니다.**
+        """
+        self.hold_tree.delete(*self.hold_tree.get_children())
+        self._hold_items = {}
+        now = now_kst()
+        for index, held in enumerate(self.holds):
+            item = self.hold_tree.insert(
+                "", "end", values=held.row(now), tags=(held.tag(now),)
+            )
+            self._hold_items[index] = item
+
+    def _selected_hold_index(self) -> int | None:
+        """잡은 예약 표에서 고른 한 줄의 번호. 여러 개는 고를 수 없습니다."""
+        by_item = {item: index for index, item in self._hold_items.items()}
+        for item in self.hold_tree.selection():
+            index = by_item.get(item)
+            if index is not None and index < len(self.holds):
+                return index
+        return None
+
+    def remove_holds(self, indices: list[int]) -> None:
+        """잡은 예약 목록에서 이 번호들을 뺍니다. **서버에는 아무것도 보내지
+        않습니다** — 화면 목록만 정리합니다."""
+        for index in sorted(set(indices), reverse=True):
+            if 0 <= index < len(self.holds):
+                del self.holds[index]
+        self.sync_holds()
+
+    def clear_expired_holds(self) -> None:
+        """기한이 지난 것만 목록에서 뺍니다.
+
+        기한이 지나면 코레일이 그 홀드를 스스로 취소합니다 — 이 목록에는
+        더 실려 있을 이유가 없는 죽은 정보입니다. 그래서 서버에 묻지 않고
+        곧바로 지웁니다.
+        """
+        now = now_kst()
+        expired = [i for i, held in enumerate(self.holds) if is_expired(held.deadline, now)]
+        if not expired:
+            messagebox.showinfo("잡은 예약", "기한이 지난 예약이 없습니다.")
+            return
+        self.remove_holds(expired)
+        self._write_log(f"기한이 지난 예약 {len(expired)}건을 목록에서 지웠습니다.")
+
+    def clear_holds(self) -> None:
+        """잡은 예약 목록을 통째로 비웁니다. **서버에는 아무것도 보내지
+        않습니다** — 여기서 지워도 서버의 예약은 그대로입니다.
+
+        결제 기한이 아직 남은 것이 있으면 한 번 더 묻습니다 — 이 목록이
+        PNR 을 보는 유일한 자리인데, 지우고 나면 화면에서 사라지기
+        때문입니다.
+        """
+        if not self.holds:
+            return
+        now = now_kst()
+        unpaid = [held for held in self.holds if not is_expired(held.deadline, now)]
+        if unpaid and not messagebox.askyesno(
+            "잡은 예약 비우기",
+            f"결제 기한이 남은 예약이 {len(unpaid)}건 있습니다. 지워도 코레일의 "
+            "예약은 그대로지만, 이 화면에서는 PNR 을 다시 볼 수 없습니다.\n\n"
+            + "\n".join(f"· {held.summary} — PNR {held.pnr}" for held in unpaid[:5])
+            + "\n\n그래도 비울까요?",
+        ):
+            return
+        self.holds.clear()
+        self.sync_holds()
+        self._write_log("잡은 예약 목록을 비웠습니다 (서버의 예약은 그대로입니다).")
+
+    def on_cancel_hold(self) -> None:
+        """고른 예약을 코레일에 취소 요청합니다. **되돌릴 수 없습니다.**
+
+        이 프로그램이 만드는 첫 취소 요청입니다 — 지금까지는 예약 consent
+        하나만 열었습니다(:func:`cancel_consent`). 그래서 확인을 무겁게
+        둡니다: 여정·PNR·운임·기한을 모두 보여 주고, 그래도 좋다고 해야
+        나갑니다.
+        """
+        index = self._selected_hold_index()
+        if index is None:
+            messagebox.showwarning("예약 취소", "취소할 예약을 목록에서 고르세요")
+            return
+        held = self.holds[index]
+        original = held.hold_response
+        if original is None:
+            messagebox.showwarning(
+                "예약 취소",
+                "이 줄에는 취소에 필요한 원본 정보가 없습니다 — 코레일 앱에서 "
+                "직접 취소하세요.",
+            )
+            return
+        if is_expired(held.deadline, now_kst()):
+            messagebox.showinfo(
+                "예약 취소",
+                "결제 기한이 이미 지났습니다 — 코레일이 이 홀드를 스스로 "
+                "취소했을 것입니다. 취소 요청을 보낼 필요가 없습니다.\n\n"
+                "목록에서만 지우려면 [만료된 것 지우기] 를 누르세요.",
+            )
+            return
+        if not self.logged_in:
+            messagebox.showwarning("예약 취소", "먼저 로그인하세요")
+            return
+        if not messagebox.askyesno(
+            "예약 취소",
+            "코레일에 취소를 요청합니다. 되돌릴 수 없습니다.\n\n"
+            f"{held.summary}\n"
+            f"PNR {held.pnr}\n"
+            f"운임 {held.fare}\n"
+            f"결제 기한 {held.deadline_text}\n\n"
+            "정말 취소할까요?",
+        ):
+            return
+        self.cancel_hold_button.configure(state="disabled")
+
+        def work() -> None:
+            try:
+                client = self._ensure_client()
+                result = client.cancel_unpaid_hold(
+                    original, consent=cancel_consent()
+                )
+            except KorailApiError as exc:
+                message = f"{type(exc).__name__}: {exc}"
+                self.events.put(lambda: self._cancel_hold_failed(message))
+                return
+            self.events.put(lambda: self._cancel_hold_done(held, result))
+
+        self._in_thread(work, "korail-cancel")
+
+    def _cancel_hold_failed(self, message: str) -> None:
+        self.cancel_hold_button.configure(state="normal")
+        self._write_log(f"예약 취소 실패 — {message}", "bad")
+        messagebox.showerror("예약 취소 실패", message)
+
+    def _cancel_hold_done(
+        self, held: Held, result: MutationPreview | object
+    ) -> None:
+        self.cancel_hold_button.configure(state="normal")
+        if isinstance(result, MutationPreview):
+            # 이 자리는 늘 dry_run=False 로만 부르므로 실제로는 오지 않지만,
+            # 다른 경로가 실수로 미리보기를 넘겨도 목록에서 지우지 않도록
+            # 지켜 둡니다 — 취소가 안 나갔는데 지우면 예약이 그대로 남은
+            # 채로 화면에서만 사라집니다.
+            self._write_log("예약 취소: 미리보기라 아무것도 보내지 않았습니다.", "warn")
+            return
+        index = next((i for i, h in enumerate(self.holds) if h is held), None)
+        if index is not None:
+            self.remove_holds([index])
+        self._write_log(f"예약을 취소했습니다 — {held.summary}\nPNR {held.pnr}", "good")
+        messagebox.showinfo(
+            "예약을 취소했습니다", f"{held.summary}\n\nPNR {held.pnr}"
         )
-        self._hold_items[len(self.holds) - 1] = item
-        self.hold_tree.see(item)
 
     def _build_booking_controls(self, frame: ttk.LabelFrame) -> None:
         """자동예매 조건과 [시작]. 예매 대상 표 **바로 아래**에 붙습니다.
@@ -2487,6 +2781,13 @@ class BookerApp:
         self.settings = replace(self.settings, login_id=who)
         settings_module.save(self.settings)
         self.sync_login_buttons()
+        # 다른 계정으로 로그인한 것일 수 있습니다 — 이전 계정/이전 조회의
+        # 목록이 남아 있으면 남의 예약을 내 것으로 착각합니다. open_login()
+        # 이 감시가 도는 중에는 이 팝업 자체를 막으므로, 여기 다다랐다는
+        # 것은 곧 any_running() 이 이미 거짓이라는 뜻입니다 — 그래도 한 번
+        # 더 확인합니다(방어적으로).
+        if not self.any_running():
+            self._reset_session_lists()
         if done is not None:
             done(None)
 
@@ -2503,6 +2804,42 @@ class BookerApp:
             done(message)
         else:
             messagebox.showerror("로그인 실패", message)
+
+    def _reset_session_lists(self) -> None:
+        """조회 결과·예매 대상·잡은 예약을 모두 비웁니다.
+
+        로그아웃, 다른 아이디로 로그인, 비로그인 전환 — 이 셋 뒤에 부릅니다.
+        계정이 바뀌거나 사라지는 순간인데 이전 목록이 화면에 남아 있으면,
+        남의(또는 지난) 조회·예매 대상·PNR 을 지금 계정의 것으로 착각하게
+        됩니다. **감시가 도는 중에는 부르지 않습니다** — 그 목록을 감시가
+        쓰고 있습니다. 호출부가 모두 :meth:`any_running` 을 먼저 확인합니다.
+
+        잡은 예약 중 결제 기한이 남은 것이 있어도 여기서는 묻지 않고 그냥
+        비웁니다 — :meth:`clear_holds` 와 달리, 이 호출은 "계정이 바뀌었다"
+        는 사실 자체가 이미 그 목록이 이제 이 계정의 것이 아니라는 뜻이기
+        때문입니다. 서버의 예약은 그대로 남고, PNR 은 코레일 앱에서 여전히
+        볼 수 있습니다.
+        """
+        had_anything = bool(self.results or self.targets or self.holds)
+        for tree in (self.tree, self.return_tree):
+            tree.delete(*tree.get_children())
+        self.results = []
+        self.journeys = []
+        self.item_journeys.clear()
+        self._group_children.clear()
+        self.results_status.set(
+            "계정이 바뀌어 목록을 비웠습니다. 조건을 정하고 [조회] 를 누르세요."
+        )
+        self.results_label.configure(foreground="")
+        self.targets.clear()
+        self.sync_target_list()
+        self.holds.clear()
+        self.sync_holds()
+        if had_anything:
+            self._write_log(
+                "계정이 바뀌어 조회 결과·예매 대상·잡은 예약 목록을 모두 "
+                "비웠습니다 (서버의 예약은 그대로입니다)."
+            )
 
     def on_logout(self) -> None:
         """세션을 버립니다. 자동예매가 도는 중이면 먼저 막습니다.
@@ -2521,6 +2858,7 @@ class BookerApp:
         self._credentials = None
         self._set_login_state("로그아웃했습니다 — 조회만 됩니다", LOGIN_OFF_COLOUR)
         self.sync_login_buttons()
+        self._reset_session_lists()
         self._write_log(
             "로그아웃했습니다. 이 프로그램의 세션만 버립니다 — 코레일 앱은 "
             "그대로입니다."
@@ -3217,7 +3555,17 @@ class BookerApp:
         # 잡아 둔 예약은 **그 예약이 아는 방향**으로 셉니다. 예전에는 여정
         # 한 줄을 예매 대상 목록과 맞춰 봤는데, 그 줄을 빼는 순간 맞출 것이
         # 없어져 같은 구간에 두 번째 예약이 나갔습니다.
-        busy |= {held.direction for held in self.holds if any(held.direction)}
+        #
+        # **기한이 지난 예약은 뺍니다.** 이 프로그램의 기록에도 적혀 있듯
+        # 기한이 지나면 코레일이 그 홀드를 스스로 취소합니다 — 더는 그
+        # 방향을 막고 있지 않은데 화면만 막아 두면, 같은 구간을 다시
+        # 노리고 싶어도 "이미 예약이 있다" 는 잘못된 이유로 계속 막힙니다.
+        now = now_kst()
+        busy |= {
+            held.direction
+            for held in self.holds
+            if any(held.direction) and not is_expired(held.deadline, now)
+        }
         # 아직 답을 못 받은 [바로 예약]도 셉니다. 요청이 나가 있는 몇 초
         # 사이에 감시를 걸면, 같은 열차를 두 번 잡습니다.
         busy |= self._reserving_directions

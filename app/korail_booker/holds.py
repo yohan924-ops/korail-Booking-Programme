@@ -11,6 +11,11 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING
+
+
+if TYPE_CHECKING:
+    from korail_mobile_api import ReservationHoldResponse
 
 
 #: 기한이 이만큼 남으면 급한 것으로 봅니다. 화면이 색을 바꾸는 기준입니다.
@@ -100,9 +105,10 @@ def is_expired(deadline: datetime | None, now: datetime) -> bool:
 class Held:
     """잡아 둔 예약 하나. 화면의 '잡은 예약' 목록에 한 줄로 들어갑니다.
 
-    :class:`~korail_mobile_api.ReservationHoldResponse` 를 그대로 들고 있지
-    않습니다 — 화면이 쓰는 것만 문자열로 뽑아 둡니다. 그래야 이 조각을
-    화면 없이 시험할 수 있습니다.
+    표에 적는 값은 :class:`~korail_mobile_api.ReservationHoldResponse` 에서
+    뽑은 문자열입니다 — 화면 없이 시험하는 것은 그 문자열들만 봅니다.
+    ``hold_response`` 는 취소 기능을 위해 원본을 함께 들고 다니는
+    자리이고, 표시·시험 어느 쪽도 그것을 열어 보지 않습니다.
     """
 
     #: 가는 편/오는 편, 또는 편도면 빈 문자열.
@@ -124,6 +130,12 @@ class Held:
     #: 맞출 것이 사라져 같은 구간에 두 번째 예약이 나갔습니다. 서버가 준 값이
     #: 아니라 이 프로그램이 아는 값이므로 지어내는 것이 아닙니다.
     direction: tuple[str, str, str] = ("", "", "")
+    #: 서버 응답 그대로. 취소하려면 **이 정확한 객체**가 있어야 합니다 —
+    #: 라이브러리의 취소 폼이 ``type(response) is ReservationHoldResponse`` 를
+    #: 그대로 요구합니다(다시 만든 값이나 하위클래스는 거절합니다). 화면 없이
+    #: 시험하는 데는 안 쓰이므로 ``None`` 이어도 이 조각의 나머지는 그대로
+    #: 돌아갑니다 — 취소 버튼만 못 씁니다.
+    hold_response: ReservationHoldResponse | None = None
 
     def row(self, now: datetime) -> tuple[str, ...]:
         """표 한 줄. 남은 시간은 부를 때마다 다시 셉니다."""

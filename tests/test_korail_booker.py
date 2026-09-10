@@ -8,7 +8,9 @@ Tkinter 는 여기서 import 하지 않습니다 — 그래서 화면 없는 CI 
 
 * 미리보기 모드에서는 예약 요청이 한 건도 나가지 않는다
 * 잡으면 그 자리에서 끝난다 — 두 번째 예약 요청은 없다
-* 결제·환불·취소 범주의 consent 를 만들지 않는다
+* 결제·환불 범주의 consent 는 어디서도 만들지 않는다
+* 취소 범주는 ``ui.py`` 의 ``cancel_consent()`` 한 곳에서만 열리고,
+  자동예매(``autobook.py``)는 절대 취소를 부르지 않는다
 * 텔레그램 토큰은 어떤 문구에도 남지 않는다
 * 설정 파일에는 비밀번호를 담을 자리가 아예 없다
 
@@ -715,20 +717,64 @@ def test_the_program_opens_one_category_at_a_time():
 
 
 def test_no_module_in_the_app_names_a_money_moving_call():
+    """결제·환불은 어디에서도 열지 않습니다.
+
+    취소는 예외입니다 — 사람이 [잡은 예약] 목록에서 직접 요청한 것입니다.
+    그래도 **한 곳에서만** 열립니다: 다른 시험
+    (:func:`test_only_ui_can_open_a_cancel_request`)이 그 한 곳이 ``ui.py``
+    뿐이고 자동예매는 절대 손대지 않는다는 것을 확인합니다.
+    """
     for path in sorted(APP_DIR.rglob("*.py")):
         source = path.read_text(encoding="utf-8")
         for forbidden in (
             "allow_payment=True",
             "allow_refund=True",
-            "allow_cancel=True",
             "real_card_acknowledged",
             "CardPayment",
             "pay_with_card",
             "pay_with_fake_card",
             ".refund(",
-            "cancel_unpaid_hold(",
         ):
             assert forbidden not in source, f"{path.name}: {forbidden}"
+        if path.name == "ui.py":
+            continue
+        for forbidden in ("allow_cancel=True", "cancel_unpaid_hold("):
+            assert forbidden not in source, f"{path.name}: {forbidden}"
+
+
+def test_only_ui_can_open_a_cancel_request():
+    """취소 consent 는 ``ui.py`` 딱 한 자리에서만 열립니다.
+
+    이 프로그램은 지금까지 예약(reserve) 하나만 열었습니다. 사람이 [잡은
+    예약] 목록에서 명시적으로 요청한 취소만 예외로 두되, **자동으로 도는
+    감시가 절대 부를 수 없는 자리**에 있어야 합니다 — 그래서 ``ui.py`` 안,
+    사람이 단추를 눌러야 닿는 함수 하나로 한정합니다.
+    """
+    ui_source = _ui_source()
+    assert ui_source.count("allow_cancel=True") == 1
+    assert ui_source.count("cancel_unpaid_hold(") == 1
+
+    consent_fn = _ui_function("cancel_consent")
+    assert "allow_cancel=True" in consent_fn
+    assert "assert not consent.allow_reserve" in consent_fn
+    assert "assert not consent.allow_payment" in consent_fn
+    assert "assert not consent.allow_refund" in consent_fn
+    assert "assert not consent.allow_cart" in consent_fn
+
+    caller = _ui_function("on_cancel_hold")
+    assert "cancel_consent()" in caller
+    # 사람이 확인 창을 지나야만 나갑니다.
+    assert "messagebox.askyesno(" in caller
+    # 취소에 필요한 원본이 없으면(``hold_response is None``) 나가지 않습니다.
+    assert "original = held.hold_response" in caller
+    assert "if original is None:" in caller
+    # 자동예매 파일의 자기 약속은 그대로입니다 — reserve_consent() 는
+    # allow_cancel 이 꺼져 있는지 단언만 할 뿐 켜지 않습니다.
+    booker_source = (APP_DIR / "korail_booker" / "autobook.py").read_text(
+        encoding="utf-8"
+    )
+    assert "allow_cancel=True" not in booker_source
+    assert "cancel_unpaid_hold(" not in booker_source
 
 
 # --- 예약 폼을 만들 수 없는 행 ---------------------------------------------------
@@ -1725,7 +1771,31 @@ def test_the_login_popup_blocks_the_main_window():
     assert "window.transient(self.root)" in body
     # 닫아도 프로그램은 굴러갑니다 — 조회만 되는 상태로.
     assert "window.protocol('WM_DELETE_WINDOW', skip)" in body
-    assert "조회만 하기" in body
+    assert "비로그인" in body
+
+
+def test_logging_in_is_blocked_while_a_watch_is_running():
+    """자동예매 도중 다른 아이디로 로그인하면 그 감시가 쓰는 목록이 그 밑에서
+    비워집니다 — 로그아웃과 같은 이유로 같은 방비를 둡니다."""
+    body = _ui_function("open_login")
+    assert body.index("self.any_running()") < body.index("tk.Toplevel(self.root)")
+    assert "자동예매가 돌고 있습니다" in body
+
+
+def test_a_login_popup_hint_says_no_hyphens_for_phone_numbers():
+    """휴대폰번호 로그인은 하이픈을 빼야 합니다 — 안 그러면 서버가 거절합니다."""
+    body = _ui_function("open_login")
+    assert "하이픈" in body
+
+
+def test_skipping_login_clears_the_session_lists():
+    """비로그인으로 시작하면 이전 조회·예매 대상·잡은 예약이 다 비어야
+    합니다 — 안 그러면 남의(또는 지난) 목록이 새 세션에 남습니다."""
+    body = _ui_function("open_login")
+    skip_start = body.index("def skip()")
+    skip_body = body[skip_start : body.index("def attempt()")]
+    assert "self._reset_session_lists()" in skip_body
+    assert "self.any_running()" in skip_body
 
 
 def test_a_failed_login_keeps_the_popup_open():
@@ -2201,6 +2271,27 @@ def test_logging_out_drops_the_session_and_the_password():
     assert "self.login_pw" not in source
     # 돌고 있는데 세션을 버리면 자동예매가 도중에 죽습니다.
     assert "self.any_running()" in body
+    # 계정이 사라지는 순간이므로 목록도 비웁니다.
+    assert "self._reset_session_lists()" in body
+
+
+def test_a_new_login_also_resets_the_session_lists():
+    """다른 아이디로 로그인해도 이전 계정의 목록이 남으면 안 됩니다."""
+    body = _ui_function("_login_succeeded")
+    assert "self._reset_session_lists()" in body
+    assert "self.any_running()" in body
+
+
+def test_resetting_session_lists_clears_results_targets_and_holds():
+    """세 목록을 모두 비우고, 서버에는 아무것도 보내지 않습니다."""
+    body = _ui_function("_reset_session_lists")
+    assert "self.results = []" in body
+    assert "self.targets.clear()" in body
+    assert "self.holds.clear()" in body
+    assert "self.sync_target_list()" in body
+    assert "self.sync_holds()" in body
+    # 이 함수 자체는 서버를 부르지 않습니다 — 화면 목록만 정리합니다.
+    assert "client" not in body.lower()
 
 
 def test_every_way_a_search_ends_stops_the_progress_bar():
@@ -3010,7 +3101,9 @@ def test_the_watcher_buys_a_custom_combination_one_leg_at_a_time():
     assert result.outcome is Outcome.HELD
     assert recorder.count(RESERVE) == 2
     # 두 구간이 각각 예약이 됩니다 — 잡은 예약 목록에도 둘로 들어갑니다.
-    assert made == ["좌석 예약(구간별)", "좌석 예약(구간별)"]
+    # 종류는 구간마다 다릅니다 — 그래야 같은 '좌석 예약(구간별)' 이 두 번
+    # 찍혀서 중복 예약처럼 보이지 않습니다.
+    assert made == ["좌석 예약(1구간)", "좌석 예약(2구간)"]
     assert len(result.holds) == 2
 
 
@@ -3405,6 +3498,17 @@ def test_a_direction_stays_blocked_even_when_its_row_is_gone():
     assert "directions: frozenset[tuple[str, str, str]]" in source
 
 
+def test_an_expired_hold_no_longer_blocks_its_direction():
+    """기한이 지나면 코레일이 스스로 취소합니다 — 화면이 계속 막으면 안 됩니다.
+
+    실제로 결제 기한이 지난 예약 두 건이 있는데도 같은 구간의 다른 조합을
+    새로 노릴 수 없는 신고가 있었습니다. 원인은 ``_busy_directions`` 가
+    기한을 보지 않고 방향이 있다는 사실만 봤기 때문입니다.
+    """
+    body = _ui_function("_busy_directions")
+    assert "not is_expired(held.deadline, now)" in body
+
+
 def test_a_cut_reserve_from_the_button_is_not_reported_as_a_plain_failure():
     """"실패" 라고만 적으면 사람이 다시 눌러 중복 예약을 만듭니다."""
     source = _ui_source()
@@ -3440,13 +3544,41 @@ def test_the_return_window_is_saved_after_it_is_read():
 
 
 def test_a_half_bought_transfer_is_not_recorded_as_the_whole_journey():
+    """구간별 홀드는 전체 여정이 아니라 그 구간으로 적혀야 합니다.
+
+    여정 한 줄을 그대로 두 번 쓰면 PNR·운임이 다른데 '여정' 칸만 같아 보여
+    중복 예약으로 오인하게 됩니다 — 실제로 그런 신고가 있었습니다.
+    """
     booker = (APP_DIR / "korail_booker" / "autobook.py").read_text(encoding="utf-8")
     partial = next(
         ast.unparse(n) for n in ast.walk(ast.parse(booker))
         if isinstance(n, ast.FunctionDef) and n.name == "_settle_partial"
     )
-    assert "구간만]" in partial
-    assert "journey.leg_summary(number - 1)" in partial
+    assert "journey.leg_hold_label(number - 1, partial=True)" in partial
+
+    settle = next(
+        ast.unparse(n) for n in ast.walk(ast.parse(booker))
+        if isinstance(n, ast.FunctionDef) and n.name == "_settle"
+    )
+    # 전부 성공했을 때도 구간별이면 마찬가지입니다.
+    assert "journey.leg_hold_label(number - 1) if split else journey.summary()" in settle
+
+
+def test_the_leg_hold_label_names_which_leg_it_is():
+    """전체 여정 요약이 아니라 그 구간이 무엇인지가 먼저 와야 합니다."""
+    first = _summary(train_no="00301", departure="동탄", arrival="대전",
+                     arrival_code="0010", departure_time="054700",
+                     arrival_time="062800")
+    second = _summary(train_no="00003", departure="대전", arrival="동대구",
+                      departure_code="0010", arrival_code="0015",
+                      departure_time="063400", arrival_time="072200")
+    journey = _journey(first, second, source=J.JourneySource.CUSTOM_TRANSFER)
+    assert journey.leg_hold_label(0).startswith("[1구간] ")
+    assert journey.leg_hold_label(1).startswith("[2구간] ")
+    assert "전체 여정:" in journey.leg_hold_label(0)
+    # 부분 실패는 문구가 갈립니다 — "구간만" 은 나머지를 못 잡았다는 뜻입니다.
+    assert journey.leg_hold_label(0, partial=True).startswith("[1구간만] ")
+    assert "원래 여정:" in journey.leg_hold_label(0, partial=True)
 
 
 def test_a_stale_row_number_never_indexes_past_the_list():
@@ -3526,3 +3658,100 @@ def test_switching_transfer_mode_never_overwrites_a_curated_list():
     assert "if not departure or not arrival:" in body
     assert "except (KorailApiError, ValueError)" in body
     assert "self._offer_transfer_candidates()" in _ui_function("_transfer_toggled")
+
+
+# --- 잡은 예약: 취소·정리 ---------------------------------------------------------
+
+
+def test_the_hold_table_rebuilds_instead_of_shifting_indices():
+    """줄 하나를 지우면 번호가 밀립니다. append-only 짝으로는 어긋납니다."""
+    source = _ui_source()
+    assert "def sync_holds" in source
+    remember = _ui_function("remember_hold")
+    assert "self.sync_holds()" in remember
+    sync = _ui_function("sync_holds")
+    assert "self.hold_tree.delete(*self.hold_tree.get_children())" in sync
+    assert "self._hold_items = {}" in sync
+
+
+def test_removing_a_hold_never_touches_the_server():
+    body = _ui_function("remove_holds")
+    assert "del self.holds[index]" in body
+    assert "self.sync_holds()" in body
+    assert "client" not in body
+
+
+def test_clearing_expired_holds_sends_nothing_to_the_server():
+    """기한이 지나면 코레일이 스스로 취소합니다 — 물어볼 필요가 없습니다."""
+    body = _ui_function("clear_expired_holds")
+    assert "is_expired(held.deadline, now)" in body
+    assert "self.remove_holds(expired)" in body
+    assert "client" not in body
+
+
+def test_clearing_all_holds_warns_about_unpaid_ones_first():
+    """이 목록이 PNR 을 보는 유일한 자리입니다. 지우기 전에 알려야 합니다."""
+    body = _ui_function("clear_holds")
+    assert "unpaid = [held for held in self.holds if not is_expired" in body
+    assert "messagebox.askyesno(" in body
+    assert "held.pnr" in body
+
+
+def test_cancel_hold_refuses_an_expired_or_unconfirmed_row():
+    body = _ui_function("on_cancel_hold")
+    # 기한이 지난 것은 취소를 보내지 않습니다 — 이미 죽은 홀드입니다.
+    assert "is_expired(held.deadline, now_kst())" in body
+    assert "만료된 것 지우기" in body
+    # 로그인 없이는 안 나갑니다.
+    assert "if not self.logged_in:" in body
+    # 성공하면 목록에서만 뺍니다(서버 재확인 없이) — 응답이 곧 성사입니다.
+    done = _ui_function("_cancel_hold_done")
+    assert "self.remove_holds([index])" in done
+    assert "isinstance(result, MutationPreview)" in done
+
+
+def test_the_holds_panel_offers_all_three_actions():
+    source = _ui_source()
+    assert 'text="선택 취소"' in source
+    assert 'text="만료된 것 지우기"' in source
+    # '비우기' 는 예매 대상 칸에도 있는 이름이라 held 쪽 버튼을 콕 집어 봅니다.
+    build = _ui_function("_build_holds")
+    assert "text='비우기'" in build
+    assert "command=self.on_cancel_hold" in build
+    assert "command=self.clear_expired_holds" in build
+    assert "command=self.clear_holds" in build
+
+
+# --- 조회 중 조건 잠금 ------------------------------------------------------------
+
+
+def test_searching_locks_the_query_and_transfer_fields():
+    """도는 중에 조건을 바꾸면 결과가 어느 조건의 것인지 알 수 없어집니다."""
+    body = _ui_function("_searching")
+    assert "self._lock_query_fields(busy)" in body
+    lock = _ui_function("_lock_query_fields")
+    assert "self.search_button" in lock
+    assert "self.search_stop_button" in lock
+    assert "self.calendar" in lock
+    assert "self._set_widget_locked(self.query_frame" in lock
+
+
+def test_unlocking_restores_conditional_state_not_just_normal():
+    """왕복·환승이 꺼져 있던 칸까지 통째로 풀면, 조건과 다시 어긋납니다."""
+    lock = _ui_function("_lock_query_fields")
+    assert "self.sync_round_trip_state()" in lock
+    assert "self.sync_transfer_state()" in lock
+    # 부작용(mark_stale 등) 없이 상태만 다시 맞추는 자리가 따로 있어야 합니다.
+    assert "def sync_round_trip_state" in _ui_source()
+    round_trip = _ui_function("_round_trip_toggled")
+    assert "self.sync_round_trip_state()" in round_trip
+    assert "self.mark_stale()" in round_trip
+
+
+def test_the_calendar_manages_its_own_disabled_days():
+    """지난 날짜 단추를 스스로 잠가 둡니다 — 한 번 더 풀면 되살아납니다."""
+    lock = _ui_function("_lock_query_fields")
+    assert "self.calendar" in lock
+    helper = _ui_function("_set_widget_locked")
+    assert "if child in exempt:" in helper
+    assert "continue" in helper

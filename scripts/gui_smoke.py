@@ -90,9 +90,11 @@ def main() -> int:
         os.environ[name] = sandbox
 
     import tkinter as tk
+    import types
 
     from korail_booker import ui as ui_module
     from korail_booker.autobook import Target
+    from korail_booker.holds import Held
     from korail_booker.journeys import Journey, JourneySource
     from korail_booker.search import TRANSFER_CUSTOM, SearchRequest
 
@@ -135,7 +137,10 @@ def main() -> int:
     ui_module.messagebox.askyesno = lambda *_a, **_k: True  # type: ignore[assignment]
 
     root = tk.Tk()
-    # 로그인 팝업은 이 확인의 대상이 아닙니다. 본 창을 막으면 아무것도 못 누릅니다.
+    # 로그인 팝업은 켜자마자 뜨는 것은 이 확인의 대상이 아닙니다 — 본 창을
+    # 막으면 아무것도 못 누릅니다. 진짜 구현은 따로 챙겨 뒀다가 아래에서
+    # 손으로 부릅니다(감시 중 잠금·하이픈 안내·[비로그인] 초기화 확인).
+    real_open_login = ui_module.BookerApp.open_login
     ui_module.BookerApp.open_login = lambda self: None  # type: ignore[method-assign]
     # 역 목록도 막습니다. 켜자마자 진짜 KORAIL 요청이 나가고, 실패하면 모달
     # 오류창이 떠서 이 스크립트가 영영 안 끝납니다.
@@ -305,6 +310,102 @@ def main() -> int:
     check("설정 파일에는 쓰지 않는다",
           app.settings.telegram_token == "" and app.settings.telegram_chat_id == "")
     check("알림이 그 값을 쓴다", app._make_notifier() is not None)
+
+    # -- 로그인 팝업: 감시 중 잠금, 하이픈 안내, [비로그인] 목록 초기화 ------
+
+    def find_widgets(
+        widget: tk.Misc, predicate: object, found: list | None = None
+    ) -> list:
+        if found is None:
+            found = []
+        for child in widget.winfo_children():
+            try:
+                if predicate(child):  # type: ignore[operator]
+                    found.append(child)
+            except tk.TclError:
+                pass
+            find_widgets(child, predicate, found)
+        return found
+
+    # 감시가 도는 중에는 팝업 자체가 열리지 않는다(로그아웃과 같은 방비).
+    app.watches = [types.SimpleNamespace(running=True)]  # type: ignore[list-item]
+    shown.clear()
+    real_open_login(app)
+    check(
+        "감시 중에는 로그인 팝업이 안 열린다",
+        app._login_window is None
+        and any("자동예매가 돌고 있습니다" in message for _title, message in shown),
+        shown,
+    )
+    app.watches = []
+
+    # 감시가 없으면 뜬다 — 하이픈 안내와 [비로그인] 단추를 확인한다.
+    real_open_login(app)
+    root.update()
+    window = app._login_window
+    assert window is not None, "로그인 팝업이 뜨지 않았습니다"
+    labels = find_widgets(window, lambda w: w.winfo_class() == "TLabel")
+    check(
+        "휴대폰번호는 하이픈 없이 넣으라고 안내한다",
+        any("하이픈" in str(label.cget("text")) for label in labels),
+    )
+    buttons = find_widgets(window, lambda w: w.winfo_class() == "TButton")
+    skip_button = next(
+        (b for b in buttons if str(b.cget("text")) == "비로그인"), None
+    )
+    check("[비로그인] 단추가 있다", skip_button is not None)
+
+    # 목록을 채워 두고 [비로그인] 을 누르면 조회·예매 대상·잡은 예약이 전부
+    # 비어야 한다 — 이전 세션의 목록이 새 세션에 남으면 안 된다.
+    app._show_journeys(results)
+    root.update()
+    app.tree.selection_set(app.tree.get_children()[0])
+    app.add_targets()
+    root.update()
+    app.holds = [
+        Held(
+            label="",
+            summary="동탄 -> 동대구",
+            pnr="P0000001",
+            fare="10000",
+            deadline=None,
+            deadline_text="모름",
+        )
+    ]
+    app.sync_holds()
+    assert app.targets and app.holds and app.results, "목록을 못 채웠습니다"
+    if skip_button is not None:
+        skip_button.invoke()  # type: ignore[attr-defined]
+    root.update()
+    check(
+        "[비로그인] 을 누르면 조회·예매 대상·잡은 예약이 모두 비워진다",
+        not app.targets and not app.holds and not app.results and not app.journeys,
+    )
+    check("로그인 팝업이 닫힌다", app._login_window is None)
+
+    # 로그인에 성공해도(다른 아이디로 로그인 포함) 같은 초기화가 걸린다.
+    app._show_journeys(results)
+    root.update()
+    app.tree.selection_set(app.tree.get_children()[0])
+    app.add_targets()
+    root.update()
+    app.holds = [
+        Held(
+            label="",
+            summary="동탄 -> 동대구",
+            pnr="P0000002",
+            fare="10000",
+            deadline=None,
+            deadline_text="모름",
+        )
+    ]
+    app.sync_holds()
+    app.login_id.set("tester")
+    app._login_succeeded()
+    check(
+        "로그인에 성공해도 목록이 초기화된다",
+        not app.targets and not app.holds and not app.results and not app.journeys,
+    )
 
     if args.shot:
         root.update()

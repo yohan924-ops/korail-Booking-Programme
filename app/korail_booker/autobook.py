@@ -715,9 +715,8 @@ class AutoBooker:
                 # 동탄→대전 하나뿐입니다.
                 self._on_hold(
                     target.label,
-                    f"[{number}구간만] {journey.leg_summary(number - 1)}"
-                    f"  (원래 여정: {journey.summary()})",
-                    "좌석 예약(구간별)",
+                    journey.leg_hold_label(number - 1, partial=True),
+                    f"좌석 예약({number}구간)",
                     target.direction,
                     hold,
                 )
@@ -849,9 +848,16 @@ class AutoBooker:
             return self._finish(kind)
         split = len(holds) > 1
         for number, hold in enumerate(holds, start=1):
+            # 구간마다 따로 샀으면 '여정' 칸도 '종류' 칸도 구간별로 다르게
+            # 적습니다. 여정 한 줄을 그대로 두 번 쓰면 PNR 도 운임도 다른데
+            # 칸만 똑같아 보여 사람이 중복 예약으로 오인합니다.
+            hold_kind = f"좌석 예약({number}구간)" if split else kind
+            hold_summary = (
+                journey.leg_hold_label(number - 1) if split else journey.summary()
+            )
             if self._on_hold is not None:
                 self._on_hold(
-                    target.label, journey.summary(), kind, target.direction, hold
+                    target.label, hold_summary, hold_kind, target.direction, hold
                 )
             where = f" [{number}구간]" if split else ""
             self.announce(

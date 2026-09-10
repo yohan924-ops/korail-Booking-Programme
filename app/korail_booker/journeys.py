@@ -522,6 +522,23 @@ class Journey:
             f"({format_duration(self.leg_minutes(index))})"
         )
 
+    def leg_hold_label(self, index: int, *, partial: bool = False) -> str:
+        """구간별로 따로 산 예약 하나를 **잡은 예약 목록**에 적을 한 줄.
+
+        여정 전체 요약(:meth:`summary`)을 모든 구간의 '여정' 칸에 그대로
+        쓰면, 구간마다 PNR 도 운임도 다른데 그 칸만 똑같아 보여 사람이
+        중복 예약으로 오인합니다 — 실제로 그런 신고가 있었습니다. 그래서
+        **이 구간이 무엇인지를 앞에 적고, 전체 여정은 참고로만** 붙입니다.
+
+        ``partial`` 은 뒤 구간이 실패해 이 구간만 남았을 때 씁니다 — "구간만"
+        이라는 말이 "나머지는 못 잡았다" 를 뜻하기 때문에, 전부 성공했을 때와
+        문구를 가릅니다.
+        """
+        ordinal = f"{index + 1}구간"
+        tag = f"[{ordinal}만]" if partial else f"[{ordinal}]"
+        note = "원래 여정" if partial else "전체 여정"
+        return f"{tag} {self.leg_summary(index)}  ({note}: {self.summary()})"
+
     def summary(self) -> str:
         """로그·알림·예매 대상에 쓰는 한 줄.
 
