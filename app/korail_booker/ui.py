@@ -582,9 +582,9 @@ class BookerApp:
         self._last_return_before = ""
         #: [바로 예약] 요청이 나가 있는 중인지. 닫기 전에 이것을 봅니다.
         self._reserving = False
-        #: 답을 기다리는 [바로 예약]의 방향들. 그 몇 초 사이에 같은 방향에
+        #: 답을 기다리는 [바로 예약]의 조합들. 그 몇 초 사이에 같은 조합에
         #: 감시를 걸거나 또 예약하는 것을 막습니다.
-        self._reserving_directions: set[tuple[str, str, str]] = set()
+        self._reserving_keys: set[JourneyKey] = set()
         #: 클라이언트를 만드는 것은 한 번뿐이어야 합니다 — 스레드 둘이 동시에
         #: 만들면 로그인이 버려지는 쪽에 붙습니다.
         self._client_lock = threading.Lock()
@@ -1601,28 +1601,38 @@ class BookerApp:
             return
         picked = [self.targets[index] for index in indices]
 
-        # 감시가 노리는 중이거나 이미 잡아 둔 방향은 건드리지 않습니다. 한
-        # 방향에 예약은 하나입니다 — 여기서 하나 더 잡으면 그것이 중복 예약이고,
-        # 이 프로그램은 취소를 하지 않습니다.
-        busy = self._busy_directions()
-        conflicting = [t for t in picked if t.direction in busy]
+        # 감시가 노리는 중이거나 이미 잡아 둔 **정확히 같은 조합**은
+        # 건드리지 않습니다 — 그것만 다시 잡으면 진짜 중복 예약이고, 이
+        # 프로그램은 취소를 하지 않습니다. 1구간이 같고 2구간만 다른
+        # 서로 다른 조합은 막지 않습니다 — 그건 중복이 아닙니다.
+        busy = self._busy_journeys()
+        conflicting = [t for t in picked if t.journey.key() in busy]
         if conflicting:
             messagebox.showwarning(
                 "바로 예약",
-                f"아래 {len(conflicting)}편은 같은 방향을 이미 감시 중이거나 예약을 "
-                "잡아 두었습니다. 지금 또 잡으면 중복 예약입니다.\n\n"
+                f"아래 {len(conflicting)}편은 정확히 같은 조합을 이미 감시 중이거나 "
+                "예약을 잡아 두었습니다. 지금 또 잡으면 중복 예약입니다.\n\n"
                 + "\n".join(f"· {t.describe()}" for t in conflicting)
                 + "\n\n먼저 그 감시를 멈추거나 잡은 예약을 정리하세요.",
             )
             return
-        directions = [target.direction for target in picked]
-        repeated = {d for d in directions if directions.count(d) > 1}
-        if repeated:
+        keys = [target.journey.key() for target in picked]
+        repeated_targets = [
+            target for target in picked if keys.count(target.journey.key()) > 1
+        ]
+        if repeated_targets:
+            seen: set[JourneyKey] = set()
+            lines = []
+            for target in repeated_targets:
+                if target.journey.key() in seen:
+                    continue
+                seen.add(target.journey.key())
+                lines.append(f"· {target.describe()}")
             messagebox.showwarning(
                 "바로 예약",
-                "같은 방향을 둘 이상 골랐습니다. 한 방향에 한 건만 잡습니다 — "
-                "둘을 잡으면 하나는 중복 예약이고 기한이 지나 버려집니다.\n\n"
-                + "\n".join(f"· {a}→{b} {c}" for a, b, c in sorted(repeated)),
+                "정확히 같은 조합을 둘 이상 골랐습니다. 같은 조합은 한 건만 "
+                "잡습니다 — 둘을 잡으면 하나는 중복 예약이고 기한이 지나 "
+                "버려집니다.\n\n" + "\n".join(lines),
             )
             return
 
@@ -1669,7 +1679,7 @@ class BookerApp:
 
         self.reserve_now_button.configure(state="disabled")
         self._reserving = True
-        self._reserving_directions = {target.direction for target, _seat in plan}
+        self._reserving_keys = {target.journey.key() for target, _seat in plan}
         for target, _seat in plan:
             self._write_log(f"바로 예약 시도 — {target.describe()}")
 
@@ -1717,7 +1727,7 @@ class BookerApp:
 
     def _reserve_now_finished(self) -> None:
         self._reserving = False
-        self._reserving_directions = set()
+        self._reserving_keys = set()
         self.reserve_now_button.configure(state="normal")
 
     def _split_warning(self, targets: Sequence[Target]) -> str:
@@ -1808,6 +1818,11 @@ class BookerApp:
             + "5번 '잡은 예약' 에 남은 시간이 셉니다. 기한 안에 코레일 앱에서 "
             "결제하세요.",
         )
+        # 잡혔으면 예매 대상에서 뺍니다 — 안 빼면 4번과 5번에 같은 열차가
+        # 나란히 남아 두 번 잡은 것처럼 보입니다. 실제로는 한 번뿐입니다.
+        if target in self.targets:
+            self.targets.remove(target)
+            self.sync_target_list()
 
     def _reserve_now_broken(self, target: Target, exc: Exception) -> None:
         """예약 요청이 전송 중에 끊겼습니다. **결과를 알 수 없습니다.**
@@ -1866,6 +1881,12 @@ class BookerApp:
             "한쪽만 남았습니다. 코레일 앱에서 잡힌 구간을 결제하거나 "
             "취소하세요 — 이 프로그램은 취소를 하지 않습니다.",
         )
+        # 다시 시도하지 않습니다 — 예매 대상에도 남겨 두지 않습니다. 남겨
+        # 두면 한 번 더 누르고 싶어지는데, 그러면 이미 잡힌 앞 구간을 또
+        # 잡는 중복 예약이 됩니다.
+        if target in self.targets:
+            self.targets.remove(target)
+            self.sync_target_list()
 
 
     def _searching(self, busy: bool) -> None:
@@ -2149,19 +2170,24 @@ class BookerApp:
     def _hold_row_values(self, held: Held, now: datetime) -> tuple[str, ...]:
         """잡은 예약 한 줄의 열네 칸.
 
-        가운데 아홉 칸(구분·열차·출발·도착·총 소요·환승 대기·좌석)은
+        칸 순서는 :data:`HOLD_LAYOUT` 과 정확히 같아야 합니다 — 구분·**종류**
+        (좌석 예약/N구간)·열차·출발·도착·총 소요·환승 대기·좌석 셋·PNR·운임·
+        결제 기한·남은 시간. 열차부터 좌석까지 여덟 칸은
         :meth:`_journey_row_values` 로 조회 결과·예매 대상과 **같은 방식으로**
-        채웁니다. ``held_journey`` 가 없으면(옛 기록 등) 그 칸들만 "-" 로
-        비웁니다 — 지어내지 않습니다. 종류(좌석 예약/N구간)·PNR·운임·결제
-        기한·남은 시간은 이 표만의 칸입니다.
+        채웁니다(그 함수의 첫 값은 구분이고, 종류는 이 표에만 있는 칸이라
+        끝에 잇지 않고 **구분 바로 다음에 끼워 넣습니다** — 한 번 이것을
+        잊어 끝에 이었다가 칸이 통째로 한 칸씩 밀린 적이 있습니다).
+        ``held_journey`` 가 없으면(옛 기록 등) 그 칸들만 "-" 로 비웁니다 —
+        지어내지 않습니다.
         """
         if held.held_journey is not None:
-            middle = self._journey_row_values(held.label, held.held_journey)
+            kind, *rest = self._journey_row_values(held.label, held.held_journey)
         else:
-            middle = (held.label or "편도", "-", "-", "-", "-", "-", "-", "-", "-")
+            kind, rest = held.label or "편도", ["-"] * 8
         return (
-            *middle,
+            kind,
             held.kind,
+            *rest,
             held.pnr,
             held.fare,
             held.deadline_text,
@@ -2176,6 +2202,19 @@ class BookerApp:
             parent, "end", values=self._hold_row_values(held, now), tags=(held.tag(now),)
         )
         self._hold_items[index] = item
+        # 이 홀드가 가리키는 여정이 (아직 나뉘지 않은) 환승이면, 조회
+        # 결과와 똑같이 1구간/2구간 정보 줄을 펼칩니다. 구간별로 이미
+        # 나뉜 홀드는 held_journey 자체가 구간 하나짜리라 더 펼칠 것이
+        # 없습니다.
+        journey = held.held_journey
+        if journey is None or not journey.is_transfer:
+            return
+        for leg_index in range(len(journey.legs)):
+            kind, *rest = self._leg_row_values(journey, leg_index)
+            self.hold_tree.insert(
+                item, "end", values=(kind, "", *rest, "", "", "", ""), tags=("leg",)
+            )
+        self.hold_tree.item(item, open=True)
 
     def _insert_hold_group(self, indices: list[int]) -> None:
         """구간별로 따로 산 홀드 여럿을 한 부모 줄 아래에 접습니다.
@@ -3402,6 +3441,30 @@ class BookerApp:
                 "주지 않습니다. 시간대를 넓히거나 열차 종류 선택을 지워 보세요.",
             )
 
+    def _leg_row_values(self, journey: Journey, leg_index: int) -> tuple[str, ...]:
+        """구간 정보 한 줄 — 조회 결과·예매 대상·잡은 예약이 함께 씁니다.
+
+        아홉 칸은 :meth:`_journey_row_values` 와 같은 자리입니다("구분"
+        자리에는 "1구간"/"2구간" 이 옵니다). 그 구간 하나만의 좌석 상태를
+        보여 줍니다 — 부모 줄은 두 구간을 합쳐 하나로 말하므로(한 구간만
+        매진이어도 '매진'), 어느 쪽이 막혔는지는 여기서만 보입니다. 한
+        구간짜리 여정으로 만들어 같은 계산을 그대로 씁니다 — 규칙을 두 번
+        쓰지 않습니다.
+        """
+        leg = journey.legs[leg_index]
+        alone = Journey(legs=(leg,), source=journey.source)
+        return (
+            f"{leg_index + 1}구간",
+            f"{(leg.train_class_name or '').strip()} {leg.train_no}",
+            format_clock(leg.departure_time),
+            format_clock(leg.arrival_time),
+            format_duration(journey.leg_minutes(leg_index)),
+            f"{leg.departure_station_name}→{leg.arrival_station_name}",
+            alone.seat_text(KorailSeatClass.GENERAL),
+            alone.seat_text(KorailSeatClass.SPECIAL),
+            " · ".join(alone.extras()) or "-",
+        )
+
     def _insert_row(self, tree: ttk.Treeview, index: int, target: Target) -> None:
         journey = target.journey
         item = tree.insert(
@@ -3415,27 +3478,9 @@ class BookerApp:
         self.item_journeys[(str(tree), item)] = index
         if not journey.is_transfer:
             return
-        for leg_index, leg in enumerate(journey.legs):
-            # 구간 줄에도 그 구간의 좌석 상태를 적습니다. 부모 줄은 두 구간을
-            # 합쳐 하나로 말하므로(한 구간만 매진이어도 '매진'), 어느 쪽이
-            # 막혔는지는 여기서만 보입니다. 한 구간짜리 여정으로 만들어
-            # 같은 계산을 그대로 씁니다 — 규칙을 두 번 쓰지 않습니다.
-            alone = Journey(legs=(leg,), source=journey.source)
+        for leg_index in range(len(journey.legs)):
             leg_item = tree.insert(
-                item,
-                "end",
-                values=(
-                    f"{leg_index + 1}구간",
-                    f"{(leg.train_class_name or '').strip()} {leg.train_no}",
-                    format_clock(leg.departure_time),
-                    format_clock(leg.arrival_time),
-                    format_duration(journey.leg_minutes(leg_index)),
-                    f"{leg.departure_station_name}→{leg.arrival_station_name}",
-                    alone.seat_text(KorailSeatClass.GENERAL),
-                    alone.seat_text(KorailSeatClass.SPECIAL),
-                    " · ".join(alone.extras()) or "-",
-                ),
-                tags=("leg",),
+                item, "end", values=self._leg_row_values(journey, leg_index), tags=("leg",)
             )
             # 이 구간 줄만 따로 고르면 **이 구간 하나만의 예매 대상**을
             # 만듭니다(:meth:`_leg_only_target`) — 부모 전체를 고른 것으로
@@ -3886,35 +3931,45 @@ class BookerApp:
         chosen = [self.targets[index] for index in self.selected_indices()]
         return chosen or list(self.targets)
 
-    def _busy_directions(self) -> set[tuple[str, str, str]]:
-        """지금 감시 중이거나 이미 예약이 잡힌 방향들.
+    def _busy_journeys(self) -> set[JourneyKey]:
+        """지금 감시 중이거나 이미 예약이 잡힌 **정확히 같은 조합**들.
 
-        한 방향에 예약은 하나입니다. 감시 묶음끼리는 서로를 모르고, [바로 예약]
-        은 감시를 모릅니다 — 그 둘을 한자리에서 막아 줄 곳이 여기입니다.
+        예전에는 방향(출발역·도착역·날짜)으로 막았습니다. 그런데 1구간이
+        같고 2구간만 다른 서로 다른 열차 조합("KTX 341+343" 과
+        "KTX 341+53" 처럼)까지 같은 방향이라는 이유만으로 "중복" 이라고
+        막혔습니다 — 실제로 다른 열차인데 중복이 아니라는 신고가 있었습니다.
+        이 프로그램은 잡기만 하고 결제하지 않으므로, 서로 다른 조합을
+        나란히 잡아 두는 것 자체를 막을 이유가 없습니다. **정확히 같은
+        조합**(``Journey.key()``)을 또 잡으려는 것만 막습니다.
+
+        (자동예매 엔진 안의 "한 묶음에는 방향마다 한 건만" 규칙은 그대로
+        입니다 — 그건 한 묶음에 담아 둔 이어서 후보 여럿 중 먼저 열리는
+        것 하나만 잡히게 하는 별개의 장치이고, 여기서 건드리지 않습니다.
+        여기는 **서로 다른 묶음·[바로 예약]끼리** 겹치는 것만 봅니다.)
         """
-        busy: set[tuple[str, str, str]] = set()
+        busy: set[JourneyKey] = set()
         for watch in self.watches:
-            # 멈춘 묶음은 풀어 줍니다. 안 그러면 한 번 돌린 방향을 다시는
+            # 멈춘 묶음은 풀어 줍니다. 안 그러면 한 번 돌린 조합을 다시는
             # 못 노립니다.
             if watch.running:
-                busy |= watch.directions
-        # 잡아 둔 예약은 **그 예약이 아는 방향**으로 셉니다. 예전에는 여정
-        # 한 줄을 예매 대상 목록과 맞춰 봤는데, 그 줄을 빼는 순간 맞출 것이
-        # 없어져 같은 구간에 두 번째 예약이 나갔습니다.
+                busy |= watch.keys
+        # 잡아 둔 예약은 **그 예약이 가리키는 여정**으로 셉니다. 없으면
+        # (옛 기록 등) 판단할 근거가 없으므로 막지 않습니다 — 지어내지
+        # 않습니다.
         #
         # **기한이 지난 예약은 뺍니다.** 이 프로그램의 기록에도 적혀 있듯
         # 기한이 지나면 코레일이 그 홀드를 스스로 취소합니다 — 더는 그
-        # 방향을 막고 있지 않은데 화면만 막아 두면, 같은 구간을 다시
+        # 조합을 막고 있지 않은데 화면만 막아 두면, 같은 조합을 다시
         # 노리고 싶어도 "이미 예약이 있다" 는 잘못된 이유로 계속 막힙니다.
         now = now_kst()
         busy |= {
-            held.direction
+            held.held_journey.key()
             for held in self.holds
-            if any(held.direction) and not is_expired(held.deadline, now)
+            if held.held_journey is not None and not is_expired(held.deadline, now)
         }
         # 아직 답을 못 받은 [바로 예약]도 셉니다. 요청이 나가 있는 몇 초
         # 사이에 감시를 걸면, 같은 열차를 두 번 잡습니다.
-        busy |= self._reserving_directions
+        busy |= self._reserving_keys
         return busy
 
     def _watch_of(self, target: Target) -> Watch | None:
@@ -3988,6 +4043,7 @@ class BookerApp:
         졌습니다).
         """
         target = self.targets[index]
+        journey = target.journey
         watch = self._watch_of(target)
         item = self.target_list.insert(
             parent,
@@ -4006,6 +4062,19 @@ class BookerApp:
             ),
         )
         self._target_items[index] = item
+        # 환승 여정이면 조회 결과와 똑같이 1구간/2구간 정보 줄을 펼칩니다
+        # — +/- 로 접고 펼 수 있습니다. 상태·조회 주기·남은 감시는 이
+        # 구간 하나만의 것이 아니므로 비웁니다.
+        if not journey.is_transfer:
+            return
+        for leg_index in range(len(journey.legs)):
+            self.target_list.insert(
+                item,
+                "end",
+                values=("", *self._leg_row_values(journey, leg_index), "", ""),
+                tags=("leg",),
+            )
+        self.target_list.item(item, open=True)
 
     def _insert_target_group(self, indices: list[int]) -> None:
         """1구간이 같은 예매 대상 여럿을 한 부모 줄 아래에 접습니다.
@@ -4096,23 +4165,27 @@ class BookerApp:
         if not targets:
             messagebox.showinfo("자동예매", "고른 열차는 이미 감시 중입니다")
             return
-        # **방향으로도 막습니다.** 엔진은 한 묶음 안에서 방향마다 한 건만
-        # 잡지만, 같은 방향을 노리는 묶음이 둘이면 서로를 모릅니다 — 같은
-        # 여정에 진짜 예약이 두 번 나가고, 이 프로그램은 취소를 하지 않습니다.
-        busy = self._busy_directions()
-        blocked = [t for t in targets if t.direction in busy]
-        targets = [t for t in targets if t.direction not in busy]
+        # **정확히 같은 조합도 막습니다.** 다른 묶음·[바로 예약]이 이미
+        # 그 조합을 노리는 중이면 같은 조합에 진짜 예약이 두 번 나갑니다 —
+        # 이 프로그램은 취소를 하지 않습니다. 1구간이 같고 2구간만 다른
+        # 서로 다른 조합은 막지 않습니다(엔진이 **한 묶음 안에서**는 방향당
+        # 하나만 잡는 규칙을 그대로 지킵니다 — 여기서 막는 것은 묶음을
+        # 넘나드는 중복뿐입니다).
+        busy = self._busy_journeys()
+        blocked = [t for t in targets if t.journey.key() in busy]
+        targets = [t for t in targets if t.journey.key() not in busy]
         if blocked:
             self._write_booking(
-                f"{len(blocked)}편은 같은 방향을 이미 감시 중이거나 잡아 두어 "
-                "건너뜁니다 (한 방향에 예약은 하나입니다).",
+                f"{len(blocked)}편은 정확히 같은 조합을 이미 감시 중이거나 잡아 "
+                "두어 건너뜁니다.",
                 "warn",
             )
         if not targets:
             messagebox.showinfo(
                 "자동예매",
-                "고른 열차의 방향은 이미 감시 중이거나 예약이 잡혀 있습니다.\n"
-                "한 방향에 한 건만 잡습니다 — 둘을 잡으면 하나는 중복 예약입니다.",
+                "고른 열차는 정확히 같은 조합을 이미 감시 중이거나 예약이 잡혀 "
+                "있습니다.\n같은 조합은 한 건만 잡습니다 — 둘을 잡으면 하나는 "
+                "중복 예약입니다.",
             )
             return
         try:

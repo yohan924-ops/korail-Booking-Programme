@@ -454,6 +454,44 @@ def main() -> int:
     app.targets = []
     app.sync_target_list()
 
+    # -- [바로 예약] 이 성공하면 예매 대상에서 빠지는가 ---------------------
+    from korail_mobile_api import ReservationHoldResponse
+
+    def fake_hold(pnr: str) -> ReservationHoldResponse:
+        return ReservationHoldResponse(
+            raw={}, pnr_no=pnr,
+            payment_deadline_date="20990101", payment_deadline_time="120000",
+            total_price="10000",
+        )
+
+    app.targets = [results[0]]
+    app.sync_target_list()
+    app._reserve_now_done(results[0], [fake_hold("SMOKE1")])
+    root.update()
+    check("[바로 예약] 으로 잡히면 예매 대상에서 빠진다",
+          results[0] not in app.targets, app.targets)
+    check("그러면서 잡은 예약에는 들어간다",
+          any(h.pnr == "SMOKE1" for h in app.holds),
+          [h.pnr for h in app.holds])
+
+    # -- 1구간이 같고 2구간만 다른 조합은 서로를 막지 않는가 -----------------
+    app.targets = []
+    app.holds = []
+    app.sync_target_list()
+    app.sync_holds()
+    app._reserve_now_done(results[0], [fake_hold("SMOKE2")])
+    root.update()
+    busy = app._busy_journeys()
+    check("정확히 같은 조합은 막힌다", results[0].journey.key() in busy)
+    check("1구간만 같고 2구간이 다른 조합은 막히지 않는다",
+          results[1].journey.key() not in busy
+          and results[2].journey.key() not in busy,
+          [t.journey.key() in busy for t in results])
+    app.targets = []
+    app.holds = []
+    app.sync_target_list()
+    app.sync_holds()
+
     # 바인딩된 메서드는 볼 때마다 새 객체라 `is` 로는 비교되지 않습니다.
     check("알림 함수는 설정을 굽지 않는다",
           app._make_notifier().__func__ is type(app)._notify_now)
@@ -550,24 +588,47 @@ def main() -> int:
           app._selected_hold_index() is None)
 
     # held_journey 를 준 홀드는 조회 결과와 정확히 같은 아홉 칸을 보여야
-    # 합니다 — 같은 함수(_journey_row_values)로 채우기 때문입니다.
+    # 합니다 — 같은 함수(_journey_row_values)로 채우기 때문입니다. **이름으로
+    # 각 칸을 짚어** 확인합니다 — 앞의 아홉 칸을 통째로 슬라이스만 하면,
+    # '종류' 를 끝에 잘못 이어 붙여 뒤의 모든 칸이 한 칸씩 밀리는 버그를
+    # 놓칩니다(실제로 그랬습니다 — 종류/열차 칸이 하나씩 밀려 보였습니다).
+    HOLD_COLUMNS = ui_module.HOLD_COLUMNS
     p1001 = next(
         item for item in group_children
         if app.hold_tree.item(item, "values")[PNR_COL] == "P1001"
     )
-    expected = app._journey_row_values("", first_target.journey)
-    actual = tuple(app.hold_tree.item(p1001, "values"))[:9]
-    check("열차·시각·좌석 칸이 조회 결과와 글자 하나까지 같다",
-          actual == expected, (actual, expected))
+    p1001_values = app.hold_tree.item(p1001, "values")
+    expected_kind, *expected_rest = app._journey_row_values("", first_target.journey)
+    checks = {
+        "구분": expected_kind,
+        "종류": "좌석 예약(1구간)",
+        "열차": expected_rest[0],
+        "출발": expected_rest[1],
+        "도착": expected_rest[2],
+        "총 소요": expected_rest[3],
+        "환승 대기": expected_rest[4],
+        "일반실": expected_rest[5],
+        "특실": expected_rest[6],
+        "입석·자유석·대기": expected_rest[7],
+    }
+    for name, expected_value in checks.items():
+        col = HOLD_COLUMNS.index(name)
+        check(f"잡은 예약의 '{name}' 칸이 조회 결과와 같다",
+              p1001_values[col] == expected_value,
+              (p1001_values[col], expected_value))
 
     # held_journey 가 없는 홀드는 지어내지 않고 그 칸들을 비웁니다.
     p1002 = next(
         item for item in group_children
         if app.hold_tree.item(item, "values")[PNR_COL] == "P1002"
     )
+    p1002_values = app.hold_tree.item(p1002, "values")
+    check("여정을 못 받은 홀드도 종류 칸은 채운다",
+          p1002_values[HOLD_COLUMNS.index("종류")] == "좌석 예약(2구간)",
+          p1002_values)
     check("여정을 못 받은 홀드는 좌석 칸을 '-' 로 비운다(지어내지 않는다)",
-          app.hold_tree.item(p1002, "values")[2] == "-",
-          app.hold_tree.item(p1002, "values"))
+          p1002_values[HOLD_COLUMNS.index("열차")] == "-",
+          p1002_values)
 
     app.holds = []
     app.sync_holds()

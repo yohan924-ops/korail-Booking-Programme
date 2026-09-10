@@ -1550,18 +1550,18 @@ def test_the_parent_row_says_sold_out_but_each_leg_still_shows_its_own_state():
 
 
 def test_the_leg_rows_are_not_blank_where_the_seat_columns_are():
-    """구간 줄의 좌석 칸이 비어 있으면 어느 구간이 매진인지 볼 방법이 없습니다."""
-    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    inserts = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "_insert_row"
-    ]
-    assert len(inserts) == 1
-    body = ast.unparse(inserts[0])
+    """구간 줄의 좌석 칸이 비어 있으면 어느 구간이 매진인지 볼 방법이 없습니다.
+
+    이 계산은 ``_leg_row_values`` 하나뿐입니다 — 조회 결과·예매 대상·잡은
+    예약 셋 다 이 함수로 구간 줄을 채웁니다. 따로 쓰면 셋이 어긋납니다.
+    """
+    body = _ui_function("_leg_row_values")
     assert "Journey(legs=(leg,)" in body
     assert "alone.seat_text(KorailSeatClass.GENERAL)" in body
+
+    for name in ("_insert_row", "_insert_target_row", "_insert_hold_row"):
+        caller = _ui_function(name)
+        assert "self._leg_row_values(journey" in caller, name
 
 
 def test_the_booker_waits_for_both_legs_instead_of_grabbing_one():
@@ -1737,10 +1737,10 @@ def test_reserve_now_needs_an_explicit_selection():
     assert "예매 대상에서 잡을 열차를 고르세요" in body
 
 
-def test_reserve_now_refuses_two_of_the_same_direction():
-    """같은 여정을 두 번 잡는 것은 중복 예약입니다."""
+def test_reserve_now_refuses_two_of_the_same_combination():
+    """정확히 같은 조합을 두 번 잡는 것은 중복 예약입니다."""
     body = _ui_function("on_reserve_now")
-    assert "directions.count(d) > 1" in body
+    assert "keys.count(target.journey.key()) > 1" in body
     assert "중복 예약" in body
 
 
@@ -1985,9 +1985,9 @@ def test_starting_again_never_watches_the_same_journey_twice():
     body = _ui_function("_start_targets")
     assert "watching = self.watching_keys()" in body
     assert "if t.journey.key() not in watching" in body
-    # 방향으로도 막습니다 — 묶음끼리는 서로를 모릅니다.
-    assert "busy = self._busy_directions()" in body
-    assert "if t.direction not in busy" in body
+    # 정확히 같은 조합으로도 막습니다 — 묶음끼리는 서로를 모릅니다.
+    assert "busy = self._busy_journeys()" in body
+    assert "if t.journey.key() not in busy" in body
 
 
 def test_selected_only_start_and_stop_both_exist():
@@ -3415,14 +3415,14 @@ def test_a_broken_token_never_escapes_the_notifier():
         notifier.close()
 
 
-def test_one_direction_is_never_watched_or_reserved_twice():
-    """묶음끼리는 서로를 모릅니다. 방향으로 막지 않으면 예약이 두 번 나갑니다."""
+def test_the_same_combination_is_never_watched_or_reserved_twice():
+    """묶음끼리는 서로를 모릅니다. 막지 않으면 같은 조합의 예약이 두 번 나갑니다."""
     source = _ui_source()
-    assert "def _busy_directions" in source
+    assert "def _busy_journeys" in source
     start = _ui_function("_start_targets")
-    assert "busy = self._busy_directions()" in start
+    assert "busy = self._busy_journeys()" in start
     now = _ui_function("on_reserve_now")
-    assert "busy = self._busy_directions()" in now
+    assert "busy = self._busy_journeys()" in now
     assert "conflicting" in now
 
 
@@ -3569,31 +3569,51 @@ def test_the_deadline_is_read_by_one_parser_only():
     assert shown == counted.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def test_a_direction_stays_blocked_even_when_its_row_is_gone():
-    """줄을 빼면 막을 근거가 사라져 같은 구간에 두 번째 예약이 나갔습니다."""
-    source = _ui_source()
-    assert "direction: tuple[str, str, str] = ('', '', '')" in ast.unparse(
-        ast.parse((APP_DIR / "korail_booker" / "holds.py").read_text(encoding="utf-8"))
-    )
-    body = _ui_function("_busy_directions")
-    # 화면 목록이 아니라 예약과 감시가 아는 방향을 봅니다.
+def test_a_journey_stays_blocked_even_when_its_row_is_gone():
+    """줄을 빼면 막을 근거가 사라져 같은 조합에 두 번째 예약이 나갔습니다."""
+    body = _ui_function("_busy_journeys")
+    # 화면 목록이 아니라 예약과 감시가 아는 조합을 봅니다.
     assert "self.targets" not in body
-    assert "busy |= watch.directions" in body
-    assert "held.direction for held in self.holds" in body
-    assert "busy |= self._reserving_directions" in body
-    # 멈춘 묶음은 풀어 줍니다 — 안 그러면 한 번 돌린 방향을 다시 못 노립니다.
+    assert "busy |= watch.keys" in body
+    assert "held.held_journey.key()" in body
+    assert "busy |= self._reserving_keys" in body
+    # 멈춘 묶음은 풀어 줍니다 — 안 그러면 한 번 돌린 조합을 다시 못 노립니다.
     assert "if watch.running:" in body
-    assert "directions: frozenset[tuple[str, str, str]]" in source
 
 
-def test_an_expired_hold_no_longer_blocks_its_direction():
+def test_different_combinations_sharing_a_leg_do_not_block_each_other():
+    """1구간이 같고 2구간만 다른 조합은 서로 다른 열차입니다 — 중복이 아닙니다.
+
+    예전에는 방향(출발역·도착역·날짜)으로 막아서, 이런 서로 다른 조합까지
+    "중복 예약" 이라고 막았습니다 — 실제로 다른 열차인데 왜 막히냐는 신고가
+    있었습니다. 이 프로그램은 잡기만 하고 결제하지 않으므로, 정확히 같은
+    조합(``Journey.key()``)만 막으면 됩니다.
+    """
+    busy_journeys = _ui_function("_busy_journeys")
+    on_reserve = _ui_function("on_reserve_now")
+    start_targets = _ui_function("_start_targets")
+    for body in (on_reserve, start_targets):
+        assert "self._busy_journeys()" in body or "busy = self._busy_journeys()" in body
+        assert "t.journey.key() in busy" in body or "t.journey.key() not in busy" in body
+        # 방향(.direction) 으로 막지 않습니다 — 그건 서로 다른 조합도 같게 봅니다.
+        assert ".direction in busy" not in body
+        assert ".direction not in busy" not in body
+    assert "held.held_journey.key()" in busy_journeys
+    # autobook.py 의 엔진 내부 "한 묶음에 방향 하나" 규칙은 건드리지 않습니다
+    # — 그건 이어서 후보 여럿 중 먼저 열리는 것 하나만 잡히게 하는 별개의
+    # 장치라, 방향(직통 값) 그대로 둡니다.
+    booker = (APP_DIR / "korail_booker" / "autobook.py").read_text(encoding="utf-8")
+    assert "target.direction" in booker
+
+
+def test_an_expired_hold_no_longer_blocks_its_journey():
     """기한이 지나면 코레일이 스스로 취소합니다 — 화면이 계속 막으면 안 됩니다.
 
     실제로 결제 기한이 지난 예약 두 건이 있는데도 같은 구간의 다른 조합을
-    새로 노릴 수 없는 신고가 있었습니다. 원인은 ``_busy_directions`` 가
+    새로 노릴 수 없는 신고가 있었습니다. 원인은 ``_busy_journeys`` 가
     기한을 보지 않고 방향이 있다는 사실만 봤기 때문입니다.
     """
-    body = _ui_function("_busy_directions")
+    body = _ui_function("_busy_journeys")
     assert "not is_expired(held.deadline, now)" in body
 
 
