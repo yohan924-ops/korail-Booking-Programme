@@ -2638,10 +2638,29 @@ def test_the_icon_is_optional_on_both_build_paths():
 
     # .ico 가 있으면 그것을 먼저 씁니다 — 변환 없이 그대로 들어갑니다.
     # 그리고 둘 다 없을 때를 갈라 두어야 빌드가 멈추지 않습니다.
-    assert 'if exist "packaging\\icon.ico" set "ICON=' in script
+    assert 'if exist "packaging\\icon.ico" set ICON=' in script
     assert 'if not defined ICON if exist "packaging\\icon.png"' in script
     assert "if (Test-Path packaging/icon.ico)" in workflow
     assert "elseif (Test-Path packaging/icon.png)" in workflow
+
+
+def test_the_batch_builders_icon_path_is_absolute():
+    """.bat 은 ``--specpath`` 를 CWD 와 다르게 둡니다(``build\\``). PyInstaller 는
+    상대 경로 아이콘을 CWD 가 아니라 그 workpath 기준으로 다시 찾아,
+    "``build\\packaging\\icon.png`` 없음" 으로 빌드를 실패시킵니다 —
+    실제로 그랬습니다(``FileNotFoundError``). ``%CD%`` 를 붙여 절대 경로로
+    넘기면, ``os.path.join`` 이 절대 경로를 만나는 즉시 앞의 workpath 를
+    버리므로 어디서 실행하든 맞는 파일을 가리킵니다.
+
+    CI 워크플로(``desktop-build.yml``)는 ``--specpath`` 를 따로 주지 않아
+    PyInstaller 의 기본값(CWD)을 그대로 쓰므로 이 버그가 없습니다 — 그래서
+    거기는 상대 경로 그대로 둡니다.
+    """
+    script = (REPO_ROOT / "exe 만들기 (Windows).bat").read_text(encoding="utf-8")
+    assert 'set ICON=--icon "%CD%\\packaging\\icon.ico"' in script
+    assert 'set ICON=--icon "%CD%\\packaging\\icon.png"' in script
+    # --specpath 를 CWD 와 다르게 두는 바로 그 사실이 이 버그의 원인입니다.
+    assert '--specpath "%CD%\\build"' in script
 
 
 def test_the_local_exe_builder_stands_on_its_own():

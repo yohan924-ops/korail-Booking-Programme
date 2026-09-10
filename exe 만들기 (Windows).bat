@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 rem ============================================================================
 rem  코레일 예매 도우미 — Windows 실행 파일(exe) 만들기
 rem
@@ -61,9 +61,13 @@ rem --- 아이콘 (있으면 씁니다) ----------------------------------------
 rem  packaging\icon.png 또는 icon.ico 를 넣어 두면 그것이 exe 아이콘이 됩니다.
 rem  없으면 PyInstaller 기본 아이콘으로 나옵니다 — 없다고 빌드가 멈추지는
 rem  않습니다.
+rem  절대 경로로 넣습니다. PyInstaller 는 --specpath 를 CWD 와 다르게 두면
+rem  (이 스크립트는 build\ 로 둡니다) 상대 경로 아이콘을 CWD 가 아니라
+rem  workpath(build\) 기준으로 다시 찾아, "build\packaging\icon.png 없음" 으로
+rem  실패합니다 — 실제로 그랬습니다.
 set "ICON="
-if exist "packaging\icon.ico" set "ICON=--icon packaging\icon.ico"
-if not defined ICON if exist "packaging\icon.png" set "ICON=--icon packaging\icon.png"
+if exist "packaging\icon.ico" set ICON=--icon "%CD%\packaging\icon.ico"
+if not defined ICON if exist "packaging\icon.png" set ICON=--icon "%CD%\packaging\icon.png"
 if defined ICON (
   echo   아이콘을 넣습니다.
 ) else (
