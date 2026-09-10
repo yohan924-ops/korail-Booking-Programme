@@ -3282,3 +3282,12 @@ def test_closing_asks_before_losing_a_deadline():
 def test_the_client_is_built_once_even_under_two_threads():
     body = _ui_function("_ensure_client")
     assert "with self._client_lock:" in body
+
+
+def test_stopping_a_search_lets_the_next_one_start():
+    """중지가 표시를 안 내리면 재진입 가드가 [조회] 를 세션 내내 막습니다."""
+    body = _ui_function("on_stop_search")
+    assert "self._search_cancelled.add(self._search_token)" in body
+    assert "self._search_token = None" in body
+    # 버림 표시는 그대로 남아 늦게 끝난 조회가 화면을 덮지 못합니다.
+    assert body.index("_search_cancelled.add") < body.index("self._search_token = None")

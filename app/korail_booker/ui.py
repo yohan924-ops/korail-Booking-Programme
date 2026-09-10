@@ -1648,6 +1648,11 @@ class BookerApp:
         if self._search_token is None:
             return
         self._search_cancelled.add(self._search_token)
+        # **표시를 내려야 합니다.** on_search 는 이 값이 남아 있으면 "이미 조회
+        # 중" 으로 보고 돌려보냅니다 — 중지 한 번에 [조회] 가 그 뒤로 영영
+        # 죽었습니다. 버림 표시는 위에 남아 있으므로, 나가 있는 조회가 늦게
+        # 끝나도 그 결과가 화면에 오르지는 않습니다.
+        self._search_token = None
         self._write_log("조회를 중지했습니다.", "warn")
         self.search_button.configure(state="normal")
         self._searching(False)
