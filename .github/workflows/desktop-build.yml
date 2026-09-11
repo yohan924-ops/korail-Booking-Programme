@@ -28,8 +28,10 @@ jobs:
           python-version: '3.12'
       - name: Install build tooling
         # pillow 는 아이콘 때문입니다 — PyInstaller 는 .ico 가 아닌 그림을
-        # 받으면 pillow 로 바꿔 넣습니다.
-        run: python -m pip install pyinstaller pillow httpx cryptography
+        # 받으면 pillow 로 바꿔 넣습니다. pystray 는 작업 표시줄 트레이
+        # 아이콘(창을 닫아도 자동예매가 백그라운드에서 계속되는 기능) 때문
+        # 입니다 — 이 venv 에 있어야 PyInstaller 가 exe 안에 함께 담습니다.
+        run: python -m pip install pyinstaller pillow httpx cryptography pystray
 
       # --onefile   파일 하나로 나옵니다. 첫 실행 때 임시 폴더에 풀리느라
       #             몇 초 걸립니다 -- 고장이 아닙니다.

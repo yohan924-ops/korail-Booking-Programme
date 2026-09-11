@@ -46,6 +46,7 @@ from korail_booker import notify as N
 from korail_booker import search as S
 from korail_booker import session as ST_SESSION
 from korail_booker import settings as ST
+from korail_booker import tray as TRAY
 from korail_booker.autobook import (
     AutoBooker,
     BookingOptions,
@@ -3662,10 +3663,43 @@ def test_a_modal_never_stops_the_event_queue():
 
 
 def test_closing_asks_before_losing_a_deadline():
-    """잡은 예약 목록은 메모리에만 있습니다. 닫으면 PNR 과 기한이 사라집니다."""
-    body = _ui_function("on_close")
+    """잡은 예약 목록은 메모리에만 있습니다. 진짜로 끝내면 PNR 과 기한이 사라집니다.
+
+    트레이가 있으면 창의 X 단추(``on_close``)는 이 경고들을 거치지 않고
+    숨기기만 합니다 — 이 경고는 실제로 끝내는 자리(``_quit_for_real``,
+    트레이의 [종료] 도 결국 여기로 옵니다)에서만 나갑니다.
+    """
+    body = _ui_function("_quit_for_real")
     assert "self._reserving" in body
     assert "is_expired(held.deadline, now_kst())" in body
+
+
+def test_closing_the_window_hides_to_tray_when_one_is_running():
+    """창의 X 단추는 트레이가 있으면 숨기고, 없으면 곧장 진짜로 끝냅니다.
+
+    트레이 없이 숨기기만 하면 창을 되찾을 길이 없어지므로, 트레이가 확실히
+    돌고 있을 때만(:attr:`_tray_icon` 이 있을 때만) 숨깁니다.
+    """
+    body = _ui_function("on_close")
+    assert "if self._tray_icon is not None:" in body
+    assert "self._hide_to_tray()" in body
+    assert "self._quit_for_real()" in body
+
+
+def test_hiding_to_tray_always_explains_where_the_window_went():
+    """처음 보는 사람은 창을 닫으면 "껐다" 고 오해하기 쉬우므로 매번 안내합니다."""
+    body = _ui_function("_hide_to_tray")
+    assert "messagebox.showinfo(" in body
+    assert "백그라운드에서 계속됩니다" in body
+    assert "self.root.withdraw()" in body
+
+
+def test_quitting_for_real_also_stops_the_tray_icon():
+    """진짜로 끝낼 때는 트레이 아이콘도 함께 거둡니다."""
+    body = _ui_function("_quit_for_real")
+    assert "if self._tray_icon is not None:" in body
+    assert "self._tray_icon.stop()" in body
+    assert body.index("self._tray_icon.stop()") < body.index("self.root.destroy()")
 
 
 def test_the_client_is_built_once_even_under_two_threads():
@@ -4630,3 +4664,201 @@ def test_reserving_threads_the_real_passenger_count_into_the_new_hold():
     }
     for name in ("_settle", "_settle_partial"):
         assert "target.request.passengers" in functions[name], name
+
+
+# --- 트레이(작업 표시줄) — 창을 닫아도 백그라운드에서 계속 ----------------------
+#
+# tray.py 는 ui.py 와 달리 tkinter 를 import 하지 않으므로(모듈 자신의
+# docstring 이 그 이유를 적습니다), 여기서는 소스만 훑지 않고 **실제로
+# import 해서** 부릅니다.
+
+
+def _tray_handlers(**overrides: Any) -> TRAY.TrayHandlers:
+    base: dict[str, Any] = dict(
+        open_window=lambda: None,
+        quit_app=lambda: None,
+        stop_all=lambda: None,
+        refresh_reservations=lambda: None,
+        status_text=lambda: "○ 대기 중",
+        holds_text=lambda: "잡은 예약 0건",
+        is_running=lambda: False,
+        is_logged_in=lambda: False,
+    )
+    base.update(overrides)
+    return TRAY.TrayHandlers(**base)
+
+
+def test_the_tray_never_turns_on_off_windows():
+    """이 컴퓨터(시험 환경)는 윈도우가 아니므로 ``None`` 이 결정적으로 나와야 합니다.
+
+    ``pystray`` 를 import 하는 것 자체가 디스플레이가 없으면 예외를 던지는
+    것을 실측으로 확인했습니다(``Xlib.error.DisplayNameError``) — 그래서
+    ``create_tray_icon`` 은 그 import 조차 플랫폼을 먼저 본 뒤에만 합니다.
+    """
+    import sys
+
+    assert sys.platform != "win32", "이 시험은 실제 윈도우가 아닌 곳에서 도는 것을 전제합니다"
+    assert TRAY.create_tray_icon(_tray_handlers()) is None
+
+
+class _FakeMenuItem:
+    def __init__(
+        self, text: Any, action: Any, checked: Any = None, radio: Any = False,
+        default: Any = False, visible: Any = True, enabled: Any = True,
+    ) -> None:
+        self.text_value = text
+        self.action = action
+        self.default = default
+        self.enabled_value = enabled
+
+    def text(self) -> str:
+        value = self.text_value(None) if callable(self.text_value) else self.text_value
+        return str(value)
+
+    def enabled(self) -> bool:
+        value = self.enabled_value
+        return bool(value(None) if callable(value) else value)
+
+
+class _FakeMenu:
+    SEPARATOR = object()
+
+    def __init__(self, *items: Any) -> None:
+        self.items = items
+
+
+class _FakeIcon:
+    def __init__(self, name: str, image: Any, title: str, menu: _FakeMenu) -> None:
+        self.name = name
+        self.image = image
+        self.title = title
+        self.menu = menu
+
+
+class _FakePystray:
+    Icon = _FakeIcon
+    Menu = _FakeMenu
+    MenuItem = _FakeMenuItem
+
+
+def _real_items(icon: Any) -> list[_FakeMenuItem]:
+    return [item for item in icon.menu.items if item is not _FakeMenu.SEPARATOR]
+
+
+def test_the_tray_menu_opens_the_window_by_default_on_a_left_click():
+    """왼쪽 클릭(기본 동작)이 [뉴레일 열기] 로 가야 창을 되찾을 수 있습니다."""
+    opened = []
+    handlers = _tray_handlers(open_window=lambda: opened.append(True))
+    icon = TRAY._build_icon(_FakePystray, handlers)
+    items = _real_items(icon)
+    default_items = [item for item in items if item.default]
+    assert len(default_items) == 1
+    assert default_items[0].text() == "뉴레일 열기"
+    default_items[0].action()
+    assert opened == [True]
+
+
+def test_the_tray_menu_shows_live_status_without_inventing_it():
+    """상태·잡은 예약 두 줄은 부르는 쪽이 미리 계산해 둔 값을 그대로 읽습니다
+    (지어내지 않습니다) — 켜고 끌 수 없는 안내 줄이라 늘 꺼져 있습니다.
+    """
+    handlers = _tray_handlers(
+        status_text=lambda: "▶ 3편 감시 중", holds_text=lambda: "잡은 예약 2건"
+    )
+    icon = TRAY._build_icon(_FakePystray, handlers)
+    items = _real_items(icon)
+    texts = [item.text() for item in items]
+    assert "▶ 3편 감시 중" in texts
+    assert "잡은 예약 2건" in texts
+    status_item = next(item for item in items if item.text() == "▶ 3편 감시 중")
+    assert status_item.enabled() is False
+
+
+def test_the_tray_menu_greys_out_actions_that_would_do_nothing():
+    """감시가 없으면 [전체 중지] 를, 로그인 전이면 [서버에서 다시 불러오기] 를 끕니다."""
+    handlers = _tray_handlers(is_running=lambda: False, is_logged_in=lambda: False)
+    icon = TRAY._build_icon(_FakePystray, handlers)
+    items = _real_items(icon)
+    stop_item = next(item for item in items if item.text() == "전체 중지")
+    refresh_item = next(
+        item for item in items if item.text() == "서버에서 예약 다시 불러오기"
+    )
+    assert stop_item.enabled() is False
+    assert refresh_item.enabled() is False
+
+    running_handlers = _tray_handlers(is_running=lambda: True, is_logged_in=lambda: True)
+    running_icon = TRAY._build_icon(_FakePystray, running_handlers)
+    running_items = _real_items(running_icon)
+    assert next(i for i in running_items if i.text() == "전체 중지").enabled() is True
+    assert next(
+        i for i in running_items if i.text() == "서버에서 예약 다시 불러오기"
+    ).enabled() is True
+
+
+def test_the_tray_menu_quit_item_calls_the_quit_handler():
+    """트레이의 [종료] 는 부르는 쪽의 ``quit_app`` 으로 갑니다 — 진짜 종료
+    경고(예약 중·감시 중·기한 남은 예약)는 그 핸들러가 감쌉니다
+    (:func:`test_quitting_for_real_also_stops_the_tray_icon`)."""
+    quit_calls = []
+    handlers = _tray_handlers(quit_app=lambda: quit_calls.append(True))
+    icon = TRAY._build_icon(_FakePystray, handlers)
+    items = _real_items(icon)
+    quit_item = next(item for item in items if item.text() == "종료")
+    quit_item.action()
+    assert quit_calls == [True]
+
+
+def test_build_icon_lets_a_broken_backend_raise():
+    """``_build_icon`` 자신은 예외를 삼키지 않습니다 — 삼키는 자리는
+    :func:`create_tray_icon` 하나뿐입니다(아래 시험이 그 소스를 확인합니다).
+    이 함수가 조용히 실패를 삼키면, "무엇이 부러졌는지" 조차 알 수 없는
+    ``_build_icon`` 자체의 버그와 "트레이가 원래 없는 정상 상황" 을
+    구분할 수 없습니다.
+    """
+    class _BrokenPystray:
+        class Icon:
+            def __init__(self, *a: object, **k: object) -> None:
+                raise RuntimeError("이 컴퓨터엔 트레이가 없습니다")
+        Menu = _FakeMenu
+        MenuItem = _FakeMenuItem
+
+    with pytest.raises(RuntimeError):
+        TRAY._build_icon(_BrokenPystray, _tray_handlers())
+
+
+def test_create_tray_icon_is_the_one_place_that_swallows_the_exception():
+    """``create_tray_icon`` 은 플랫폼 확인 → import → ``_build_icon`` 전부를
+    감싸 무엇이 부러지든 ``None`` 으로 돌려줍니다 — 트레이가 없어도
+    프로그램은 지금까지처럼 돌아야 하기 때문입니다.
+    """
+    import inspect
+
+    source = inspect.getsource(TRAY.create_tray_icon)
+    assert source.count("except Exception:") == 2  # import 한 번, _build_icon 한 번
+    assert source.count("return None") >= 2
+
+
+def test_the_ui_wires_the_tray_menu_to_real_app_actions():
+    """트레이 메뉴의 각 항목이 실제로 어느 앱 동작으로 가는지 — 핸들러가
+    전부 :attr:`events` 큐를 거칩니다(트레이는 자신의 스레드에서 불리므로,
+    Tk 위젯을 직접 만지면 안 됩니다).
+    """
+    body = _ui_function("_start_tray")
+    assert "self.events.put(self._restore_from_tray)" in body
+    assert "self.events.put(self._quit_for_real)" in body
+    assert "self.events.put(self.on_stop)" in body
+    assert "self.events.put(self.on_load_reservations)" in body
+    assert "icon.run_detached()" in body
+    assert "except Exception" in body
+
+
+def test_the_tray_status_never_lets_another_thread_touch_the_watch_list():
+    """상태 글은 **Tk 스레드에서만** 다시 계산합니다 — 트레이 자신의
+    스레드는 그 결과(문자열 두 개)만 읽습니다.
+    """
+    body = _ui_function("_refresh_tray_status")
+    assert "self._tray_running = self.any_running()" in body
+    assert "self._tray_holds_text = f'잡은 예약 {len(self.holds)}건'" in body
+    assert "self._tray_icon.update_menu()" in body
+
+    assert "self._refresh_tray_status()" in _ui_function("_tick_holds")

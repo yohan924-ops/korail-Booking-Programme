@@ -87,6 +87,7 @@ from .search import (
 )
 from .session import build_client
 from .session import login as do_login
+from .tray import TrayHandlers, create_tray_icon
 
 
 #: 열차 종별. 거르는 방식이 **부분일치**라 ``"KTX"`` 하나로 ``KTX-산천`` 과
@@ -650,6 +651,17 @@ class BookerApp:
         #: 조회 결과와, 자동예매에 담아 둔 것.
         self.results: list[Target] = []
         self.targets: list[Target] = []
+        #: 작업 표시줄 트레이 아이콘 — 창을 닫아도 자동예매가 백그라운드에서
+        #: 계속되게 합니다. 윈도우가 아니거나 무엇이든 실패하면 ``None`` —
+        #: 그 경우 창을 닫으면 지금까지처럼 곧장 끝납니다(:meth:`on_close`).
+        self._tray_icon = None
+        #: 트레이 메뉴에 보일 상태 글 — 트레이 자신의 스레드가 읽으므로
+        #: (:mod:`korail_booker.tray`), 목록을 직접 훑지 않고 Tk 스레드가
+        #: 미리 계산해 둔 문자열/불 값만 여기 둡니다(:meth:`_refresh_tray_status`).
+        self._tray_status_text = "○ 대기 중"
+        self._tray_holds_text = "잡은 예약 0건"
+        self._tray_running = False
+        self._tray_logged_in = False
         self._build()
         self._restore()
         self._watch_for_changes(
@@ -679,6 +691,7 @@ class BookerApp:
         # 역 목록은 로그인 없이도 받을 수 있습니다. 켜자마자 받아 두면 자동완성이
         # 처음부터 돕니다 — 단추를 눌러야 채워지는 이유를 아무도 모릅니다.
         self.root.after(200, self.on_load_stations)
+        self._start_tray()
 
     # -- 화면 만들기 ---------------------------------------------------------
 
@@ -1087,6 +1100,11 @@ class BookerApp:
             route, textvariable=self.departure, width=12
         )
         self.departure_box.pack(side="left", padx=(2, 6))
+        # 돌아오는 편을 조회할 때 가장 자주 하는 일이 출발·도착을 맞바꾸는
+        # 것입니다 — 두 칸을 손으로 지우고 다시 치는 대신 단추 하나로.
+        ttk.Button(
+            route, text="⇄", width=3, command=self.swap_departure_arrival
+        ).pack(side="left", padx=(0, 6))
         ttk.Label(route, text="→ 도착").pack(side="left")
         self.arrival_box = AutocompleteCombobox(
             route, textvariable=self.arrival, width=12
@@ -1424,6 +1442,19 @@ class BookerApp:
     def _calendar_picked(self, picked: date) -> None:
         variable = self.return_date if self._calendar_for_return else self.date
         variable.set(picked.isoformat())
+
+    def swap_departure_arrival(self) -> None:
+        """출발역·도착역을 맞바꿉니다. 돌아오는 편을 조회할 때 가장 자주
+        하는 일이라, 두 칸을 손으로 지우고 다시 치는 대신 단추 하나로.
+
+        칸을 바꾸는 것만으로 충분합니다 — ``self.departure``/``self.arrival``
+        은 이미 :meth:`_watch_for_changes` 로 지켜보고 있어(``__init__``),
+        여기서 따로 :meth:`mark_stale` 을 부르지 않아도 값이 바뀌는 순간
+        알아서 "조건이 바뀌었습니다" 로 표시됩니다.
+        """
+        departure, arrival = self.departure.get(), self.arrival.get()
+        self.departure.set(arrival)
+        self.arrival.set(departure)
 
     def _clamp_return_date(self) -> None:
         """오는 날짜가 가는 날짜보다 앞서지 않게 합니다.
@@ -2283,7 +2314,7 @@ class BookerApp:
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 6))
 
     def _tick_holds(self) -> None:
-        """1초마다 줄어드는 것들을 다시 셉니다. 다른 일은 걸지 않습니다."""
+        """1초마다 줄어드는 것들을 다시 셉니다. 트레이 상태 글도 같이 갱신합니다."""
         now = now_kst()
         for index, held in enumerate(self.holds):
             item = self._hold_items.get(index)
@@ -2306,6 +2337,7 @@ class BookerApp:
                 # 감시 시계는 벽시계가 아니라 monotonic 입니다 — 엔진과 같은 자.
                 values[-1] = watch.remaining(time.monotonic()) if watch else "-"
                 self.target_list.item(item, values=values)
+        self._refresh_tray_status()
         self.root.after(1000, self._tick_holds)
 
     def _held_from(
@@ -5496,15 +5528,110 @@ class BookerApp:
             justify="left",
         ).grid(row=9, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 10))
 
+    # -- 트레이(작업 표시줄) ---------------------------------------------------
+    #
+    # 창을 닫아도 자동예매 감시가 백그라운드에서 계속되게 합니다. 윈도우
+    # 전용입니다 — 이유는 :mod:`korail_booker.tray` 의 모듈 docstring(실측:
+    # Linux 는 트레이 없이도 예외 하나 없이 조용히 실패하고, macOS 는
+    # ``run_detached()`` 가 사실상 아무 것도 돌리지 않습니다).
+
+    def _start_tray(self) -> None:
+        """가능하면 트레이 아이콘을 켭니다. **실패해도 조용히 넘어갑니다** —
+        :func:`~korail_booker.tray.create_tray_icon` 자신도 예외를
+        삼키지만, 만에 하나를 위해 여기서도 한 번 더 막습니다. 트레이가
+        없어도 이 프로그램은 지금까지처럼(창을 닫으면 곧장 끝나는) 그대로
+        돌아야 하기 때문입니다.
+        """
+        try:
+            icon = create_tray_icon(
+                TrayHandlers(
+                    open_window=lambda: self.events.put(self._restore_from_tray),
+                    quit_app=lambda: self.events.put(self._quit_for_real),
+                    stop_all=lambda: self.events.put(self.on_stop),
+                    refresh_reservations=lambda: self.events.put(
+                        self.on_load_reservations
+                    ),
+                    status_text=lambda: self._tray_status_text,
+                    holds_text=lambda: self._tray_holds_text,
+                    is_running=lambda: self._tray_running,
+                    is_logged_in=lambda: self._tray_logged_in,
+                )
+            )
+        except Exception as exc:  # pragma: no cover - 방비. 실제로 여기서 던진 적은 없습니다.
+            self.log(f"트레이 아이콘을 만들지 못했습니다: {exc}")
+            return
+        if icon is None:
+            return
+        try:
+            icon.run_detached()
+        except Exception as exc:
+            self.log(f"트레이 아이콘을 켜지 못했습니다: {exc}")
+            return
+        self._tray_icon = icon
+
+    def _refresh_tray_status(self) -> None:
+        """트레이 메뉴에 보일 상태 글을 다시 계산합니다. **Tk 스레드에서만**
+        부릅니다 — 트레이 자신의 스레드(다른 스레드입니다)는 여기서 미리
+        계산해 둔 문자열/불 값만 읽습니다. ``self.watches``/``self.holds``
+        같은 목록을 그 스레드가 직접 훑는 것은 이 프로그램 나머지가 지키는
+        스레드 규칙과 다른, 새로운 종류의 위험이라 만들지 않았습니다.
+
+        :meth:`_tick_holds` 가 1초마다 불러 트레이도 나머지 화면과 비슷한
+        주기로 갱신됩니다.
+        """
+        self._tray_running = self.any_running()
+        self._tray_logged_in = self.logged_in
+        watched = sum(len(watch.keys) for watch in self.watches if watch.running)
+        self._tray_status_text = (
+            f"▶ {watched}편 감시 중" if self._tray_running else "○ 대기 중"
+        )
+        self._tray_holds_text = f"잡은 예약 {len(self.holds)}건"
+        if self._tray_icon is not None:
+            try:
+                self._tray_icon.update_menu()
+            except Exception:
+                pass
+
+    def _restore_from_tray(self) -> None:
+        """트레이에서 [뉴레일 열기] 를 눌렀을 때 — 숨긴 창을 되살립니다."""
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
     # -- 종료 ----------------------------------------------------------------
 
     def on_close(self) -> None:
-        """끝내기 전에 **잃을 것이 있는지** 먼저 봅니다.
+        """창의 X 단추. 트레이가 있으면 **숨기기만** 하고, 없으면 곧장
+        :meth:`_quit_for_real` 로 갑니다.
+
+        트레이 없이 숨기기만 하면 되찾을 길이 없어집니다 — 그래서 트레이가
+        확실히 돌고 있을 때만(:attr:`_tray_icon` 이 있을 때만) 숨깁니다.
+        """
+        if self._tray_icon is not None:
+            self._hide_to_tray()
+            return
+        self._quit_for_real()
+
+    def _hide_to_tray(self) -> None:
+        """창을 숨기고 트레이로 보냅니다. 처음 보는 사람은 "껐다" 고
+        오해하기 쉬우므로 닫을 때마다 안내합니다.
+        """
+        messagebox.showinfo(
+            "뉴레일",
+            "창을 닫아도 자동예매 감시는 백그라운드에서 계속됩니다.\n\n"
+            "완전히 끄려면 작업 표시줄 오른쪽 아래 트레이 아이콘을 우클릭해 "
+            "[종료] 를 누르세요.",
+        )
+        self.root.withdraw()
+
+    def _quit_for_real(self) -> None:
+        """진짜로 끝냅니다 — 끝내기 전에 **잃을 것이 있는지** 먼저 봅니다.
 
         예약 요청이 나가 있는 채로 닫으면 서버에는 예약이 생기고 이쪽에는
         PNR 도 결제 기한도 남지 않습니다. 잡아 둔 예약 목록도 파일이 아니라
         메모리에만 있습니다 — 닫는 순간 사라지고, 그 기한을 놓치면 표를
-        잃습니다.
+        잃습니다. 트레이에서 [종료] 를 눌렀을 때도 이 자리로 옵니다 — 창을
+        닫을 때와 같은 경고를 거칩니다.
         """
         if self._reserving:
             if not messagebox.askyesno(
@@ -5528,6 +5655,11 @@ class BookerApp:
             + "\n\n정말 끝낼까요?",
         ):
             return
+        if self._tray_icon is not None:
+            try:
+                self._tray_icon.stop()
+            except Exception:
+                pass
         if self.client is not None:
             self.client.close()
         self.root.destroy()

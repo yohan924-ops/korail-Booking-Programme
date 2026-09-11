@@ -1192,6 +1192,64 @@ def main() -> int:
         not app.targets and not app.holds and not app.results and not app.journeys,
     )
 
+    # -- 출발·도착 맞바꾸기 ---------------------------------------------------
+    app.departure.set("동탄")
+    app.arrival.set("동대구")
+    app.swap_departure_arrival()
+    check("⇄ 단추가 출발역·도착역을 서로 바꾼다",
+          app.departure.get() == "동대구" and app.arrival.get() == "동탄",
+          (app.departure.get(), app.arrival.get()))
+
+    # -- 트레이: 창의 X 단추은 트레이가 있을 때만 숨긴다 ----------------------
+    #
+    # 이 컴퓨터(Xvfb, Linux)는 트레이를 켜지 않으므로(코드가 윈도우 전용으로
+    # 막습니다) app._tray_icon 은 실제로 None 입니다 — 그 경로(트레이 없음 →
+    # 곧장 종료)는 가짜 없이 그대로 시험합니다. 트레이가 "있을 때" 의 경로는
+    # 가짜 아이콘을 손으로 꽂아 확인합니다.
+    class _FakeTrayIcon:
+        def __init__(self) -> None:
+            self.stopped = False
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    check("이 컴퓨터에서는 트레이가 실제로 켜지지 않는다(윈도우 전용)",
+          app._tray_icon is None)
+
+    real_destroy = app.root.destroy
+    destroyed: list[str] = []
+    app.root.destroy = lambda: destroyed.append("destroyed")  # type: ignore[method-assign]
+    app.watches = []
+    app.holds = []
+    app._reserving = False
+
+    fake_icon = _FakeTrayIcon()
+    app._tray_icon = fake_icon
+    shown.clear()
+    app.on_close()
+    root.update()
+    check("트레이가 있으면 창의 X 단추는 숨기기만 한다(진짜로 끝내지 않는다)",
+          not destroyed
+          and any("백그라운드에서 계속됩니다" in message for _t, message in shown),
+          shown)
+    check("숨기면 창이 안 보이게 된다", not app.root.winfo_viewable())
+    app._restore_from_tray()
+    root.update()
+    check("트레이에서 [뉴레일 열기] 를 누르면 창이 되돌아온다",
+          app.root.winfo_viewable())
+
+    app._quit_for_real()
+    check("트레이의 [종료] 는 트레이 아이콘을 거두고 진짜로 끝낸다",
+          fake_icon.stopped and destroyed == ["destroyed"], (fake_icon.stopped, destroyed))
+
+    app._tray_icon = None
+    destroyed.clear()
+    app.on_close()
+    check("트레이가 없으면 창의 X 단추는 곧장 진짜로 끝낸다",
+          destroyed == ["destroyed"], destroyed)
+
+    app.root.destroy = real_destroy  # type: ignore[method-assign]
+
     if args.shot:
         root.update()
         root.after(300, root.quit)

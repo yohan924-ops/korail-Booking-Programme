@@ -57,6 +57,11 @@ echo.
 %PY% -m venv "%VENV%" || goto setupfailed
 "%VPY%" -m pip install --upgrade pip >nul 2>&1
 "%VPY%" -m pip install httpx cryptography || goto setupfailed
+rem 작업 표시줄 트레이 아이콘(창을 닫아도 자동예매가 백그라운드에서
+rem 계속되는 기능)은 이 둘이 있어야 켜집니다. 이 venv 에 있어야
+rem PyInstaller 가 exe 안에 함께 담습니다 — 실패해도 멈추지 않습니다,
+rem 없으면 그 기능만 빠지고 나머지는 그대로 돕니다.
+"%VPY%" -m pip install pystray pillow >nul 2>&1
 
 :haveenv
 
