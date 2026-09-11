@@ -1485,20 +1485,45 @@ class BookerApp:
         # 이 창에서 가장 자주 보는 표이므로 네 줄은 남깁니다.
         self._add_pane(parent, frame, minsize=RESULTS_MIN_HEIGHT, stretch="always")
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(1, weight=1)
+        frame.rowconfigure(2, weight=1)
+
+        # 단추 줄은 표와 **같은 칸을 나누지 않습니다.** 표 칸(TREE_COLUMNS)
+        # 은 열한 개나 되어 자기 폭만으로도 웬만한 노트북 화면보다 넓은데,
+        # 예전에는 이 단추들이 표와 같은 그리드 칸에 있어 그 폭을 그대로
+        # 물려받았습니다 — 창을 최대화해도 화면 밖으로 밀려 안 보였습니다
+        # (실제로 찍어서 확인했습니다). 따로 한 줄을 통째로 차지하고 왼쪽에
+        # 붙이면, 표가 아무리 넓어도 이 줄은 늘 화면 맨 왼쪽에 보입니다.
+        toolbar = ttk.Frame(frame)
+        toolbar.grid(row=0, column=0, columnspan=2, sticky="w", padx=4, pady=(4, 2))
+        ttk.Button(
+            toolbar, text="↓ 예매 대상에 담기", command=self.add_targets
+        ).pack(side="left")
+        ttk.Button(
+            toolbar, text="결과 비우기", width=10, command=self.clear_results
+        ).pack(side="left", padx=(6, 0))
+        # 체크박스 여섯 개를 늘 펴 두면 화면이 붐빕니다 — 대부분은 손대지
+        # 않는(무관) 값입니다. 단추 하나로 감춰 두고, 지금 값은 옆 글자로만
+        # 보여 줍니다("손대지 않았다" 를 한눈에 알 수 있어야 합니다).
+        ttk.Button(
+            toolbar, text="좌석 등급…", width=9, command=self.open_seat_pick_dialog
+        ).pack(side="left", padx=(6, 0))
+        ttk.Label(toolbar, textvariable=self.seat_pick_summary, foreground="#1f6feb").pack(
+            side="left", padx=(4, 0)
+        )
+
         self.outbound_title = ttk.Label(frame, text="가는 편", foreground="#1f6feb")
-        self.outbound_title.grid(row=0, column=0, sticky="w", padx=6)
+        self.outbound_title.grid(row=1, column=0, sticky="w", padx=6)
         self.outbound_title.grid_remove()
         self.inbound_title = ttk.Label(frame, text="오는 편", foreground="#1f6feb")
-        self.inbound_title.grid(row=0, column=1, sticky="w", padx=6)
+        self.inbound_title.grid(row=1, column=1, sticky="w", padx=6)
         self.inbound_title.grid_remove()
 
         outbound_pane = ttk.Frame(frame)
-        outbound_pane.grid(row=1, column=0, sticky="nsew")
+        outbound_pane.grid(row=2, column=0, sticky="nsew")
         self.tree = self._make_tree(outbound_pane)
         # 오는 편 표는 왕복일 때만 폅니다. 편도면 가는 편이 폭을 다 씁니다.
         self.inbound_pane = ttk.Frame(frame)
-        self.inbound_pane.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
+        self.inbound_pane.grid(row=2, column=1, sticky="nsew", padx=(6, 0))
         self.return_tree = self._make_tree(self.inbound_pane)
         self.inbound_pane.grid_remove()
 
@@ -1506,27 +1531,7 @@ class BookerApp:
         # 아닌지를 말해 주지 않으면 "바꿨는데 아무 일도 안 일어난다" 가 됩니다.
         self.results_status = tk.StringVar(value="조건을 정하고 [조회] 를 누르세요.")
         self.results_label = ttk.Label(frame, textvariable=self.results_status)
-        self.results_label.grid(row=2, column=0, sticky="w", padx=4)
-        # 이미 자리가 있는 열차는 기다릴 이유가 없습니다. 자동예매에 담고
-        # 돌리는 세 단계 대신 여기서 한 번에 잡습니다.
-        buttons = ttk.Frame(frame)
-        buttons.grid(row=2, column=1, sticky="e", padx=6, pady=(0, 4))
-        # 고른 표 바로 옆에 둡니다. 담는 것은 이 표에서 하는 일입니다.
-        ttk.Button(
-            buttons, text="↓ 예매 대상에 담기", command=self.add_targets
-        ).pack(side="left")
-        ttk.Button(
-            buttons, text="결과 비우기", width=10, command=self.clear_results
-        ).pack(side="left", padx=(6, 0))
-        # 체크박스 여섯 개를 늘 펴 두면 화면이 붐빕니다 — 대부분은 손대지
-        # 않는(무관) 값입니다. 단추 하나로 감춰 두고, 지금 값은 옆 글자로만
-        # 보여 줍니다("손대지 않았다" 를 한눈에 알 수 있어야 합니다).
-        ttk.Button(
-            buttons, text="좌석 등급…", width=9, command=self.open_seat_pick_dialog
-        ).pack(side="left", padx=(6, 0))
-        ttk.Label(buttons, textvariable=self.seat_pick_summary, foreground="#1f6feb").pack(
-            side="left", padx=(4, 0)
-        )
+        self.results_label.grid(row=3, column=0, columnspan=2, sticky="w", padx=4, pady=(2, 4))
 
     def open_seat_pick_dialog(self) -> None:
         """"담을 때" 좌석 등급 체크박스 — 단추를 눌러야만 뜨는 팝업.
@@ -1649,7 +1654,31 @@ class BookerApp:
         # 재서 씁니다. 96 으로 적어 뒀다가 [담기]·[빼기]·[비우기] 가 잘렸습니다.
         self._add_pane(parent, frame, stretch="always")
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
+        # 단추는 표 옆(세로 줄)이 아니라 **표 위, 가로 한 줄**에 둡니다 —
+        # 표 칸(TARGET_LAYOUT)이 열네 개라 표 옆에 세로로 세우면 그 폭을
+        # 그대로 물려받아 창을 최대화해도 화면 밖으로 밀립니다(3번과 같은
+        # 이유, 실제로 확인했습니다).
+        toolbar = ttk.Frame(frame)
+        toolbar.grid(row=0, column=0, columnspan=2, sticky="w", padx=4, pady=(4, 2))
+        # 예약은 **담은 것** 중에서 합니다. 조회 결과에 두면 담기 전 줄까지
+        # 잡을 수 있어 "담아 둔 것만 노린다" 는 규칙이 흐려집니다.
+        self.reserve_now_button = ttk.Button(
+            toolbar, text="바로 예약", command=self.on_reserve_now
+        )
+        self.reserve_now_button.pack(side="left")
+        ttk.Button(toolbar, text="빼기", command=self.remove_targets).pack(
+            side="left", padx=(6, 0)
+        )
+        ttk.Button(toolbar, text="비우기", command=self.clear_targets).pack(
+            side="left", padx=(6, 0)
+        )
+        # 조건은 시작할 때 한 번 읽습니다. 도는 중에 위 칸을 고쳐도 그 묶음은
+        # 옛 조건으로 계속 돕니다 — 이 단추가 멈추고 새 조건으로 다시 겁니다.
+        ttk.Button(
+            toolbar, text="조건 바꿔 재시작", command=self.restart_selected
+        ).pack(side="left", padx=(14, 0))
+
         # 목록이 아니라 표입니다. 줄마다 상태·주기·남은 시간을 따로 적어야
         # 여럿을 돌릴 때 무엇이 언제까지 도는지 보입니다.
         self.target_list = ttk.Treeview(
@@ -1673,35 +1702,16 @@ class BookerApp:
             )
         # 두 번 누르면 뺍니다. 담는 것과 빼는 것이 같은 몸짓의 앞뒤입니다.
         self.target_list.bind("<Double-Button-1>", self._target_double_clicked)
-        self.target_list.grid(row=0, column=0, sticky="nsew", padx=(4, 0), pady=4)
+        self.target_list.grid(row=1, column=0, sticky="nsew", padx=(4, 0), pady=4)
         scroll = ttk.Scrollbar(frame, orient="vertical", command=self.target_list.yview)
         self.target_list.configure(yscrollcommand=scroll.set)
-        scroll.grid(row=0, column=1, sticky="ns", pady=4)
+        scroll.grid(row=1, column=1, sticky="ns", pady=4)
         # 도는 것과 안 도는 것을 색으로 가릅니다. 줄 앞의 글자만으로는
         # 여러 줄이 섞였을 때 한눈에 안 들어옵니다.
         self.target_list.tag_configure("watching", foreground="#1a7f37")
         self.target_list.tag_configure("idle", foreground="#666666")
         self.target_list.tag_configure("tight", foreground="#d1242f")
         self.target_list.tag_configure("group", foreground="#1f6feb")
-        buttons = ttk.Frame(frame)
-        buttons.grid(row=0, column=2, sticky="n", padx=6, pady=4)
-        # 예약은 **담은 것** 중에서 합니다. 조회 결과에 두면 담기 전 줄까지
-        # 잡을 수 있어 "담아 둔 것만 노린다" 는 규칙이 흐려집니다.
-        self.reserve_now_button = ttk.Button(
-            buttons, text="바로 예약", width=14, command=self.on_reserve_now
-        )
-        self.reserve_now_button.pack()
-        ttk.Button(buttons, text="빼기", width=14, command=self.remove_targets).pack(
-            pady=(4, 0)
-        )
-        ttk.Button(buttons, text="비우기", width=14, command=self.clear_targets).pack(
-            pady=(4, 0)
-        )
-        # 조건은 시작할 때 한 번 읽습니다. 도는 중에 위 칸을 고쳐도 그 묶음은
-        # 옛 조건으로 계속 돕니다 — 이 단추가 멈추고 새 조건으로 다시 겁니다.
-        ttk.Button(
-            buttons, text="조건 바꿔 재시작", width=14, command=self.restart_selected
-        ).pack(pady=(10, 0))
         self._build_booking_controls(frame)
 
     def clear_results(self) -> None:
@@ -2147,7 +2157,25 @@ class BookerApp:
         frame = ttk.LabelFrame(parent, text="5. 잡은 예약 (기한 안에 코레일 앱에서 결제하세요)")
         self._add_pane(parent, frame, stretch="always")
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
+        # 단추는 표 옆이 아니라 표 위, 가로 한 줄에 둡니다 — 3·4번과 같은
+        # 이유(표 칸이 열여섯 개나 되어 옆에 세우면 화면 밖으로 밀립니다).
+        toolbar = ttk.Frame(frame)
+        toolbar.grid(row=0, column=0, columnspan=2, sticky="w", padx=4, pady=(4, 2))
+        # 이 프로그램이 취소 요청을 만드는 **유일한** 자리입니다. 자동예매는
+        # 절대 취소를 부르지 않습니다 — 사람이 줄을 고르고 확인 창을 지나야만
+        # 나갑니다.
+        self.cancel_hold_button = ttk.Button(
+            toolbar, text="선택 취소", command=self.on_cancel_hold
+        )
+        self.cancel_hold_button.pack(side="left")
+        ttk.Button(
+            toolbar, text="만료된 것 지우기", command=self.clear_expired_holds
+        ).pack(side="left", padx=(6, 0))
+        ttk.Button(toolbar, text="비우기", command=self.clear_holds).pack(
+            side="left", padx=(6, 0)
+        )
+
         self.hold_tree = ttk.Treeview(
             frame,
             columns=HOLD_COLUMNS,
@@ -2166,30 +2194,15 @@ class BookerApp:
                 anchor="w" if anchor == "w" else ("e" if anchor == "e" else "center"),
                 stretch=(name == "여정"),
             )
-        self.hold_tree.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        self.hold_tree.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
         scroll = ttk.Scrollbar(frame, orient="vertical", command=self.hold_tree.yview)
         self.hold_tree.configure(yscrollcommand=scroll.set)
-        scroll.grid(row=0, column=1, sticky="ns", pady=4)
+        scroll.grid(row=1, column=1, sticky="ns", pady=4)
         # 기한이 가까우면 눈에 띄어야 합니다. 지난 것은 흐리게 — 지웠다고
         # 착각하지 않도록 남기되, 살아 있는 것과 구별합니다.
         self.hold_tree.tag_configure("urgent", foreground="#b3261e")
         self.hold_tree.tag_configure("expired", foreground="#8a8a8a")
         self.hold_tree.tag_configure("group", foreground="#1f6feb")
-        buttons = ttk.Frame(frame)
-        buttons.grid(row=0, column=2, sticky="n", padx=6, pady=4)
-        # 이 프로그램이 취소 요청을 만드는 **유일한** 자리입니다. 자동예매는
-        # 절대 취소를 부르지 않습니다 — 사람이 줄을 고르고 확인 창을 지나야만
-        # 나갑니다.
-        self.cancel_hold_button = ttk.Button(
-            buttons, text="선택 취소", width=14, command=self.on_cancel_hold
-        )
-        self.cancel_hold_button.pack()
-        ttk.Button(
-            buttons, text="만료된 것 지우기", width=14, command=self.clear_expired_holds
-        ).pack(pady=(4, 0))
-        ttk.Button(
-            buttons, text="비우기", width=14, command=self.clear_holds
-        ).pack(pady=(4, 0))
         ttk.Label(
             frame,
             text="이 프로그램은 결제하지 않습니다. 기한이 지나면 코레일이 예약을 "
@@ -2198,7 +2211,7 @@ class BookerApp:
             "[선택 취소] 는 코레일에 실제로 취소를 요청합니다. 되돌릴 수 없습니다.",
             foreground="#666666",
             justify="left",
-        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 6))
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 6))
 
     def _tick_holds(self) -> None:
         """1초마다 줄어드는 것들을 다시 셉니다. 다른 일은 걸지 않습니다."""
@@ -2552,10 +2565,10 @@ class BookerApp:
         self.allow_standby = tk.BooleanVar(value=False)
         self.notify_enabled = tk.BooleanVar(value=True)
         ttk.Separator(frame, orient="horizontal").grid(
-            row=1, column=0, columnspan=3, sticky="ew", padx=4, pady=(2, 0)
+            row=2, column=0, columnspan=2, sticky="ew", padx=4, pady=(2, 0)
         )
         row = ttk.Frame(frame)
-        row.grid(row=2, column=0, columnspan=3, sticky="w", padx=4, pady=6)
+        row.grid(row=3, column=0, columnspan=2, sticky="w", padx=4, pady=6)
         ttk.Label(row, text=f"조회 주기({POLL_HINT})").pack(side="left")
         ttk.Entry(row, textvariable=self.poll_interval, width=5).pack(side="left", padx=2)
         ttk.Label(row, text="초    감시 시간").pack(side="left")
@@ -2568,7 +2581,7 @@ class BookerApp:
             side="left"
         )
         row2 = ttk.Frame(frame)
-        row2.grid(row=3, column=0, columnspan=3, sticky="w", padx=4, pady=(0, 6))
+        row2.grid(row=4, column=0, columnspan=2, sticky="w", padx=4, pady=(0, 6))
         ttk.Button(row2, text="텔레그램 설정", command=self.on_telegram_settings).pack(
             side="left", padx=12
         )
@@ -2604,7 +2617,7 @@ class BookerApp:
             "고르고 [조건 바꿔 재시작]. 결제는 하지 않습니다 — 잡은 뒤 코레일 "
             "앱에서 기한 안에 결제하세요.",
             foreground="#666666",
-        ).grid(row=4, column=0, columnspan=3, sticky="w", padx=4, pady=(0, 6))
+        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=4, pady=(0, 6))
 
     def _build_log(self, parent: tk.PanedWindow) -> None:
         """기록을 둘로 나눕니다 — 조회 쪽과 자동예매 쪽.
