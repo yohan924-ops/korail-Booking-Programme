@@ -32,7 +32,10 @@ from korail_mobile_api import (
     KorailTransportError,
     MutationConsent,
     MutationPreview,
+    ReservationHistoryResponse,
+    ReservationHistoryTrain,
     ReservationHoldResponse,
+    TrainSummary,
 )
 
 from . import settings as settings_module
@@ -641,7 +644,7 @@ class BookerApp:
         묶음은 **PanedWindow 로 서로 크기를 나눕니다.** 손잡이를 끌면 목록을
         키우고 조회 칸을 줄일 수 있습니다.
         """
-        self.root.title("코레일 예매 도우미")
+        self.root.title("뉴레일 - 코레일의 새로운 예매 도우미")
         # 첫 크기는 다 지은 뒤에 정합니다(:meth:`_fit_to_screen`) — 안에 무엇이
         # 들어갈지 알아야 얼마가 필요한지 알 수 있고, 화면보다 커서도 안 됩니다.
         # 스크롤이 있으므로 최소 크기를 크게 잡을 이유가 없습니다. 작은
@@ -2175,6 +2178,13 @@ class BookerApp:
         ttk.Button(toolbar, text="비우기", command=self.clear_holds).pack(
             side="left", padx=(6, 0)
         )
+        # 로그인할 때 자동으로 한 번 불러오지만(:meth:`_login_succeeded`),
+        # 그 뒤 코레일 앱에서 직접 잡거나 취소했을 수 있습니다 — 이 프로그램을
+        # 다시 켜지 않고도 지금 상태를 다시 물어볼 수 있어야 합니다.
+        self.load_reservations_button = ttk.Button(
+            toolbar, text="서버에서 불러오기", command=self.on_load_reservations
+        )
+        self.load_reservations_button.pack(side="left", padx=(14, 0))
 
         self.hold_tree = ttk.Treeview(
             frame,
@@ -2208,7 +2218,10 @@ class BookerApp:
             text="이 프로그램은 결제하지 않습니다. 기한이 지나면 코레일이 예약을 "
             "스스로 취소합니다. [만료된 것 지우기] 는 서버에 아무것도 보내지 "
             "않고 이 목록에서만 지웁니다 — 이미 코레일이 취소했을 예약입니다.\n"
-            "[선택 취소] 는 코레일에 실제로 취소를 요청합니다. 되돌릴 수 없습니다.",
+            "[선택 취소] 는 코레일에 실제로 취소를 요청합니다. 되돌릴 수 없습니다.\n"
+            "[서버에서 불러오기] 로 채운 줄(종류: 불러온 예약)은 결제 기한·좌석 "
+            "등급을 이 조회가 주지 않아 '코레일 앱에서 확인' 으로 비어 있고, "
+            "취소도 이 프로그램에서 걸 수 없습니다 — 코레일 앱에서 취소하세요.",
             foreground="#666666",
             justify="left",
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 6))
@@ -3241,6 +3254,11 @@ class BookerApp:
         # 더 확인합니다(방어적으로).
         if not self.any_running():
             self._reset_session_lists()
+            # 로그인할 때마다(껐다 켜거나, 재로그인하거나) 서버에 지금
+            # 살아 있는 예약을 다시 불러옵니다 — 이 프로그램을 새로
+            # 켜면 방금 비운 잡은 예약 목록은 이 세션이 만든 적이 없으니
+            # 비어 있고, 서버에는 예약이 그대로 있을 수 있습니다.
+            self._load_reservations_from_server(announce=False)
         if done is not None:
             done(None)
 
@@ -3294,6 +3312,145 @@ class BookerApp:
                 "계정이 바뀌어 조회 결과·예매 대상·잡은 예약 목록을 모두 "
                 "비웠습니다 (서버의 예약은 그대로입니다)."
             )
+
+    # -- 동작: 서버에서 잡은 예약 불러오기 ------------------------------------
+
+    def on_load_reservations(self) -> None:
+        """[서버에서 불러오기] 단추 — 사람이 눌러서 새로고침합니다."""
+        if not self.logged_in:
+            messagebox.showwarning("잡은 예약 불러오기", "먼저 로그인하세요")
+            return
+        self._load_reservations_from_server(announce=True)
+
+    def _load_reservations_from_server(self, *, announce: bool) -> None:
+        """코레일 서버에 지금 살아 있는 예약을 물어 목록에 채웁니다.
+
+        :meth:`~korail_mobile_api.client.KorailClient.get_reservation_history`
+        는 순수 조회(consent 없음)라 로그인만 하면 부를 수 있습니다 — 이
+        프로그램이 만든 적 없는 예약(전에 켰을 때 잡았거나, 코레일 앱에서
+        직접 잡은 것)도 여기서 알 수 있습니다.
+
+        **이 조회는 결제 기한도, 좌석 등급도, "예약대기인지 결제 완료인지"
+        도 주지 않습니다** — 그 칸들을 지어내지 않고 "코레일 앱에서
+        확인하세요" 라고 적습니다. 취소도 이 목록에서 불러온 줄에는 걸 수
+        없습니다 — 코레일 취소 폼은 **이 세션에서 방금 예약해서 받은
+        응답 객체**만 받아들이는데(:func:`build_unpaid_reservation_cancel_form`),
+        이 조회가 돌려주는 것은 다른 모양의 값이기 때문입니다. 그 값을
+        억지로 짜맞춰 취소 요청을 만들면, 실서버에서 확인된 적 없는 채로
+        되돌릴 수 없는 취소를 보내게 됩니다 — 하지 않습니다.
+        """
+        self.load_reservations_button.configure(state="disabled")
+
+        def work() -> None:
+            try:
+                client = self._ensure_client()
+                response = client.get_reservation_history()
+            except KorailApiError as exc:
+                message = f"{type(exc).__name__}: {exc}"
+                self.events.put(lambda: self._load_reservations_failed(message))
+                return
+            self.events.put(
+                lambda: self._reservations_loaded(response, announce=announce)
+            )
+
+        self._in_thread(work, "korail-reservation-history")
+
+    def _load_reservations_failed(self, message: str) -> None:
+        self.load_reservations_button.configure(state="normal")
+        self._write_log(f"서버에서 예약을 불러오지 못했습니다 — {message}", "bad")
+        messagebox.showerror("잡은 예약 불러오기 실패", message)
+
+    def _reservations_loaded(
+        self, response: ReservationHistoryResponse, *, announce: bool
+    ) -> None:
+        """불러온 예약을 목록에 채웁니다. **이 세션이 이미 아는 것은 덮지 않습니다.**
+
+        방금 이 세션에서 [바로 예약]·자동예매로 직접 잡은 것은 취소 버튼이
+        되는 더 정확한 값(``hold_response``, 결제 기한)을 이미 들고
+        있습니다 — 서버 조회 결과로 갈아 끼우면 그 값을 잃습니다.
+        """
+        self.load_reservations_button.configure(state="normal")
+        session_held = [h for h in self.holds if h.hold_response is not None]
+        session_pnrs = {h.pnr.strip() for h in session_held}
+        groups: dict[str, list[ReservationHistoryTrain]] = {}
+        order: list[str] = []
+        for train in response.trains:
+            pnr = (train.pnr_no or "").strip()
+            if not pnr:
+                # PNR 이 없으면 이 줄이 무엇을 가리키는지 알 길이 없습니다 —
+                # 지어내지 않고 뺍니다.
+                continue
+            if pnr not in groups:
+                groups[pnr] = []
+                order.append(pnr)
+            groups[pnr].append(train)
+        loaded = [
+            self._held_from_history(pnr, groups[pnr])
+            for pnr in order
+            if pnr not in session_pnrs
+        ]
+        self.holds = session_held + loaded
+        self.sync_holds()
+        message = f"서버에서 예약 {len(loaded)}건을 불러왔습니다."
+        if loaded:
+            message += (
+                " 결제 기한·좌석 등급·예약대기 여부는 이 조회로 알 수 없어 "
+                "'코레일 앱에서 확인' 으로 남겨 둡니다."
+            )
+        self._write_log(message, "good" if loaded else "info")
+        if announce:
+            messagebox.showinfo("잡은 예약 불러오기", message)
+
+    def _held_from_history(
+        self, pnr: str, trains: list[ReservationHistoryTrain]
+    ) -> Held:
+        """서버 조회(:meth:`get_reservation_history`) 한 PNR 묶음을 화면 자료로.
+
+        구간이 둘 이상이면 **하나의 PNR 로 함께 예약된 환승**입니다 — 이
+        프로그램이 직접 조합한 것(구간마다 PNR 이 따로임, 3·4번 표의
+        "이어서")과 달리, 서버가 이미 그렇게 알고 있는 조합이므로
+        ``JourneySource.SERVER_TRANSFER`` 로 표시합니다(지어낸 값이
+        아니라, PNR 이 하나로 같다는 사실 자체에서 나오는 값입니다).
+        """
+        leg_list: list[TrainSummary] = [
+            TrainSummary(
+                train_no=(train.train_no or "").strip() or "?",
+                departure_station_name=train.departure_station,
+                arrival_station_name=train.arrival_station,
+                departure_time=train.departure_time,
+                arrival_time=train.arrival_time,
+                departure_date=train.run_date,
+                train_class_code=train.train_class_code,
+                train_class_name=train.train_class_name,
+                raw=dict(train.raw),
+            )
+            for train in trains
+        ]
+        journey = Journey(
+            legs=tuple(leg_list),
+            source=(
+                JourneySource.SERVER_TRANSFER
+                if len(leg_list) > 1
+                else JourneySource.DIRECT
+            ),
+        )
+        first, last = leg_list[0], leg_list[-1]
+        return Held(
+            label="",
+            summary=journey.summary(),
+            pnr=pnr,
+            fare="알 수 없음(코레일 앱에서 확인)",
+            deadline=None,
+            deadline_text="서버가 이 목록에서 결제 기한을 주지 않습니다 — 코레일 앱에서 확인하세요",
+            kind="불러온 예약",
+            direction=(
+                first.departure_station_name or "",
+                last.arrival_station_name or "",
+                first.departure_date or "",
+            ),
+            hold_response=None,
+            held_journey=journey,
+        )
 
     def on_logout(self) -> None:
         """세션을 버립니다. 자동예매가 도는 중이면 먼저 막습니다.
@@ -4908,7 +5065,7 @@ class BookerApp:
 
             def work() -> None:
                 with TelegramNotifier(config) as bot:
-                    ok = bot.send("코레일 예매 도우미 테스트 알림입니다.")
+                    ok = bot.send("뉴레일 테스트 알림입니다.")
                 self.events.put(
                     lambda: status.set("보냈습니다" if ok else "실패했습니다")
                 )

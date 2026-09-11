@@ -2706,7 +2706,7 @@ def test_the_local_exe_builder_matches_the_ci_build():
         REPO_ROOT / ".github" / "workflows" / "desktop-build.yml"
     ).read_text(encoding="utf-8")
 
-    for fragment in ("--onefile", "--windowed", "--name KorailBooker",
+    for fragment in ("--onefile", "--windowed", "--name NewRail",
                      "--paths src --paths app", "packaging/desktop_entry.py"):
         assert fragment in workflow, fragment
         # 배치 파일은 경로 구분자가 다릅니다. 그 부분만 바꿔 대조합니다.
@@ -4346,3 +4346,76 @@ def test_the_target_status_column_shows_a_fixed_seat_choice():
     state = _ui_function("_target_state")
     assert "target.seat_choices is not None" in state
     assert "self._seat_choice_text(target.seat_choices)" in state
+
+
+# --- 서버에서 잡은 예약 불러오기 -------------------------------------------------
+
+
+def test_login_loads_reservations_from_the_server_without_asking():
+    """껐다 켜거나 재로그인하면, 서버에 살아 있는 예약을 조용히 다시 불러옵니다."""
+    body = _ui_function("_login_succeeded")
+    assert "self._load_reservations_from_server(announce=False)" in body
+    # 계정이 바뀌었을 수 있으니 목록을 비운 *뒤에* 새 계정 것을 불러옵니다.
+    assert body.index("self._reset_session_lists()") < body.index(
+        "self._load_reservations_from_server"
+    )
+
+
+def test_manual_refresh_requires_login_first():
+    """[서버에서 불러오기] 는 로그인 없이 부를 수 없습니다 — 조회에도 세션이 필요합니다."""
+    body = _ui_function("on_load_reservations")
+    assert "if not self.logged_in:" in body
+    assert "self._load_reservations_from_server(announce=True)" in body
+
+
+def test_loading_reservations_is_a_pure_read_with_no_consent():
+    """조회는 consent 없이 부를 수 있어야 합니다 — 예약도 취소도 만들지 않습니다."""
+    body = _ui_function("_load_reservations_from_server")
+    assert "client.get_reservation_history()" in body
+    assert "MutationConsent(" not in body
+    assert "consent=" not in body
+
+
+def test_loaded_reservations_never_carry_a_cancellable_hold_response():
+    """불러온 줄은 취소 폼이 요구하는 원본 응답 객체가 없습니다 — 지어내지 않습니다.
+
+    ``on_cancel_hold`` 는 이미 ``hold_response is None`` 인 줄을 "코레일
+    앱에서 직접 취소하세요" 로 막습니다(별도 취소 코드가 필요 없습니다) —
+    라이브러리의 취소 폼이 이 세션에서 방금 받은 정확한 응답 타입만
+    받아들이기 때문입니다(``build_unpaid_reservation_cancel_form``).
+    """
+    body = _ui_function("_held_from_history")
+    assert "hold_response=None" in body
+    assert "cancel_unpaid_hold" not in body
+
+
+def test_loading_reservations_keeps_this_sessions_own_holds_and_skips_duplicates():
+    """이 세션에서 이미 [바로 예약]으로 잡은 것은 서버 조회로 덮지 않습니다."""
+    body = _ui_function("_reservations_loaded")
+    assert "h.hold_response is not None" in body
+    assert "if pnr not in session_pnrs" in body
+    assert "self.holds = session_held + loaded" in body
+
+
+def test_a_history_row_without_a_pnr_is_dropped_not_invented():
+    """PNR 이 없는 행은 무엇을 가리키는지 알 길이 없어 뺍니다."""
+    body = _ui_function("_reservations_loaded")
+    assert "if not pnr:" in body
+    assert "continue" in body
+
+
+def test_a_shared_pnr_across_legs_is_shown_as_a_server_transfer():
+    """한 PNR 에 구간이 둘이면, 이 프로그램이 짜맞춘 게 아니라 서버가
+    이미 그렇게 묶어 준 조합입니다 — '이어서'(직접 조합)와는 다릅니다."""
+    body = _ui_function("_held_from_history")
+    assert "JourneySource.SERVER_TRANSFER" in body
+    assert "len(leg_list) > 1" in body
+    assert "else JourneySource.DIRECT" in body
+
+
+def test_history_rows_do_not_invent_a_deadline_or_seat_class():
+    """이 조회는 결제 기한도 좌석 등급도 안 줍니다 — 지어내지 않고 모른다고 적습니다."""
+    body = _ui_function("_held_from_history")
+    assert "deadline=None" in body
+    assert "코레일 앱에서 확인" in body
+    assert "kind='불러온 예약'" in body

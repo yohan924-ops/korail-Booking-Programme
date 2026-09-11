@@ -718,6 +718,75 @@ def main() -> int:
     app.holds = []
     app.sync_holds()
 
+    # -- 서버에서 잡은 예약 불러오기 -----------------------------------------
+    from korail_mobile_api import ReservationHistoryResponse, ReservationHistoryTrain
+
+    def history_train(**kwargs: object) -> ReservationHistoryTrain:
+        base = dict(
+            departure_station="동탄", departure_time="054700",
+            arrival_station="대전", arrival_time="062800",
+            run_date="20990101", train_no="00301",
+            train_class_code="00", train_class_name="KTX",
+            reservation_type_code="1", payment_flag="N", settlement_flag="N",
+            pnr_no="H0000001",
+        )
+        base.update(kwargs)
+        return ReservationHistoryTrain(**base)
+
+    # 이 세션이 이미 [바로 예약]으로 잡아 둔 것 하나 — 서버 조회로 덮이면
+    # 안 됩니다(취소 버튼이 되는 hold_response 를 잃습니다).
+    app.holds = [Held(
+        label="", summary="세션 홀드", pnr="H0000001", fare="10000",
+        deadline=None, deadline_text="모름",
+        hold_response=fake_hold("H0000001"),
+    )]
+    response = ReservationHistoryResponse(items=(
+        # 같은 PNR("H0000001")이지만 이미 세션이 아는 것이므로 무시돼야 함.
+        history_train(pnr_no="H0000001"),
+        # 새 단독(직통) 예약.
+        history_train(pnr_no="H0000002", train_no="00101"),
+        # 새 환승(한 PNR 에 구간 둘) 예약.
+        history_train(pnr_no="H0000003", train_no="00201", arrival_station="대전"),
+        history_train(pnr_no="H0000003", train_no="00202",
+                      departure_station="대전", arrival_station="동대구",
+                      departure_time="070000", arrival_time="080000"),
+        # PNR 이 없는 행 — 지어낼 수 없으니 뺍니다.
+        history_train(pnr_no=""),
+    ))
+    app._reservations_loaded(response, announce=False)
+    root.update()
+    check("이 세션이 이미 아는 PNR 은 서버 조회로 안 덮인다",
+          sum(1 for h in app.holds if h.pnr == "H0000001") == 1
+          and next(h for h in app.holds if h.pnr == "H0000001").hold_response is not None,
+          [(h.pnr, h.hold_response is not None) for h in app.holds])
+    check("PNR 없는 행은 빠지고, 새 PNR 둘만 불러와진다",
+          len(app.holds) == 3, [h.pnr for h in app.holds])
+    loaded_single = next(h for h in app.holds if h.pnr == "H0000002")
+    check("단독 예약은 종류가 '불러온 예약' 이고 취소용 원본이 없다",
+          loaded_single.kind == "불러온 예약" and loaded_single.hold_response is None,
+          (loaded_single.kind, loaded_single.hold_response))
+    check("결제 기한을 지어내지 않고 모른다고 적는다",
+          loaded_single.deadline is None and "코레일 앱" in loaded_single.deadline_text,
+          loaded_single.deadline_text)
+    loaded_transfer = next(h for h in app.holds if h.pnr == "H0000003")
+    check("한 PNR 에 구간 둘이면 환승(서버 조합)으로 표시된다",
+          loaded_transfer.held_journey is not None
+          and loaded_transfer.held_journey.is_transfer
+          and loaded_transfer.held_journey.source is JourneySource.SERVER_TRANSFER,
+          loaded_transfer.held_journey)
+
+    item = app._hold_items[app.holds.index(loaded_transfer)]
+    row = app.hold_tree.item(item, "values")
+    check("불러온 환승 행도 조회 결과와 같은 칸(출발역 등)으로 보인다",
+          row[HOLD_COLUMNS.index("출발역")] == "동탄"
+          and row[HOLD_COLUMNS.index("도착역")] == "동대구",
+          row)
+    leg_rows = app.hold_tree.get_children(item)
+    check("불러온 환승도 +/- 로 구간이 펼쳐진다", len(leg_rows) == 2, len(leg_rows))
+
+    app.holds = []
+    app.sync_holds()
+
     # -- 로그인 팝업: 감시 중 잠금, 하이픈 안내, [비로그인] 목록 초기화 ------
     # find_widgets 는 위 "묶음과 담기" 절에서 이미 정의했습니다.
 

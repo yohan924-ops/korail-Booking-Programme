@@ -46,7 +46,7 @@ jobs:
           if (Test-Path packaging/icon.ico) { $icon = "--icon", "packaging/icon.ico" }
           elseif (Test-Path packaging/icon.png) { $icon = "--icon", "packaging/icon.png" }
           pyinstaller --onefile --windowed `
-            --name KorailBooker `
+            --name NewRail `
             @icon `
             --paths src --paths app `
             packaging/desktop_entry.py
@@ -55,14 +55,14 @@ jobs:
       # 확인한 척하지 않습니다.
       - name: Check the file exists
         run: |
-          if (-not (Test-Path dist/KorailBooker.exe)) { exit 1 }
-          Get-Item dist/KorailBooker.exe | Format-List Name, Length
+          if (-not (Test-Path dist/NewRail.exe)) { exit 1 }
+          Get-Item dist/NewRail.exe | Format-List Name, Length
 
       # 태그를 SHA 로 고정하지 못했습니다. 다른 스텝처럼 고정하는 것이 이
       # 저장소의 방식이지만, 확인하지 않은 SHA 를 적어 두는 것이 더 나쁩니다.
       # 유지보수자가 확인해서 고정해 주세요.
       - uses: actions/upload-artifact@v4
         with:
-          name: KorailBooker-windows
-          path: dist/KorailBooker.exe
+          name: NewRail-windows
+          path: dist/NewRail.exe
           if-no-files-found: error

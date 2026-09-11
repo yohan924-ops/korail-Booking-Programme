@@ -1,9 +1,9 @@
 @echo off
 rem ============================================================================
-rem  코레일 예매 도우미 — Windows 실행 파일(exe) 만들기
+rem  뉴레일 (코레일의 새로운 예매 도우미) — Windows 실행 파일(exe) 만들기
 rem
 rem  파이썬이 없는 사람에게 프로그램을 주고 싶을 때 씁니다. 다 되면
-rem  dist\KorailBooker.exe 하나가 나오고, 그 파일만 있으면 파이썬도 이 폴더도
+rem  dist\NewRail.exe 하나가 나오고, 그 파일만 있으면 파이썬도 이 폴더도
 rem  없는 컴퓨터에서 더블클릭으로 돕니다.
 rem
 rem  이 파일은 Windows 에서만 뜻이 있습니다 — 실행 파일은 만드는 컴퓨터의
@@ -100,7 +100,7 @@ rem  --windowed  검은 콘솔 창을 띄우지 않습니다.
 rem  --paths     desktop_entry.py 가 sys.path 를 실행 중에 만지지 않는 이유.
 rem              PyInstaller 는 소스를 정적으로 훑으므로 여기서 알려 줍니다.
 "%VPY%" -m PyInstaller --onefile --windowed ^
-  --name KorailBooker ^
+  --name NewRail ^
   %ICON% ^
   --paths src --paths app ^
   --distpath "%CD%\dist" --workpath "%CD%\build" --specpath "%CD%\build" ^
@@ -114,7 +114,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo   다 됐습니다:  %CD%\dist\KorailBooker.exe
+echo   다 됐습니다:  %CD%\dist\NewRail.exe
 echo.
 echo   이 파일 하나만 복사해 주면 됩니다. 다만 서명이 없어서 처음 실행할 때
 echo   "Windows의 PC 보호" 경고가 뜰 수 있습니다 — [추가 정보] 를 누르면
