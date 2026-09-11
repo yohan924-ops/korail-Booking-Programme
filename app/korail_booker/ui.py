@@ -35,6 +35,8 @@ from korail_mobile_api import (
     ReservationHistoryResponse,
     ReservationHistoryTrain,
     ReservationHoldResponse,
+    TrainScheduleResponse,
+    TrainScheduleStop,
     TrainSummary,
 )
 
@@ -1469,6 +1471,10 @@ class BookerApp:
         self._configure_journey_columns(tree)
         # 두 번 누르면 담깁니다. 고르고 단추를 찾는 것보다 빠릅니다.
         tree.bind("<Double-Button-1>", self._result_double_clicked)
+        # 오른쪽 눌러 "운행 일정" — Button-3 이 Windows·Linux, Button-2 가
+        # macOS 트랙패드의 오른쪽 클릭입니다. 둘 다 걸어야 어느 쪽에서도 됩니다.
+        tree.bind("<Button-3>", self._show_train_schedule_menu)
+        tree.bind("<Button-2>", self._show_train_schedule_menu)
         tree.grid(row=0, column=0, sticky="nsew")
         vertical = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
         vertical.grid(row=0, column=1, sticky="ns")
@@ -1705,6 +1711,8 @@ class BookerApp:
             )
         # 두 번 누르면 뺍니다. 담는 것과 빼는 것이 같은 몸짓의 앞뒤입니다.
         self.target_list.bind("<Double-Button-1>", self._target_double_clicked)
+        self.target_list.bind("<Button-3>", self._show_train_schedule_menu)
+        self.target_list.bind("<Button-2>", self._show_train_schedule_menu)
         self.target_list.grid(row=1, column=0, sticky="nsew", padx=(4, 0), pady=4)
         scroll = ttk.Scrollbar(frame, orient="vertical", command=self.target_list.yview)
         self.target_list.configure(yscrollcommand=scroll.set)
@@ -2204,6 +2212,8 @@ class BookerApp:
                 anchor="w" if anchor == "w" else ("e" if anchor == "e" else "center"),
                 stretch=(name == "여정"),
             )
+        self.hold_tree.bind("<Button-3>", self._show_train_schedule_menu)
+        self.hold_tree.bind("<Button-2>", self._show_train_schedule_menu)
         self.hold_tree.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
         scroll = ttk.Scrollbar(frame, orient="vertical", command=self.hold_tree.yview)
         self.hold_tree.configure(yscrollcommand=scroll.set)
@@ -3927,6 +3937,226 @@ class BookerApp:
         general = journey.seat_state(KorailSeatClass.GENERAL)
         special = journey.seat_state(KorailSeatClass.SPECIAL)
         return ("soldout",) if general.sold_out or special.sold_out else ()
+
+    # -- 운행 일정 ------------------------------------------------------------
+    #
+    # 코레일 앱 자신의 "운행 일정" 화면처럼, 열차 한 편이 하루 동안 서는
+    # 정차역과 그 역의 도착·출발 시각을 보여 줍니다. 조회 결과·예매 대상·
+    # 잡은 예약, 세 표 전부에서 우클릭으로 엽니다.
+    #
+    # 이 조회(``get_train_schedule``)는 로그인이 필요 없지만, **이
+    # 저장소에서 실제 응답으로 값이 채워진 것을 확인한 적이 없습니다** —
+    # 지금까지 실측에서는 전부 "EVZ000048 열차가 존재하지 않습니다" 오류만
+    # 돌아왔습니다. 그래서 창에도 이 사실을 그대로 적어 둡니다.
+
+    def _schedule_legs_for_row(
+        self, tree: ttk.Treeview, item: str
+    ) -> tuple[TrainSummary, ...] | None:
+        """이 줄이 가리키는 구간들. 알 수 없으면 ``None`` — 지어내지 않습니다.
+
+        이어지는 여정 전체 줄이면 구간 수만큼, 구간 하나짜리 줄(리프
+        구간 줄이나 접힌 "1구간 고정" 머리)이면 그 하나만 돌려줍니다.
+        표 넷이 저마다 다른 짝(:attr:`item_journeys` 등)을 쓰므로 표를
+        가려 따로 찾습니다.
+        """
+        if tree in (self.tree, self.return_tree):
+            key = (str(tree), item)
+            members = self._group_children.get(key)
+            if members:
+                # 부모 줄은 1구간 정보만 보여 줍니다 — 그 구간 하나만 봅니다.
+                return (self.results[members[0]].journey.legs[0],)
+            leg_key = self._leg_items.get(key)
+            if leg_key is not None:
+                index, leg_index = leg_key
+                return (self.results[index].journey.legs[leg_index],)
+            index = self.item_journeys.get(key)
+            if index is None:
+                index = self.item_journeys.get((str(tree), tree.parent(item)))
+            if index is None:
+                return None
+            return self.results[index].journey.legs
+
+        if tree is self.target_list:
+            members = self._target_group_children.get(item)
+            if members:
+                return (self.targets[members[0]].journey.legs[0],)
+            by_item = {value: key for key, value in self._target_items.items()}
+            index = by_item.get(item)
+            if index is not None:
+                return self.targets[index].journey.legs
+            parent = tree.parent(item)
+            index = by_item.get(parent)
+            if index is None:
+                return None
+            journey = self.targets[index].journey
+            siblings = tree.get_children(parent)
+            if item in siblings and siblings.index(item) < len(journey.legs):
+                return (journey.legs[siblings.index(item)],)
+            return journey.legs
+
+        if tree is self.hold_tree:
+            members = self._hold_group_children.get(item)
+            if members:
+                journey = self.holds[members[0]].held_journey
+                return journey.legs if journey is not None else None
+            by_item = {value: key for key, value in self._hold_items.items()}
+            index = by_item.get(item)
+            if index is not None:
+                journey = self.holds[index].held_journey
+                return journey.legs if journey is not None else None
+            parent = tree.parent(item)
+            index = by_item.get(parent)
+            if index is None:
+                return None
+            journey = self.holds[index].held_journey
+            if journey is None:
+                return None
+            siblings = tree.get_children(parent)
+            if item in siblings and siblings.index(item) < len(journey.legs):
+                return (journey.legs[siblings.index(item)],)
+            return journey.legs
+
+        return None
+
+    def _show_train_schedule_menu(self, event: tk.Event) -> None:
+        """우클릭 메뉴 — 구간이 하나면 바로, 여럿이면 구간을 고르게 합니다."""
+        tree = event.widget
+        if not isinstance(tree, ttk.Treeview):
+            return
+        if self._on_expander(tree, event):
+            return
+        item = tree.identify_row(event.y)
+        if not item:
+            return
+        tree.selection_set(item)
+        legs = self._schedule_legs_for_row(tree, item)
+        if not legs:
+            return
+        menu = tk.Menu(self.root, tearoff=0)
+        if len(legs) == 1:
+            leg = legs[0]
+            label = one_line(f"{(leg.train_class_name or '').strip()} {leg.train_no}")
+            menu.add_command(
+                label=f"운행 일정 보기 ({label})",
+                command=lambda leg=leg: self.open_train_schedule(leg),
+            )
+        else:
+            for leg_index, leg in enumerate(legs):
+                label = one_line(
+                    f"{(leg.train_class_name or '').strip()} {leg.train_no}"
+                )
+                menu.add_command(
+                    label=f"{leg_index + 1}구간 운행 일정 보기 ({label})",
+                    command=lambda leg=leg: self.open_train_schedule(leg),
+                )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def open_train_schedule(self, leg: TrainSummary) -> None:
+        """이 열차 한 편이 하루 동안 서는 정차역과 도착·출발 시각을 새 창에.
+
+        날짜나 열차번호를 모르면 조회할 수 없습니다 — 오늘 날짜 등으로
+        지어내 넣지 않고 그대로 막습니다.
+        """
+        run_date = (leg.departure_date or "").strip()
+        train_no = (leg.train_no or "").strip()
+        if not run_date or not train_no:
+            messagebox.showwarning(
+                "운행 일정",
+                "이 구간은 날짜나 열차번호를 몰라 운행 일정을 조회할 수 없습니다.",
+            )
+            return
+
+        window = tk.Toplevel(self.root)
+        window.title(
+            f"운행 일정 — {(leg.train_class_name or '').strip()} {train_no}".strip()
+        )
+        window.geometry("560x420")
+
+        header = (
+            f"{run_date[:4]}-{run_date[4:6]}-{run_date[6:]}  "
+            f"{leg.departure_station_name or '-'} → {leg.arrival_station_name or '-'}"
+        )
+        ttk.Label(window, text=header, font=("", 10, "bold")).pack(
+            anchor="w", padx=10, pady=(10, 2)
+        )
+        # 이 조회를 실제 값 채워진 응답으로 검증한 적이 없다는 사실을
+        # 화면에도 그대로 적습니다 — 확인된 것처럼 보이면 안 됩니다.
+        ttk.Label(
+            window,
+            text="이 조회는 코레일 로그인이 필요 없지만, 실제 값이 채워진 응답을 "
+            "이 프로그램에서 아직 확인하지 못했습니다. 창이 비거나 오류가 떠도 "
+            "이 프로그램 탓이 아닐 수 있습니다 — 코레일 앱과 함께 확인하세요.",
+            foreground="#b3261e",
+            wraplength=540,
+            justify="left",
+        ).pack(anchor="w", padx=10, pady=(0, 6))
+
+        status = tk.StringVar(value="불러오는 중…")
+        ttk.Label(window, textvariable=status).pack(anchor="w", padx=10)
+
+        columns = ("역", "도착", "출발", "지연")
+        stop_tree = ttk.Treeview(window, columns=columns, show="headings", height=14)
+        for name in columns:
+            stop_tree.heading(name, text=name)
+            stop_tree.column(name, width=110 if name == "역" else 90, anchor="center")
+        stop_tree.pack(fill="both", expand=True, padx=10, pady=(4, 10))
+
+        def loaded(response: TrainScheduleResponse) -> None:
+            if not window.winfo_exists():
+                return
+            if not response.stops:
+                status.set("서버가 정차역을 하나도 주지 않았습니다.")
+                return
+            status.set(f"정차역 {len(response.stops)}개")
+            for stop in response.stops:
+                self._insert_schedule_stop(stop_tree, stop)
+
+        def failed(message: str) -> None:
+            if not window.winfo_exists():
+                return
+            status.set(f"불러오지 못했습니다: {message}")
+
+        def work() -> None:
+            try:
+                client = self._ensure_client()
+                response = client.get_train_schedule(run_date, train_no)
+            except (KorailApiError, KorailTransportError, ValueError) as exc:
+                message = str(exc)
+                self.events.put(lambda: failed(message))
+                return
+            self.events.put(lambda: loaded(response))
+
+        self._in_thread(work, "korail-train-schedule")
+
+    @staticmethod
+    def _insert_schedule_stop(tree: ttk.Treeview, stop: TrainScheduleStop) -> None:
+        """정차역 한 줄. **실제 시각을 우선**하고, 없으면 계획 시각으로.
+
+        ``actual_*`` 은 그 역을 이미 지났을 때만 옵니다 — 아직 안 지난
+        역은 계획 시각(``planned_*``)만 있습니다. 지연은 숫자가 와야만
+        적고, 없으면 "-" 로 둡니다(0 인지 안 온 것인지 구분 없이 지연
+        없음으로 지어내지 않습니다).
+        """
+        arrival = stop.actual_arrival_time or stop.planned_arrival_time
+        departure = stop.actual_departure_time or stop.planned_departure_time
+        delay = (
+            f"{stop.actual_arrival_delay_count}분"
+            if stop.actual_arrival_delay_count is not None
+            else "-"
+        )
+        tree.insert(
+            "",
+            "end",
+            values=(
+                stop.station_name or "-",
+                format_clock(arrival),
+                format_clock(departure),
+                delay,
+            ),
+        )
 
     # -- 동작: 자동예매 ------------------------------------------------------
 

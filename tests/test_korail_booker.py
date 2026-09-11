@@ -4419,3 +4419,83 @@ def test_history_rows_do_not_invent_a_deadline_or_seat_class():
     assert "deadline=None" in body
     assert "코레일 앱에서 확인" in body
     assert "kind='불러온 예약'" in body
+
+
+# --- 운행 일정 --------------------------------------------------------------
+
+
+def test_the_three_tables_bind_a_right_click_to_the_schedule_menu():
+    """조회 결과·예매 대상·잡은 예약, 표 넷 전부에서 우클릭이 같은 메뉴로 간다.
+
+    Button-3 이 Windows·Linux, Button-2 가 macOS 트랙패드의 오른쪽
+    클릭입니다 — 둘 다 걸려야 어느 쪽에서도 됩니다.
+    """
+    make_tree = _ui_function("_make_tree")
+    assert "tree.bind('<Button-3>', self._show_train_schedule_menu)" in make_tree
+    assert "tree.bind('<Button-2>', self._show_train_schedule_menu)" in make_tree
+    source = _ui_source()
+    assert 'self.target_list.bind("<Button-3>", self._show_train_schedule_menu)' in source
+    assert 'self.target_list.bind("<Button-2>", self._show_train_schedule_menu)' in source
+    assert 'self.hold_tree.bind("<Button-3>", self._show_train_schedule_menu)' in source
+    assert 'self.hold_tree.bind("<Button-2>", self._show_train_schedule_menu)' in source
+
+
+def test_schedule_row_lookup_never_invents_a_leg_it_cannot_find():
+    """구간을 못 찾으면(알 수 없는 줄) ``None`` — 아무 열차나 지어내 보여 주지 않습니다."""
+    body = _ui_function("_schedule_legs_for_row")
+    assert "return None" in body
+    # 표 넷 모두 group 머리는 공유하는 1구간 하나만 보여 줍니다.
+    assert body.count("self._group_children.get(key)") == 1
+    assert body.count("self._target_group_children.get(item)") == 1
+    assert body.count("self._hold_group_children.get(item)") == 1
+
+
+def test_schedule_menu_offers_one_item_per_leg():
+    """구간이 하나면 바로 열고, 여럿이면 구간마다 골라 열게 합니다."""
+    body = _ui_function("_show_train_schedule_menu")
+    assert "self._on_expander(tree, event)" in body
+    assert "if len(legs) == 1:" in body
+    assert "self.open_train_schedule(leg)" in body
+    assert "menu.tk_popup(event.x_root, event.y_root)" in body
+    assert "menu.grab_release()" in body
+
+
+def test_opening_a_schedule_refuses_to_invent_a_missing_date_or_train_number():
+    """열차번호나 날짜를 모르면 오늘 날짜 등으로 지어내 조회하지 않고 막습니다."""
+    body = _ui_function("open_train_schedule")
+    assert "if not run_date or not train_no:" in body
+    assert "messagebox.showwarning('운행 일정'" in body
+    assert "return" in body
+
+
+def test_train_schedule_lookup_is_a_pure_read_with_no_login_or_consent():
+    """``get_train_schedule`` 은 로그인이 필요 없는 조회입니다 — consent 를 만들지 않습니다."""
+    body = _ui_function("open_train_schedule")
+    assert "client.get_train_schedule(run_date, train_no)" in body
+    assert "MutationConsent(" not in body
+    assert "consent=" not in body
+
+
+def test_the_schedule_window_admits_it_has_never_been_verified_live():
+    """이 조회는 실제 값이 채워진 응답으로 검증된 적이 없습니다 — 창에도 그대로 적습니다.
+
+    지금까지 실측에서는 전부 "열차가 존재하지 않습니다" 오류만 돌아왔습니다
+    (``docs/internal/deep-dive/impl-audit-2026-07-22.md``,
+    ``docs/internal/audit-2026-07-27/phase3/verifier-1.md`` P2CRO-15). 확인된
+    것처럼 보이면 안 되므로, 창을 열 때마다 이 사실을 그대로 보여 줍니다.
+    """
+    body = _ui_function("open_train_schedule")
+    assert "실제 값이 채워진 응답을" in body
+    assert "아직 확인하지 못했습니다" in body
+
+
+def test_schedule_stop_prefers_the_actual_time_over_the_planned_one():
+    """이미 지난 역은 실제 시각을, 아직 안 지난 역은 계획 시각을 씁니다.
+
+    지연 칸은 서버가 숫자를 줬을 때만 채우고, 없으면 "-" 입니다 — 0 분
+    지연과 "안 왔다" 를 구분 없이 지연 없음으로 지어내지 않습니다.
+    """
+    body = _ui_function("_insert_schedule_stop")
+    assert "stop.actual_arrival_time or stop.planned_arrival_time" in body
+    assert "stop.actual_departure_time or stop.planned_departure_time" in body
+    assert "stop.actual_arrival_delay_count is not None" in body

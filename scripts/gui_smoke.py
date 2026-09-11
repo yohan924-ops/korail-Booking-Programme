@@ -787,6 +787,267 @@ def main() -> int:
     app.holds = []
     app.sync_holds()
 
+    # -- 운행 일정: 표 셋에서 우클릭이 옳은 구간을 찾아내는가 -----------------
+    #
+    # 조회 결과·예매 대상·잡은 예약이 저마다 다른 짝(item_journeys 등)을
+    # 쓰므로, 이어지는 여정·묶음 머리·구간 줄을 표마다 따로 확인합니다.
+    app._show_journeys(results)
+    root.update()
+    group_head = app.tree.get_children()[0]
+    check("운행 일정: 묶음 머리는 공유하는 1구간 하나만 돌려준다",
+          app._schedule_legs_for_row(app.tree, group_head)
+          == (results[0].journey.legs[0],))
+
+    lone_first = train(train_no="00401", departure="수서", arrival="부산",
+                        departure_code="0020", arrival_code="0030",
+                        departure_time="080000", arrival_time="083000")
+    lone_second = train(train_no="00402", departure="부산", arrival="울산",
+                         departure_code="0030", arrival_code="0040",
+                         departure_time="084000", arrival_time="090000")
+    lone_journey = Journey(legs=(lone_first, lone_second), source=JourneySource.CUSTOM_TRANSFER)
+    app._show_journeys([Target(journey=lone_journey, request=request)])
+    root.update()
+    lone_row = app.tree.get_children()[0]
+    lone_leg_rows = app.tree.get_children(lone_row)
+    check("운행 일정: 이어지는 여정 전체 줄은 구간 전부를 돌려준다",
+          app._schedule_legs_for_row(app.tree, lone_row) == lone_journey.legs)
+    check("운행 일정: 구간 줄 하나만 고르면 그 구간 하나만",
+          len(lone_leg_rows) == 2
+          and app._schedule_legs_for_row(app.tree, lone_leg_rows[0]) == (lone_first,)
+          and app._schedule_legs_for_row(app.tree, lone_leg_rows[1]) == (lone_second,),
+          [app._schedule_legs_for_row(app.tree, r) for r in lone_leg_rows])
+
+    app.targets = list(results)
+    app.sync_target_list()
+    root.update()
+    target_group = app.target_list.get_children()[0]
+    check("운행 일정(예매 대상): 묶음 머리는 공유하는 1구간만",
+          app._schedule_legs_for_row(app.target_list, target_group)
+          == (results[0].journey.legs[0],))
+    target_child = app.target_list.get_children(target_group)[0]
+    check("운행 일정(예매 대상): 자식 줄은 그 조합 전체",
+          app._schedule_legs_for_row(app.target_list, target_child)
+          == results[0].journey.legs)
+    target_leg_rows = app.target_list.get_children(target_child)
+    check("운행 일정(예매 대상): 구간 줄은 그 구간 하나만",
+          len(target_leg_rows) == 2
+          and app._schedule_legs_for_row(app.target_list, target_leg_rows[0])
+          == (results[0].journey.legs[0],)
+          and app._schedule_legs_for_row(app.target_list, target_leg_rows[1])
+          == (results[0].journey.legs[1],))
+    app.targets = []
+    app.sync_target_list()
+
+    first_target = results[0]
+    app.holds = [Held(
+        label="", summary="전체", pnr="P3001", fare="10000",
+        deadline=None, deadline_text="모름",
+        held_journey=first_target.journey,
+    )]
+    app.sync_holds()
+    root.update()
+    hold_row = app.hold_tree.get_children()[0]
+    hold_leg_rows = app.hold_tree.get_children(hold_row)
+    check("운행 일정(잡은 예약): 홀드 줄은 그 여정 전체",
+          app._schedule_legs_for_row(app.hold_tree, hold_row) == first_target.journey.legs)
+    check("운행 일정(잡은 예약): 구간 줄은 그 구간 하나만",
+          len(hold_leg_rows) == 2
+          and app._schedule_legs_for_row(app.hold_tree, hold_leg_rows[0])
+          == (first_target.journey.legs[0],)
+          and app._schedule_legs_for_row(app.hold_tree, hold_leg_rows[1])
+          == (first_target.journey.legs[1],))
+
+    app.holds = [
+        Held(label="", summary="[1구간]", pnr="P3002", fare="10000",
+             deadline=None, deadline_text="모름", kind="좌석 예약(1구간)",
+             group="batch-3", full_summary="전체",
+             held_journey=Journey(legs=(first_target.journey.legs[0],),
+                                   source=JourneySource.DIRECT)),
+        Held(label="", summary="[2구간]", pnr="P3003", fare="10000",
+             deadline=None, deadline_text="모름", kind="좌석 예약(2구간)",
+             group="batch-3", full_summary="전체",
+             held_journey=Journey(legs=(first_target.journey.legs[1],),
+                                   source=JourneySource.DIRECT)),
+    ]
+    app.sync_holds()
+    root.update()
+    hold_group = next(
+        item for item in app.hold_tree.get_children()
+        if app.hold_tree.item(item, "tags") == ("group",)
+    )
+    check("운행 일정(잡은 예약): 구간별 묶음 머리는 첫 구간만",
+          app._schedule_legs_for_row(app.hold_tree, hold_group)
+          == (first_target.journey.legs[0],))
+    hold_group_children = app.hold_tree.get_children(hold_group)
+    check("운행 일정(잡은 예약): 구간별 홀드는 저마다 제 구간만",
+          app._schedule_legs_for_row(app.hold_tree, hold_group_children[0])
+          == (first_target.journey.legs[0],)
+          and app._schedule_legs_for_row(app.hold_tree, hold_group_children[1])
+          == (first_target.journey.legs[1],))
+    app.holds = []
+    app.sync_holds()
+
+    # -- 운행 일정: 우클릭 메뉴가 실제로 그 구간(들)을 올바르게 올리는가 -----
+    #
+    # 실제 tk_popup 을 띄우면 헤드리스에서 사람 없이 닫히지 않으므로,
+    # add_command 를 가로채 어떤 항목이 올라갔는지만 봅니다.
+    menu_labels: list[str] = []
+    real_add_command = tk.Menu.add_command
+    real_tk_popup = tk.Menu.tk_popup
+
+    def _record_add_command(self: tk.Menu, **kwargs: object) -> str:
+        menu_labels.append(str(kwargs.get("label", "")))
+        return real_add_command(self, **kwargs)  # type: ignore[no-any-return]
+
+    tk.Menu.add_command = _record_add_command  # type: ignore[method-assign]
+    tk.Menu.tk_popup = lambda self, x, y: None  # type: ignore[method-assign]
+
+    class _RightClick:
+        def __init__(self, x: int, y: int, widget: object) -> None:
+            self.x, self.y, self.widget = x, y, widget
+            self.x_root, self.y_root = x, y
+
+    app._show_journeys(results)
+    root.update()
+    group_head = app.tree.get_children()[0]
+    box = app.tree.bbox(group_head)
+    assert box, "묶음 머리 줄이 화면에 보이지 않습니다"
+    top, height = int(box[1]), int(box[3])
+    menu_labels.clear()
+    app._show_train_schedule_menu(_RightClick(120, top + height // 2, app.tree))
+    check("운행 일정 메뉴: 구간 하나짜리 줄은 항목이 하나",
+          len(menu_labels) == 1 and "00301" in menu_labels[0], menu_labels)
+
+    app._show_journeys([Target(journey=lone_journey, request=request)])
+    root.update()
+    lone_row = app.tree.get_children()[0]
+    box = app.tree.bbox(lone_row)
+    assert box, "이어지는 여정 줄이 화면에 보이지 않습니다"
+    top, height = int(box[1]), int(box[3])
+    menu_labels.clear()
+    app._show_train_schedule_menu(_RightClick(120, top + height // 2, app.tree))
+    check("운행 일정 메뉴: 이어지는 여정은 구간 수만큼 항목이 나온다",
+          menu_labels == [
+              f"1구간 운행 일정 보기 (KTX {lone_first.train_no})",
+              f"2구간 운행 일정 보기 (KTX {lone_second.train_no})",
+          ], menu_labels)
+
+    app.targets = list(results)
+    app.sync_target_list()
+    root.update()
+    target_group = app.target_list.get_children()[0]
+    box = app.target_list.bbox(target_group)
+    assert box, "예매 대상 묶음 머리가 화면에 보이지 않습니다"
+    top, height = int(box[1]), int(box[3])
+    menu_labels.clear()
+    app._show_train_schedule_menu(_RightClick(120, top + height // 2, app.target_list))
+    check("운행 일정 메뉴(예매 대상): 우클릭이 실제로 메뉴를 연다",
+          len(menu_labels) == 1 and "00301" in menu_labels[0], menu_labels)
+    app.targets = []
+    app.sync_target_list()
+
+    app.holds = [Held(
+        label="", summary="전체", pnr="P3001", fare="10000",
+        deadline=None, deadline_text="모름",
+        held_journey=first_target.journey,
+    )]
+    app.sync_holds()
+    root.update()
+    hold_row = app.hold_tree.get_children()[0]
+    box = app.hold_tree.bbox(hold_row)
+    assert box, "잡은 예약 줄이 화면에 보이지 않습니다"
+    top, height = int(box[1]), int(box[3])
+    menu_labels.clear()
+    app._show_train_schedule_menu(_RightClick(120, top + height // 2, app.hold_tree))
+    check("운행 일정 메뉴(잡은 예약): 우클릭이 실제로 메뉴를 연다",
+          len(menu_labels) == 2, menu_labels)
+    app.holds = []
+    app.sync_holds()
+
+    tk.Menu.add_command = real_add_command  # type: ignore[method-assign]
+    tk.Menu.tk_popup = real_tk_popup  # type: ignore[method-assign]
+
+    # -- 운행 일정 창: 날짜를 모르면 지어내지 않고 막는다 --------------------
+    import dataclasses as _dc
+
+    missing_leg = _dc.replace(first_target.journey.legs[0], departure_date="")
+    shown.clear()
+    before_windows = set(root.winfo_children())
+    app.open_train_schedule(missing_leg)
+    root.update()
+    check(
+        "운행 일정 창: 날짜를 모르면 조회하지 않고 경고만 띄운다",
+        any("날짜나 열차번호" in message for _t, message in shown)
+        and not [
+            w for w in root.winfo_children()
+            if w not in before_windows and isinstance(w, tk.Toplevel)
+        ],
+        shown,
+    )
+
+    # -- 운행 일정 창: 실제 시각을 계획 시각보다 우선한다 --------------------
+    #
+    # 네트워크는 쓰지 않습니다 — 클라이언트를 가짜로 바꿉니다.
+    from korail_mobile_api import TrainScheduleResponse, TrainScheduleStop
+
+    class _FakeScheduleClient:
+        def get_train_schedule(
+            self, run_date: str, train_no: str
+        ) -> TrainScheduleResponse:
+            assert run_date == first_target.journey.legs[0].departure_date
+            assert train_no == first_target.journey.legs[0].train_no
+            return TrainScheduleResponse(stops=(
+                # 아직 안 지난 역 — 계획 시각만 옵니다.
+                TrainScheduleStop(station_name="동탄", planned_departure_time="054700"),
+                # 이미 지난 역 — 실제 시각과 지연이 함께 옵니다.
+                TrainScheduleStop(
+                    station_name="대전",
+                    planned_arrival_time="062700",
+                    actual_arrival_time="062800",
+                    actual_arrival_delay_count=1,
+                ),
+            ))
+
+    real_ensure_client = app._ensure_client
+    real_in_thread = app._in_thread
+    app._ensure_client = lambda: _FakeScheduleClient()  # type: ignore[method-assign]
+    app._in_thread = lambda work, name: work()  # type: ignore[method-assign]
+
+    before_windows = set(root.winfo_children())
+    app.open_train_schedule(first_target.journey.legs[0])
+    app._drain()
+    root.update()
+    new_windows = [
+        w for w in root.winfo_children()
+        if w not in before_windows and isinstance(w, tk.Toplevel)
+    ]
+    check("운행 일정 창: 창이 하나 뜬다", len(new_windows) == 1, new_windows)
+    if new_windows:
+        schedule_window = new_windows[0]
+        stop_trees = find_widgets(
+            schedule_window, lambda w: isinstance(w, ttk.Treeview)
+        )
+        stop_tree = stop_trees[0] if stop_trees else None
+        rows = (
+            [stop_tree.item(i, "values") for i in stop_tree.get_children()]
+            if stop_tree is not None else []
+        )
+        check("운행 일정 창: 정차역이 다 들어온다", len(rows) == 2, rows)
+        check(
+            "운행 일정 창: 아직 안 지난 역은 계획 시각을 쓴다",
+            bool(rows) and tuple(rows[0]) == ("동탄", "--:--", "05:47", "-"),
+            rows,
+        )
+        check(
+            "운행 일정 창: 이미 지난 역은 실제 시각과 지연을 우선한다",
+            len(rows) > 1 and tuple(rows[1]) == ("대전", "06:28", "--:--", "1분"),
+            rows,
+        )
+        schedule_window.destroy()
+
+    app._ensure_client = real_ensure_client  # type: ignore[method-assign]
+    app._in_thread = real_in_thread  # type: ignore[method-assign]
+
     # -- 로그인 팝업: 감시 중 잠금, 하이픈 안내, [비로그인] 목록 초기화 ------
     # find_widgets 는 위 "묶음과 담기" 절에서 이미 정의했습니다.
 
