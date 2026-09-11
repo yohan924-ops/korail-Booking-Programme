@@ -1789,8 +1789,11 @@ def test_the_leg_picker_popup_lists_candidates_like_the_other_three_tables():
     assert "ttk.Treeview(" in body
     assert "columns=tuple(TREE_COLUMNS)" in body
     assert "self._configure_journey_columns(tree" in body
-    assert "self._journey_row_values(candidate.label, candidate.journey)" in body
-    assert "self._leg_row_values(candidate.journey, leg_index)" in body
+    assert "self._journey_row_values(" in body
+    assert "candidate.label, candidate.journey, candidate.request.passengers" in body
+    assert (
+        "candidate.journey, leg_index, candidate.request.passengers" in body
+    )
     # +/- 를 눌러 접고 펴는 것은 그대로 두고, 담지 않습니다.
     assert "self._on_expander(tree, event)" in body
 
@@ -3265,9 +3268,8 @@ def test_the_watcher_buys_a_custom_combination_one_leg_at_a_time():
         [_target(journey, _request(include_direct=False, include_transfer=True))],
         BookingOptions(poll_interval_s=10.0, live=True),
         log=lambda message: None,
-        on_hold=lambda label, summary, kind, direction, hold, group, full, hj: made.append(
-            kind
-        ),
+        on_hold=lambda label, summary, kind, direction, hold, group, full, hj,
+        passengers: made.append(kind),
     )
 
     result = booker.run(threading.Event())
@@ -3334,9 +3336,8 @@ def test_the_watcher_honours_a_targets_own_seat_choice():
         # 없어 영원히 못 잡습니다).
         BookingOptions(poll_interval_s=10.0, live=True, seat_preference=J.SeatPreference.SPECIAL),
         log=lambda message: None,
-        on_hold=lambda label, summary, kind, direction, hold, group, full, hj: made.append(
-            kind
-        ),
+        on_hold=lambda label, summary, kind, direction, hold, group, full, hj,
+        passengers: made.append(kind),
     )
 
     result = booker.run(threading.Event())
@@ -3964,7 +3965,11 @@ def test_a_batch_id_ties_split_holds_together():
     # 심어도 이 계약을 잊을 수 없게.
     assert (
         "HoldWatcher = Callable[\n"
-        "    [str, str, str, tuple[str, str, str], ReservationHoldResponse, str, str, Journey],\n"
+        "    [\n"
+        "        str, str, str, tuple[str, str, str], ReservationHoldResponse, str, str, "
+        "Journey,\n"
+        "        KorailPassengerCounts,\n"
+        "    ],\n"
         "    None,\n"
         "]" in booker
     )
@@ -4502,3 +4507,126 @@ def test_schedule_stop_filters_the_no_such_event_placeholder():
     assert "_stop_clock(stop.actual_arrival_time, stop.planned_arrival_time)" in body
     assert "_stop_clock(stop.actual_departure_time, stop.planned_departure_time)" in body
     assert "stop.actual_arrival_delay_count is not None" in body
+
+
+# --- 표에 날짜·인원 칸 추가 --------------------------------------------------
+
+
+def test_format_date_matches_the_screens_own_style():
+    """``"20990101"`` → ``"2099-01-01"`` — 운행 일정 창 머리글과 같은 모양."""
+    assert J.format_date("20990101") == "2099-01-01"
+    assert J.format_date(None) == "-" * 10
+    assert J.format_date("") == "-" * 10
+    # 여덟 자리가 아니거나 숫자가 아니면 시각(``format_clock``)과 같은
+    # 태도로 지어내지 않고 자리만 채웁니다.
+    assert J.format_date("2099010") == "-" * 10
+    assert J.format_date("abcdefgh") == "-" * 10
+
+
+def test_the_three_tables_and_the_leg_picker_all_show_a_date_column():
+    """조회 결과·예매 대상·잡은 예약, 그리고 '이어지는 구간 고르기' 팝업까지 —
+    같은 열차번호가 날짜를 달리해 여러 번 뜰 수 있어 날짜 없이는 어느 날
+    편인지 표만 보고 알 수 없었습니다.
+    """
+    source = _ui_source()
+    assert '"date": ("날짜", 90)' in source
+    assert '("날짜", 90, "center")' in source  # HOLD_LAYOUT·TARGET_LAYOUT 공통
+
+    for name in ("_journey_row_values", "_leg_row_values", "_combination_values"):
+        assert "format_date(" in _ui_function(name), name
+
+    # 팝업은 TREE_COLUMNS 를 그대로 쓰고(:meth:`_configure_journey_columns`),
+    # 부모 줄(1구간 고정 머리)도 날짜를 채웁니다.
+    for name in ("_insert_group", "_insert_target_group"):
+        assert "format_date(leg.departure_date)" in _ui_function(name), name
+
+
+def test_a_leg_row_uses_its_own_date_not_the_whole_journeys():
+    """자정을 넘기는 환승이면 1구간과 2구간의 날짜가 다를 수 있습니다 —
+    그래서 구간 줄은 부모 여정의 날짜가 아니라 **그 구간 자신의** 날짜를
+    씁니다.
+    """
+    body = _ui_function("_leg_row_values")
+    assert "format_date(leg.departure_date)" in body
+    assert "journey.departure_date" not in body
+
+
+def test_the_three_tables_all_show_a_passenger_count_column():
+    """승객을 2명으로 조회해도 조회 결과·예매 대상·잡은 예약, 어디서도
+    몇 장짜리를 돌리고 있는지 표만 보고는 알 수 없다는 신고가 있었습니다.
+    """
+    source = _ui_source()
+    assert '"passengers": ("인원", 60)' in source
+    assert '("인원", 55, "center")' in source  # HOLD_LAYOUT·TARGET_LAYOUT 공통
+
+    text_fn = _ui_function("_passenger_text")
+    assert "return '모름'" in text_fn
+    assert "return f'{passengers.total}명'" in text_fn
+
+    for name in ("_journey_row_values", "_leg_row_values", "_combination_values"):
+        assert "_passenger_text(" in _ui_function(name), name
+
+
+def test_passenger_count_comes_from_the_actual_search_request_not_invented():
+    """인원 칸은 그 여정을 조회한 :class:`SearchRequest` 의
+    ``passengers`` 를 그대로 씁니다 — 다시 세거나 지어내지 않습니다.
+    """
+    assert "target.request.passengers" in _ui_function("_row_values")
+    assert (
+        "candidate.label, candidate.journey, candidate.request.passengers"
+        in _ui_function("_offer_group_picker")
+    )
+    assert "target.request.passengers" in _ui_function("_combination_values")
+
+
+def test_a_hold_only_shows_passengers_it_actually_knows():
+    """잡은 예약의 인원은 이 세션이 직접 잡은 것만 압니다.
+
+    서버에서 불러온 예약(``get_reservation_history``)은 인원 수를 주지
+    않으므로 :attr:`~korail_booker.holds.Held.passengers` 가
+    ``None`` 으로 남고, 화면은 그것을 "모름" 으로 보여 줍니다(지어내지
+    않습니다) — :func:`test_the_three_tables_all_show_a_passenger_count_column`
+    의 ``_passenger_text`` 가 그 규칙을 담당합니다.
+    """
+    held = H.Held(
+        label="", summary="101 서울→부산", pnr="1", fare="-",
+        deadline=None, deadline_text="알 수 없음",
+    )
+    assert held.passengers is None
+
+    with_passengers = H.Held(
+        label="", summary="101 서울→부산", pnr="1", fare="-",
+        deadline=None, deadline_text="알 수 없음",
+        passengers=KorailPassengerCounts(adult=2, child=1),
+    )
+    assert with_passengers.passengers is not None
+    assert with_passengers.passengers.total == 3
+
+    # 서버에서 불러온 예약을 만드는 자리는 passengers 를 아예 건드리지
+    # 않습니다 — Held 의 기본값(None)이 그대로 "모름" 으로 이어집니다.
+    assert "passengers=" not in _ui_function("_held_from_history")
+
+
+def test_reserving_threads_the_real_passenger_count_into_the_new_hold():
+    """[바로 예약] 도, 자동예매도 — 잡을 때 실제로 쓴 인원 수를 그대로
+    홀드에 실어 보냅니다. 자동예매 쪽은 :class:`HoldWatcher` 의 모양
+    자체가 인원을 요구합니다(:func:`test_a_batch_id_ties_split_holds_together`
+    가 그 모양을 확인합니다).
+    """
+    assert "passengers: KorailPassengerCounts | None=None" in _ui_function(
+        "_held_from"
+    )
+    made = _ui_function("on_hold_made")
+    assert "passengers: KorailPassengerCounts | None=None" in made
+    assert "self._held_from(" in made
+    assert "passengers)" in made
+
+    booker = (APP_DIR / "korail_booker" / "autobook.py").read_text(encoding="utf-8")
+    tree = ast.parse(booker)
+    functions = {
+        node.name: ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+    }
+    for name in ("_settle", "_settle_partial"):
+        assert "target.request.passengers" in functions[name], name

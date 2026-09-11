@@ -65,6 +65,7 @@ from .journeys import (
     books_as_one_reservation,
     first_leg_key,
     format_clock,
+    format_date,
     format_duration,
     group_by_first_leg,
     is_tight_transfer,
@@ -116,6 +117,12 @@ POLL_HINT = f"{MIN_POLL_INTERVAL_S:g}초 이상"
 TREE_COLUMNS = {
     "kind": ("구분", 110),
     "train": ("열차", 140),
+    # 같은 열차번호가 날짜를 달리해 여러 번 뜰 수 있습니다 — 날짜가 없으면
+    # 표만 보고는 그중 어느 날 편인지 알 수 없습니다.
+    "date": ("날짜", 90),
+    # 승객을 몇 장으로 조회했는지 — 이게 없으면 예매 대상·잡은 예약에서
+    # 지금 몇 명짜리를 돌리고 있는지 표만 보고는 알 수 없습니다.
+    "passengers": ("인원", 60),
     "departure_station": ("출발역", 80),
     "departure": ("출발", 65),
     "arrival_station": ("도착역", 80),
@@ -141,7 +148,7 @@ PANE_CHROME = 13
 RESULTS_MIN_HEIGHT = 185
 #: 스스로 굴러가는 위젯. 이 위에서는 휠을 그쪽에 양보합니다.
 SELF_SCROLLING = frozenset({"Text", "Treeview", "Listbox"})
-#: 잡은 예약 표의 칸 — (이름, 폭, 정렬). **가운데 아홉 칸은 조회 결과·예매
+#: 잡은 예약 표의 칸 — (이름, 폭, 정렬). **가운데 열 칸은 조회 결과·예매
 #: 대상과 같습니다**(:meth:`BookerApp._journey_row_values`) — "여정" 한
 #: 칸으로 뭉뚱그리면 구간별 홀드가 같은 줄처럼 보여 중복 예약으로
 #: 오인하기 쉬웠습니다. 종류(좌석 예약/N구간)는 조회 결과에 없는, 이 표만의
@@ -150,6 +157,8 @@ HOLD_LAYOUT = (
     ("구분", 100, "center"),
     ("종류", 90, "center"),
     ("열차", 120, "w"),
+    ("날짜", 90, "center"),
+    ("인원", 55, "center"),
     ("출발역", 70, "center"),
     ("출발", 60, "center"),
     ("도착역", 70, "center"),
@@ -165,7 +174,7 @@ HOLD_LAYOUT = (
     ("남은 시간", 110, "center"),
 )
 HOLD_COLUMNS = tuple(name for name, _width, _anchor in HOLD_LAYOUT)
-#: 예매 대상 표의 칸. **가운데 아홉 칸은 조회 결과(TREE_COLUMNS)와 같습니다**
+#: 예매 대상 표의 칸. **가운데 열 칸은 조회 결과(TREE_COLUMNS)와 같습니다**
 #: — 여정을 문장 하나로 뭉뚱그리면, 조회 결과에서는 구분해 보던 열차·시각·
 #: 소요가 담는 순간 사라집니다. 앞뒤에 이 표에서만 뜻이 있는 칸(상태·조회
 #: 주기·남은 감시)만 더합니다.
@@ -175,6 +184,8 @@ TARGET_LAYOUT = (
     ("상태", 130, "center"),
     ("구분", 100, "center"),
     ("열차", 120, "w"),
+    ("날짜", 90, "center"),
+    ("인원", 55, "center"),
     ("출발역", 70, "center"),
     ("출발", 60, "center"),
     ("도착역", 70, "center"),
@@ -317,6 +328,17 @@ def _stop_clock(*candidates: str | None) -> str:
         if clock and clock != _MISSING_STOP_CLOCK:
             return format_clock(clock)
     return "--:--"
+
+
+def _passenger_text(passengers: KorailPassengerCounts | None) -> str:
+    """인원 칸. 몇 장을 조회·예매했는지 — 조회 결과·예매 대상은 늘 압니다
+    (그 검색의 :attr:`~korail_booker.search.SearchRequest.passengers`).
+    잡은 예약은 이 세션이 직접 잡은 것만 압니다 — 서버에서 불러온 예약은
+    이 조회가 인원 수를 안 주므로 지어내지 않고 "모름" 으로 둡니다.
+    """
+    if passengers is None:
+        return "모름"
+    return f"{passengers.total}명"
 
 
 class AutocompleteCombobox(ttk.Combobox):
@@ -1986,6 +2008,7 @@ class BookerApp:
                 batch,
                 target.journey.summary(),
                 hold_journey,
+                target.request.passengers,
             )
             self.remember_hold(held)
             self._write_log(
@@ -2056,6 +2079,7 @@ class BookerApp:
                 Journey(
                     legs=(target.journey.legs[number - 1],), source=target.journey.source
                 ),
+                target.request.passengers,
             )
             self.remember_hold(held)
         pnrs = ", ".join(h.pnr_no or "?" for h in holds) or "(없음)"
@@ -2294,6 +2318,7 @@ class BookerApp:
         group: str = "",
         full_summary: str = "",
         held_journey: Journey | None = None,
+        passengers: KorailPassengerCounts | None = None,
     ) -> Held:
         """서버 응답에서 화면이 쓸 것만 뽑습니다. 없는 값은 지어내지 않습니다."""
         return Held(
@@ -2314,6 +2339,7 @@ class BookerApp:
             group=group,
             full_summary=full_summary or summary,
             held_journey=held_journey,
+            passengers=passengers,
         )
 
     def on_hold_made(
@@ -2326,10 +2352,12 @@ class BookerApp:
         group: str = "",
         full_summary: str = "",
         held_journey: Journey | None = None,
+        passengers: KorailPassengerCounts | None = None,
     ) -> None:
         """자동예매 스레드에서 불립니다 — 큐를 거쳐 화면에 올립니다."""
         held = self._held_from(
-            label, summary, kind, hold, direction, group, full_summary, held_journey
+            label, summary, kind, hold, direction, group, full_summary, held_journey,
+            passengers,
         )
         self.events.put(lambda: self.remember_hold(held))
 
@@ -2375,22 +2403,26 @@ class BookerApp:
                 self._insert_hold_group(indices)
 
     def _hold_row_values(self, held: Held, now: datetime) -> tuple[str, ...]:
-        """잡은 예약 한 줄의 열여섯 칸.
+        """잡은 예약 한 줄의 열여덟 칸.
 
         칸 순서는 :data:`HOLD_LAYOUT` 과 정확히 같아야 합니다 — 구분·**종류**
-        (좌석 예약/N구간)·열차·출발역·출발·도착역·도착·총 소요·환승 대기·
-        좌석 셋·PNR·운임·결제 기한·남은 시간. 열차부터 좌석까지 열 칸은
-        :meth:`_journey_row_values` 로 조회 결과·예매 대상과 **같은 방식으로**
-        채웁니다(그 함수의 첫 값은 구분이고, 종류는 이 표에만 있는 칸이라
-        끝에 잇지 않고 **구분 바로 다음에 끼워 넣습니다** — 한 번 이것을
-        잊어 끝에 이었다가 칸이 통째로 한 칸씩 밀린 적이 있습니다).
-        ``held_journey`` 가 없으면(옛 기록 등) 그 칸들만 "-" 로 비웁니다 —
-        지어내지 않습니다.
+        (좌석 예약/N구간)·열차·날짜·인원·출발역·출발·도착역·도착·총 소요·
+        환승 대기·좌석 셋·PNR·운임·결제 기한·남은 시간. 열차부터 좌석까지
+        열두 칸은 :meth:`_journey_row_values` 로 조회 결과·예매 대상과
+        **같은 방식으로** 채웁니다(그 함수의 첫 값은 구분이고, 종류는 이
+        표에만 있는 칸이라 끝에 잇지 않고 **구분 바로 다음에 끼워
+        넣습니다** — 한 번 이것을 잊어 끝에 이었다가 칸이 통째로 한 칸씩
+        밀린 적이 있습니다). ``held_journey`` 가 없으면(옛 기록 등) 그
+        칸들만 "-" 로 비웁니다 — 지어내지 않습니다. 인원은 이 홀드가
+        :attr:`~korail_booker.holds.Held.passengers` 를 알 때만 채웁니다
+        — 서버에서 불러온 예약은 그 조회가 인원 수를 안 줍니다.
         """
         if held.held_journey is not None:
-            kind, *rest = self._journey_row_values(held.label, held.held_journey)
+            kind, *rest = self._journey_row_values(
+                held.label, held.held_journey, held.passengers
+            )
         else:
-            kind, rest = held.label or "편도", ["-"] * 10
+            kind, rest = held.label or "편도", ["-"] * 12
         return (
             kind,
             held.kind,
@@ -2417,7 +2449,7 @@ class BookerApp:
         if journey is None or not journey.is_transfer:
             return
         for leg_index in range(len(journey.legs)):
-            kind, *rest = self._leg_row_values(journey, leg_index)
+            kind, *rest = self._leg_row_values(journey, leg_index, held.passengers)
             self.hold_tree.insert(
                 item, "end", values=(kind, "", *rest, "", "", "", ""), tags=("leg",)
             )
@@ -2439,6 +2471,10 @@ class BookerApp:
                 first.label or "편도",
                 "구간별 예약",
                 "",
+                "",
+                # 구간마다 따로 샀어도 인원 수는 한 시도 전체에 걸쳐 같습니다
+                # — 이 자리만은 채울 수 있는 값이라 채웁니다.
+                _passenger_text(first.passengers),
                 "",
                 "",
                 "",
@@ -3794,22 +3830,33 @@ class BookerApp:
                 "주지 않습니다. 시간대를 넓히거나 열차 종류 선택을 지워 보세요.",
             )
 
-    def _leg_row_values(self, journey: Journey, leg_index: int) -> tuple[str, ...]:
+    def _leg_row_values(
+        self,
+        journey: Journey,
+        leg_index: int,
+        passengers: KorailPassengerCounts | None = None,
+    ) -> tuple[str, ...]:
         """구간 정보 한 줄 — 조회 결과·예매 대상·잡은 예약이 함께 씁니다.
 
-        열한 칸은 :meth:`_journey_row_values` 와 같은 자리입니다("구분"
+        열세 칸은 :meth:`_journey_row_values` 와 같은 자리입니다("구분"
         자리에는 "1구간"/"2구간" 이 옵니다). 그 구간 하나만의 좌석 상태를
         보여 줍니다 — 부모 줄은 두 구간을 합쳐 하나로 말하므로(한 구간만
         매진이어도 '매진'), 어느 쪽이 막혔는지는 여기서만 보입니다. 한
         구간짜리 여정으로 만들어 같은 계산을 그대로 씁니다 — 규칙을 두 번
         쓰지 않습니다. "환승 대기" 는 구간 하나에는 뜻이 없어 "-" 로 둡니다
         — 그 구간이 어디서 어디로 가는지는 출발역·도착역 칸이 이미 말합니다.
+        날짜는 **이 구간 자신의** 것입니다 — 자정을 넘기는 환승이면 1구간과
+        2구간의 날짜가 다를 수 있습니다. 인원은 구간과 무관하게 그 여정
+        전체(부모 줄)와 같은 값입니다 — 구간별로 나눠 사도 인원 수는
+        똑같습니다.
         """
         leg = journey.legs[leg_index]
         alone = Journey(legs=(leg,), source=journey.source)
         return (
             f"{leg_index + 1}구간",
             f"{(leg.train_class_name or '').strip()} {leg.train_no}",
+            format_date(leg.departure_date),
+            _passenger_text(passengers),
             leg.departure_station_name or "-",
             format_clock(leg.departure_time),
             leg.arrival_station_name or "-",
@@ -3836,7 +3883,11 @@ class BookerApp:
             return
         for leg_index in range(len(journey.legs)):
             leg_item = tree.insert(
-                item, "end", values=self._leg_row_values(journey, leg_index), tags=("leg",)
+                item, "end",
+                values=self._leg_row_values(
+                    journey, leg_index, target.request.passengers
+                ),
+                tags=("leg",),
             )
             # 이 구간 줄만 따로 고르면 **이 구간 하나만의 예매 대상**을
             # 만듭니다(:meth:`_leg_only_target`) — 부모 전체를 고른 것으로
@@ -3862,6 +3913,8 @@ class BookerApp:
                 f"{first.label[:2]}·환승(직접)" if first.label else "환승(직접)",
                 one_line(f"{(leg.train_class_name or '').strip()} "
                          f"{(leg.train_no or '').strip().lstrip('0')}"),
+                format_date(leg.departure_date),
+                _passenger_text(first.request.passengers),
                 leg.departure_station_name or "-",
                 format_clock(normalize_clock(leg.departure_time)),
                 leg.arrival_station_name or "-",
@@ -3894,6 +3947,8 @@ class BookerApp:
             "└ 이어서",
             one_line(f"{(second.train_class_name or '').strip()} "
                      f"{(second.train_no or '').strip().lstrip('0')}"),
+            format_date(second.departure_date),
+            _passenger_text(target.request.passengers),
             second.departure_station_name or "-",
             format_clock(normalize_clock(second.departure_time)),
             second.arrival_station_name or "-",
@@ -3906,16 +3961,30 @@ class BookerApp:
         )
 
     def _row_values(self, target: Target) -> tuple[str, ...]:
-        return self._journey_row_values(target.label, target.journey)
+        return self._journey_row_values(
+            target.label, target.journey, target.request.passengers
+        )
 
-    def _journey_row_values(self, label: str, journey: Journey) -> tuple[str, ...]:
-        """구분·열차·출발역·출발·도착역·도착·총 소요·환승 대기·일반실·특실·
-        입석 열한 칸.
+    def _journey_row_values(
+        self,
+        label: str,
+        journey: Journey,
+        passengers: KorailPassengerCounts | None = None,
+    ) -> tuple[str, ...]:
+        """구분·열차·날짜·인원·출발역·출발·도착역·도착·총 소요·환승 대기·
+        일반실·특실·입석 열세 칸.
 
         조회 결과·예매 대상·잡은 예약, **세 표가 전부 이 함수 하나로** 이
         칸들을 채웁니다. 여정을 문장 하나로 뭉뚱그리면(예전의 "여정"
         칸), 조회 결과에서는 구분해 보던 것이 담거나 잡는 순간 사라집니다
-        — 실제로 그런 신고가 있었습니다.
+        — 실제로 그런 신고가 있었습니다. 날짜도 마찬가지입니다 — 같은
+        열차번호가 날짜를 달리해 여러 번 뜰 수 있는데, 날짜 없이는 표에
+        담긴 줄이 정확히 어느 날 편인지 알 길이 없습니다(1구간 날짜입니다
+        — 환승이 자정을 넘기면 2구간은 :meth:`_leg_row_values` 가 따로
+        보여 주는 날짜가 다를 수 있습니다). 인원도 마찬가지입니다 — 승객
+        2명으로 조회해 둔 것을 표만 보고는 몇 장짜리인지 알 수 없었습니다.
+        ``passengers`` 를 안 주면(옛 기록 등) 지어내지 않고 "모름" 으로
+        둡니다.
         """
         if journey.is_transfer:
             kind = (
@@ -3933,6 +4002,8 @@ class BookerApp:
             # 예매 대상·기록·알림과 같은 표기를 씁니다. 한 화면에서 같은
             # 열차가 "00017" 과 "KTX 17" 로 갈리면 같은 것인지 알 수 없습니다.
             one_line(journey.train_label()),
+            format_date(journey.departure_date),
+            _passenger_text(passengers),
             journey.first.departure_station_name or "-",
             format_clock(journey.departure_clock),
             journey.last.arrival_station_name or "-",
@@ -4449,14 +4520,18 @@ class BookerApp:
             item = tree.insert(
                 "",
                 "end",
-                values=self._journey_row_values(candidate.label, candidate.journey),
+                values=self._journey_row_values(
+                    candidate.label, candidate.journey, candidate.request.passengers
+                ),
                 tags=self._row_tags(candidate.journey),
             )
             item_targets[item] = candidate
             for leg_index in range(len(candidate.journey.legs)):
                 tree.insert(
                     item, "end",
-                    values=self._leg_row_values(candidate.journey, leg_index),
+                    values=self._leg_row_values(
+                        candidate.journey, leg_index, candidate.request.passengers
+                    ),
                     tags=("leg",),
                 )
             tree.item(item, open=True)
@@ -4782,7 +4857,14 @@ class BookerApp:
             self.target_list.insert(
                 item,
                 "end",
-                values=("", *self._leg_row_values(journey, leg_index), "", ""),
+                values=(
+                    "",
+                    *self._leg_row_values(
+                        journey, leg_index, target.request.passengers
+                    ),
+                    "",
+                    "",
+                ),
                 tags=("leg",),
             )
         self.target_list.item(item, open=True)
@@ -4794,7 +4876,8 @@ class BookerApp:
         것으로 칩니다 — [빼기]·[고른 것만 시작]·[고른 것만 중지] 가 조회
         결과의 묶음 부모와 같은 뜻으로 동작하게 하려는 것입니다.
         """
-        first = self.targets[indices[0]].journey
+        first_target = self.targets[indices[0]]
+        first = first_target.journey
         leg = first.first
         parent = self.target_list.insert(
             "",
@@ -4804,6 +4887,8 @@ class BookerApp:
                 "",
                 one_line(f"{(leg.train_class_name or '').strip()} "
                          f"{(leg.train_no or '').strip().lstrip('0')}"),
+                format_date(leg.departure_date),
+                _passenger_text(first_target.request.passengers),
                 leg.departure_station_name or "-",
                 format_clock(normalize_clock(leg.departure_time)),
                 leg.arrival_station_name or "-",

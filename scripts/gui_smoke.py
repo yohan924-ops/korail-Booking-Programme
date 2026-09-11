@@ -101,6 +101,13 @@ def main() -> int:
 
     from korail_mobile_api import KorailPassengerCounts, KorailSeatClass, TrainSummary
 
+    # 조회 결과 표는 칸 이름이 아니라 영문 키("date" 등)로 칸을 가리킵니다
+    # (:data:`ui_module.TREE_COLUMNS`) — 예매 대상·잡은 예약은 한글 이름
+    # 자체가 칸 id 입니다. 자리를 손으로 세지 않고 이 이름들로 찾습니다 —
+    # 그래야 칸이 늘거나 순서가 바뀌어도 시험이 따라옵니다.
+    TREE_COLUMN_KEYS = tuple(ui_module.TREE_COLUMNS)
+    TARGET_COLUMNS = ui_module.TARGET_COLUMNS
+
     def train(**kwargs: str) -> TrainSummary:
         return TrainSummary.from_raw(_raw_train(**kwargs))
 
@@ -276,6 +283,45 @@ def main() -> int:
     parent_row = app.tree.get_children()[0]
     check("부모 줄은 여정이 아니라 묶음 머리다",
           app.tree.item(parent_row, "tags") == ("group",))
+    date_col = TREE_COLUMN_KEYS.index("date")
+    check("조회 결과의 날짜 칸이 채워진다",
+          app.tree.item(parent_row, "values")[date_col] == "2099-01-01",
+          app.tree.item(parent_row, "values")[date_col])
+    passengers_col = TREE_COLUMN_KEYS.index("passengers")
+    check("조회 결과의 인원 칸이 채워진다(1명 조회)",
+          app.tree.item(parent_row, "values")[passengers_col] == "1명",
+          app.tree.item(parent_row, "values")[passengers_col])
+
+    # 승객을 2명으로 조회하면 표에도 2명으로 보여야 합니다 — "몇 장짜리를
+    # 돌리고 있는지 표만 봐서는 알 수 없다" 는 신고가 실제로 있었습니다.
+    two_pax_request = SearchRequest(
+        departure="동탄", arrival="동대구", date="20990101",
+        passengers=KorailPassengerCounts(adult=2),
+    )
+    two_pax_target = Target(
+        journey=combination("00301", "063000", "071200"), request=two_pax_request
+    )
+    app._show_journeys([two_pax_target])
+    root.update()
+    two_pax_row = app.tree.get_children()[0]
+    check("승객 2명으로 조회하면 인원 칸도 2명이라고 말한다",
+          app.tree.item(two_pax_row, "values")[passengers_col] == "2명",
+          app.tree.item(two_pax_row, "values")[passengers_col])
+    app.targets = [two_pax_target]
+    app.sync_target_list()
+    root.update()
+    two_pax_target_row = app.target_list.get_children()[0]
+    check("예매 대상의 인원 칸도 2명이라고 말한다",
+          app.target_list.item(two_pax_target_row, "values")[
+              TARGET_COLUMNS.index("인원")
+          ] == "2명",
+          app.target_list.item(two_pax_target_row, "values"))
+    app.targets = []
+    app.sync_target_list()
+
+    app._show_journeys(results)
+    root.update()
+    parent_row = app.tree.get_children()[0]
     app.tree.selection_set(parent_row)
     check("부모를 고르면 그 아래 조합이 전부 (조회용으로는) 잡힌다",
           len(app.selected_results()) == len(results), len(app.selected_results()))
@@ -304,6 +350,10 @@ def main() -> int:
     check("팝업 목록에 후보가 다 있다",
           picker_tree is not None and len(picker_rows) == len(results),
           len(picker_rows) if picker_tree is not None else None)
+    if picker_tree is not None and picker_rows:
+        picker_date = picker_tree.item(picker_rows[0], "values")[date_col]
+        check("이어지는 구간 고르기 팝업에도 날짜 칸이 채워진다",
+              picker_date == "2099-01-01", picker_date)
     if picker_tree is not None and picker_rows:
         picker_tree.selection_set(picker_rows[1])
         pick_buttons = find_widgets(
@@ -351,8 +401,11 @@ def main() -> int:
           len(target_children))
     row = app.target_list.item(target_children[0], "values")
     check("상태 칸이 구간별 예약임을 말한다", "구간별" in row[0], row[0])
-    # 칸 순서: 상태, 구분, 열차, 출발역, 출발, 도착역, 도착, 총 소요, 환승 대기, ...
-    check("환승 대기 칸이 촉박한 환승을 경고한다", "촉박" in row[8], row[8])
+    check("날짜 칸이 채워진다", row[TARGET_COLUMNS.index("날짜")] == "2099-01-01",
+          row[TARGET_COLUMNS.index("날짜")])
+    check("환승 대기 칸이 촉박한 환승을 경고한다",
+          "촉박" in row[TARGET_COLUMNS.index("환승 대기")],
+          row[TARGET_COLUMNS.index("환승 대기")])
 
     # 부모 줄을 고르면 그 아래 전부를 고른 것으로 칩니다.
     app.target_list.selection_set(target_top[0])
@@ -691,8 +744,8 @@ def main() -> int:
     p1001_values = app.hold_tree.item(p1001, "values")
     expected_kind, *expected_rest = app._journey_row_values("", first_target.journey)
     rest_names = [
-        "열차", "출발역", "출발", "도착역", "도착", "총 소요", "환승 대기",
-        "일반실", "특실", "입석·자유석·대기",
+        "열차", "날짜", "인원", "출발역", "출발", "도착역", "도착", "총 소요",
+        "환승 대기", "일반실", "특실", "입석·자유석·대기",
     ]
     checks = {"구분": expected_kind, "종류": "좌석 예약(1구간)"}
     checks.update(dict(zip(rest_names, expected_rest, strict=True)))

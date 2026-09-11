@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 
 if TYPE_CHECKING:
-    from korail_mobile_api import ReservationHoldResponse
+    from korail_mobile_api import KorailPassengerCounts, ReservationHoldResponse
 
     from .journeys import Journey
 
@@ -159,6 +159,12 @@ class Held:
     #: ``None`` 이어도 이 조각의 나머지는 그대로 돌아갑니다 — 그 칸들만
     #: "모름" 으로 빈 채 남습니다(지어내지 않습니다).
     held_journey: Journey | None = None
+    #: 이 예약을 몇 명으로 잡았는지. 이 세션이 직접 잡은 것만 압니다
+    #: (조회·예매 대상과 같은 :class:`~korail_mobile_api.KorailPassengerCounts`
+    #: 를 그대로 물려받습니다). 서버에서 불러온 예약은 그 조회
+    #: (``get_reservation_history``)가 인원 수를 안 주므로 ``None`` 으로
+    #: 남깁니다 — 지어내지 않습니다.
+    passengers: KorailPassengerCounts | None = None
 
     def row(self, now: datetime) -> tuple[str, ...]:
         """표 한 줄. 남은 시간은 부를 때마다 다시 셉니다."""

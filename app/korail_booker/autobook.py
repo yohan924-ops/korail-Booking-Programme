@@ -72,16 +72,22 @@ Notifier = Callable[[str], None]
 #: :meth:`AutoBooker._settle_key` 참조.
 SettleKey = tuple[object, ...]
 #: 홀드 하나가 잡힐 때마다 불립니다 — (구분, 여정 한 줄, 종류, 방향, 응답,
-#: 묶음 값, 원래 여정 전체 한 줄, 이 홀드가 가리키는 여정).
+#: 묶음 값, 원래 여정 전체 한 줄, 이 홀드가 가리키는 여정, 인원).
 #:
 #: 방향까지 넘기는 것은 화면이 "이 방향은 이미 잡았다" 를 판단해야 하기
 #: 때문입니다. 여정 한 줄로는 목록에서 그 줄을 뺀 뒤 판단할 길이 없습니다.
 #: 묶음 값은 구간별로 따로 산 홀드 여럿을 화면이 한 시도로 묶어 보여 주기
 #: 위한 것입니다 — 방향만으로는 기한 지난 옛 홀드와 새 홀드가 뒤섞입니다.
 #: 마지막 여정은 화면이 열차·시각·소요·좌석 칸을 조회 결과와 같은 함수로
-#: 채우는 데 씁니다 — 문자열을 다시 만들면 반드시 어긋납니다.
+#: 채우는 데 씁니다 — 문자열을 다시 만들면 반드시 어긋납니다. 인원은
+#: 표의 "인원" 칸을 채웁니다 — 이 값이 없으면 몇 장을 잡고 있는지 표만
+#: 보고는 알 길이 없습니다(:attr:`Target.request` 의
+#: :class:`~korail_mobile_api.KorailPassengerCounts` 그대로입니다).
 HoldWatcher = Callable[
-    [str, str, str, tuple[str, str, str], ReservationHoldResponse, str, str, Journey],
+    [
+        str, str, str, tuple[str, str, str], ReservationHoldResponse, str, str, Journey,
+        KorailPassengerCounts,
+    ],
     None,
 ]
 
@@ -842,6 +848,7 @@ class AutoBooker:
                     batch,
                     journey.summary(),
                     Journey(legs=(journey.legs[number - 1],), source=journey.source),
+                    target.request.passengers,
                 )
         pnrs = ", ".join((hold.pnr_no or "?") for hold in held) or "(없음)"
         self.announce(
@@ -1010,6 +1017,7 @@ class AutoBooker:
                     batch,
                     journey.summary(),
                     hold_journey,
+                    target.request.passengers,
                 )
             where = f" [{number}구간]" if split else ""
             self.announce(

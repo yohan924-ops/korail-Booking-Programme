@@ -109,6 +109,19 @@ def format_clock(value: str | None) -> str:
     return f"{clock[:2]}:{clock[2:4]}" if len(clock) == 6 else "--:--"
 
 
+def format_date(value: str | None) -> str:
+    """``"20990101"`` 여덟 자리를 ``"2099-01-01"`` 로. 아니면 자리만 채웁니다.
+
+    조회·잡은 예약·예매 대상 세 표가 전부 이 모양을 씁니다 — 같은 열차
+    번호(예: "00301")가 날짜를 달리해 여러 번 뜰 수 있는데, 표에 날짜가
+    없으면 그중 무엇을 담았는지 줄만 봐서는 알 수 없습니다.
+    """
+    raw = (value or "").strip()
+    if len(raw) == 8 and raw.isdigit():
+        return f"{raw[:4]}-{raw[4:6]}-{raw[6:]}"
+    return "-" * 10
+
+
 def format_duration(minutes: int | None) -> str:
     if minutes is None:
         return "-"
