@@ -36,8 +36,8 @@ cd /d "%~dp0"
 set "VENV=%CD%\.venv"
 set "VPY=%VENV%\Scripts\python.exe"
 
-rem --- 이미 준비돼 있으면 곧장 실행 -------------------------------------------
-if exist "%VPY%" goto run
+rem --- 이미 준비돼 있으면 트레이 패키지만 채워 넣고 곧장 실행 ----------------
+if exist "%VPY%" goto trayonly
 
 rem --- 파이썬 찾기 ------------------------------------------------------------
 rem  py 런처를 먼저 봅니다. python.org 설치본이 함께 넣어 주고, 여러 버전이
@@ -90,10 +90,16 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-rem 작업 표시줄 트레이 아이콘(창을 닫아도 자동예매가 백그라운드에서
-rem 계속되는 기능)은 이 둘이 있어야 켜집니다. 실패해도 멈추지 않습니다 —
-rem 없으면 그 기능만 빠지고, 나머지는 전부 지금까지처럼 그대로 돕니다.
-"%VPY%" -m pip install pystray pillow >nul 2>&1
+
+:trayonly
+rem 새로 만든 .venv 든, 예전에 이미 만들어 둔 .venv 든(그 시절엔 pystray
+rem 가 없었을 수 있습니다 — 이 기능이 나중에 생겼습니다) 여기를 거칩니다.
+rem
+rem python -c 로 먼저 **로컬에서만** 있는지 없는지 봅니다 — 매번 pip 를
+rem 부르면 있어도 인터넷에 물어보느라 "두 번째부터는 바로 뜹니다" 가
+rem 깨집니다. 없을 때만 pip install 이 돌아 인터넷을 씁니다.
+"%VPY%" -c "import pystray" >nul 2>&1
+if errorlevel 1 "%VPY%" -m pip install pystray pillow >nul 2>&1
 
 rem --- 실행 -------------------------------------------------------------------
 :run

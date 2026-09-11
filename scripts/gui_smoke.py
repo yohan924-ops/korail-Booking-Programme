@@ -1250,6 +1250,26 @@ def main() -> int:
 
     app.root.destroy = real_destroy  # type: ignore[method-assign]
 
+    # -- 종료 경고 문구: 기한 모르는 예약을 줄마다 반복하지 않는다 -----------
+    from datetime import datetime as _datetime
+
+    warning = app._closing_hold_warning([
+        Held(label="", summary="1", pnr="P1", fare="-",
+             deadline=_datetime(2099, 1, 1), deadline_text="2099-01-01 12:00"),
+        Held(label="", summary="2", pnr="P2", fare="-",
+             deadline=None, deadline_text="서버가 이 목록에서 결제 기한을 주지 "
+             "않습니다 — 코레일 앱에서 확인하세요"),
+        Held(label="", summary="3", pnr="P3", fare="-",
+             deadline=None, deadline_text="서버가 이 목록에서 결제 기한을 주지 "
+             "않습니다 — 코레일 앱에서 확인하세요"),
+    ])
+    check("종료 경고: 기한을 아는 예약은 PNR·기한으로 짧게 나온다",
+          "P1" in warning and "2099-01-01 12:00" in warning, warning)
+    check("종료 경고: 기한 모르는 예약은 건수 한 줄로만 묶인다(반복 안 함)",
+          "그 밖에 결제 기한을 알 수 없는 예약 2건" in warning
+          and warning.count("서버가 이 목록에서 결제 기한을 주지 않습니다") == 0,
+          warning)
+
     if args.shot:
         root.update()
         root.after(300, root.quit)

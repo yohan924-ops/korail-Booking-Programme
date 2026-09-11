@@ -5624,6 +5624,33 @@ class BookerApp:
         )
         self.root.withdraw()
 
+    @staticmethod
+    def _closing_hold_warning(unpaid: list[Held]) -> str:
+        """종료 전 마지막 경고 문구. **기한을 아는 것과 모르는 것을 나눕니다.**
+
+        예전에는 전부 한 줄씩(``PNR  기한 문구``) 늘어놓았는데, 기한을
+        모르는 예약(서버에서 불러온 것)은 문구가 "서버가 이 목록에서 결제
+        기한을 주지 않습니다 — 코레일 앱에서 확인하세요" 로 길어서, 그런
+        예약이 여럿이면 같은 긴 문장이 줄마다 반복돼 정작 중요한(기한을
+        아는) 예약이 묻혔습니다 — 실제로 그렇게 보인다는 신고가 있었습니다.
+        아는 것은 "PNR  언제까지" 로 짧게, 모르는 것은 몇 건인지 한 줄로만
+        묶어 셉니다.
+        """
+        known = [held for held in unpaid if held.deadline is not None]
+        unknown_count = len(unpaid) - len(known)
+        lines = [f"· {held.pnr}  {held.deadline_text}" for held in known[:5]]
+        if unknown_count:
+            lines.append(
+                f"· 그 밖에 결제 기한을 알 수 없는 예약 {unknown_count}건 "
+                "— 코레일 앱에서 확인하세요"
+            )
+        return (
+            f"결제 기한이 남은 예약 {len(unpaid)}건이 목록에 있습니다. 이 목록은 "
+            "메모리에만 있어 끝내면 사라집니다 — PNR 을 적어 두셨나요?\n\n"
+            + "\n".join(lines)
+            + "\n\n정말 끝낼까요?"
+        )
+
     def _quit_for_real(self) -> None:
         """진짜로 끝냅니다 — 끝내기 전에 **잃을 것이 있는지** 먼저 봅니다.
 
@@ -5647,13 +5674,7 @@ class BookerApp:
             for watch in self.watches:
                 watch.session.stop()
         unpaid = [held for held in self.holds if not is_expired(held.deadline, now_kst())]
-        if unpaid and not messagebox.askyesno(
-            "종료",
-            f"결제 기한이 남은 예약 {len(unpaid)}건이 목록에 있습니다. 이 목록은 "
-            "메모리에만 있어 끝내면 사라집니다 — PNR 을 적어 두셨나요?\n\n"
-            + "\n".join(f"· {held.pnr}  {held.deadline_text}" for held in unpaid[:5])
-            + "\n\n정말 끝낼까요?",
-        ):
+        if unpaid and not messagebox.askyesno("종료", self._closing_hold_warning(unpaid)):
             return
         if self._tray_icon is not None:
             try:

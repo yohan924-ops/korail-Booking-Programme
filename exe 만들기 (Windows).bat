@@ -57,11 +57,6 @@ echo.
 %PY% -m venv "%VENV%" || goto setupfailed
 "%VPY%" -m pip install --upgrade pip >nul 2>&1
 "%VPY%" -m pip install httpx cryptography || goto setupfailed
-rem 작업 표시줄 트레이 아이콘(창을 닫아도 자동예매가 백그라운드에서
-rem 계속되는 기능)은 이 둘이 있어야 켜집니다. 이 venv 에 있어야
-rem PyInstaller 가 exe 안에 함께 담습니다 — 실패해도 멈추지 않습니다,
-rem 없으면 그 기능만 빠지고 나머지는 그대로 돕니다.
-"%VPY%" -m pip install pystray pillow >nul 2>&1
 
 :haveenv
 
@@ -78,6 +73,13 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
+rem 작업 표시줄 트레이 아이콘(창을 닫아도 자동예매가 백그라운드에서
+rem 계속되는 기능)은 pystray 가 있어야 켜집니다. **이 자리(:haveenv 아래)에
+rem 둡니다** — venv 를 새로 만들 때든, 예전에 이미 만들어 둔 venv(그
+rem 시절엔 pystray 가 없었을 수 있습니다)를 그대로 쓸 때든 둘 다 거쳐야
+rem exe 안에 실제로 담깁니다. 실패해도 멈추지 않습니다 — 없으면 그
+rem 기능만 빠지고 나머지는 그대로 돕니다.
+"%VPY%" -m pip install pystray >nul 2>&1
 
 rem --- 아이콘 (있으면 씁니다) --------------------------------------------------
 rem  packaging\icon.png 또는 icon.ico 를 넣어 두면 그것이 exe 아이콘이 됩니다.

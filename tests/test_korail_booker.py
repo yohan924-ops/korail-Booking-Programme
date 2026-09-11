@@ -3662,6 +3662,27 @@ def test_a_modal_never_stops_the_event_queue():
     assert "self.root.after(0, lambda: messagebox.showerror" in body
 
 
+def test_the_closing_warning_does_not_repeat_the_same_long_sentence_per_row():
+    """기한을 모르는 예약(서버에서 불러온 것)이 여럿이면, 예전에는 긴 문구
+    ("서버가 이 목록에서 결제 기한을 주지 않습니다 — 코레일 앱에서
+    확인하세요")가 줄마다 그대로 반복돼 정작 기한을 아는 예약이 묻혔다는
+    신고가 있었습니다("숫자랑 서버기한이 어쩌구 저게 뭔말이야"). 아는 것과
+    모르는 것을 나눠, 모르는 것은 몇 건인지 한 줄로만 묶습니다.
+    """
+    body = _ui_function("_closing_hold_warning")
+    assert "held.deadline is not None" in body
+    assert "unknown_count = len(unpaid) - len(known)" in body
+    assert "if unknown_count:" in body
+    # 아는 것은 PNR 과 실제 기한을 짧게, 모르는 것은 건수만 — 긴 문구를
+    # 반복해 이어 붙이지 않습니다.
+    assert "held.pnr" in body
+    assert "held.deadline_text" in body
+    assert body.count("held.deadline_text") == 1
+
+    caller = _ui_function("_quit_for_real")
+    assert "self._closing_hold_warning(unpaid)" in caller
+
+
 def test_closing_asks_before_losing_a_deadline():
     """잡은 예약 목록은 메모리에만 있습니다. 진짜로 끝내면 PNR 과 기한이 사라집니다.
 
