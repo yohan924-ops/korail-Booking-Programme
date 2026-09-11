@@ -487,6 +487,33 @@ def main() -> int:
     app.pick_leg1_general.set(True)
     app.pick_leg1_special.set(True)
 
+    # -- 좌석 등급 팝업: 평소엔 안 보이고, 옆 글자가 지금 값을 따라간다 -----
+    check("체크박스를 안 건드리면 옆 글자가 '무관' 이다",
+          app.seat_pick_summary.get() == "무관", app.seat_pick_summary.get())
+    app.pick_special.set(False)
+    root.update()
+    check("체크박스를 바꾸면(코드로도) 옆 글자가 따라온다",
+          app.seat_pick_summary.get() != "무관", app.seat_pick_summary.get())
+    app.pick_special.set(True)
+    root.update()
+
+    before_windows = set(root.winfo_children())
+    app.open_seat_pick_dialog()
+    root.update()
+    dialog_windows = [
+        w for w in root.winfo_children()
+        if w not in before_windows and isinstance(w, tk.Toplevel)
+    ]
+    check("[좌석 등급…] 을 누르면 팝업이 뜬다", len(dialog_windows) == 1, dialog_windows)
+    if dialog_windows:
+        checks_in_dialog = find_widgets(
+            dialog_windows[0], lambda w: isinstance(w, ttk.Checkbutton)
+        )
+        check("팝업 안에 체크박스 여섯 개가 있다", len(checks_in_dialog) == 6,
+              len(checks_in_dialog))
+        dialog_windows[0].destroy()
+    root.update()
+
     app.targets = []
     app.sync_target_list()
 

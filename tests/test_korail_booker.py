@@ -4309,6 +4309,29 @@ def test_seat_pick_checkboxes_default_to_the_old_behaviour():
     assert "replace(target, seat_choices=choices)" in picked
 
 
+def test_seat_pick_checkboxes_are_hidden_behind_a_button():
+    """체크박스 여섯 개를 상시 노출하면 화면이 붐빕니다 — 단추 뒤로 감춥니다.
+
+    실제 화면을 찍어 보니, 늘 펴 둔 체크박스 줄이 [담기] 아래 뜬금없이
+    끼어들어 있었습니다. 대부분 손대지 않는(무관) 값이므로 팝업으로 옮기고,
+    지금 값은 옆 글자로만 보여 잊지 않게 합니다.
+    """
+    source = _ui_source()
+    assert '"좌석 등급…"' in source
+    assert "def open_seat_pick_dialog" in source
+    dialog = _ui_function("open_seat_pick_dialog")
+    assert "tk.Toplevel(self.root)" in dialog
+    for name in ("pick_general", "pick_special", "pick_leg1_general",
+                 "pick_leg1_special", "pick_leg2_general", "pick_leg2_special"):
+        assert f"variable=self.{name}" in dialog, name
+
+    summary = _ui_function("_seat_pick_summary_text")
+    assert "return '무관'" in summary
+
+    # 체크박스를 어디서 바꾸든(팝업 안이든 코드로든) 옆 글자가 따라옵니다.
+    assert 'trace_add("write", self._refresh_seat_pick_summary)' in source
+
+
 def test_reserve_now_also_honours_a_targets_own_seat_choice():
     """[바로 예약] 도 자동예매와 같은 규칙을 씁니다 — 담을 때 고른 등급이
     있으면 그것을, 없으면 지금 좌석 콤보박스를 씁니다."""

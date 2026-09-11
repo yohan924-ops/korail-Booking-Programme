@@ -1002,6 +1002,16 @@ class BookerApp:
         self.pick_leg1_special = tk.BooleanVar(value=True)
         self.pick_leg2_general = tk.BooleanVar(value=True)
         self.pick_leg2_special = tk.BooleanVar(value=True)
+        # [담기] 옆에 지금 위 여섯 값을 한 줄로 보여 줍니다 — 체크박스
+        # 자체는 팝업(:meth:`open_seat_pick_dialog`) 뒤에 숨어 있으므로,
+        # 이 글자가 없으면 지난번에 무엇을 바꿔 뒀는지 잊기 쉽습니다.
+        self.seat_pick_summary = tk.StringVar(value="무관")
+        for _var in (
+            self.pick_general, self.pick_special,
+            self.pick_leg1_general, self.pick_leg1_special,
+            self.pick_leg2_general, self.pick_leg2_special,
+        ):
+            _var.trace_add("write", self._refresh_seat_pick_summary)
         self.include_direct = tk.BooleanVar(value=True)
         self.include_transfer = tk.BooleanVar(value=False)
         self.transfer_mode = tk.StringVar(value=TRANSFER_SERVER)
@@ -1508,42 +1518,105 @@ class BookerApp:
         ttk.Button(
             buttons, text="결과 비우기", width=10, command=self.clear_results
         ).pack(side="left", padx=(6, 0))
+        # 체크박스 여섯 개를 늘 펴 두면 화면이 붐빕니다 — 대부분은 손대지
+        # 않는(무관) 값입니다. 단추 하나로 감춰 두고, 지금 값은 옆 글자로만
+        # 보여 줍니다("손대지 않았다" 를 한눈에 알 수 있어야 합니다).
+        ttk.Button(
+            buttons, text="좌석 등급…", width=9, command=self.open_seat_pick_dialog
+        ).pack(side="left", padx=(6, 0))
+        ttk.Label(buttons, textvariable=self.seat_pick_summary, foreground="#1f6feb").pack(
+            side="left", padx=(4, 0)
+        )
 
-        self._build_seat_pick_row(frame)
-
-    def _build_seat_pick_row(self, frame: ttk.LabelFrame) -> None:
-        """"담을 때" 좌석 등급 체크박스 — [담기] 단추 바로 아래.
+    def open_seat_pick_dialog(self) -> None:
+        """"담을 때" 좌석 등급 체크박스 — 단추를 눌러야만 뜨는 팝업.
 
         전부 체크된 기본값(무관)에서는 아무것도 바꾸지 않습니다 — 조회
         조건의 좌석 콤보박스(공통 설정)를 그대로 따릅니다. 하나라도 떼면
         그 뒤로 담기는 여정만 이 값으로 굳습니다(:meth:`_seat_choices_for`).
         '이어서'(직접 조합 환승)는 구간마다 따로 사므로 구간마다 따로
         고릅니다 — 직통·서버 추천 환승은 두 구간을 같은 등급으로만 살 수
-        있어(라이브러리 제약) 한 벌이면 됩니다.
+        있어(라이브러리 제약) 한 벌이면 됩니다. 여기서 고른 값은 [담기]
+        옆 글자로 계속 보입니다 — 닫아도 잊히지 않게.
         """
-        row = ttk.Frame(frame)
-        row.grid(row=3, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 4))
-        ttk.Label(row, text="담을 등급 — 직통·환승:").pack(side="left")
-        ttk.Checkbutton(row, text="일반실", variable=self.pick_general).pack(
-            side="left", padx=(4, 0)
+        window = tk.Toplevel(self.root)
+        window.title("담을 좌석 등급")
+        window.transient(self.root)
+        ttk.Label(
+            window,
+            text="예매 대상에 담을 때 이 여정이 받아들일 좌석 등급을 고릅니다.\n"
+            "전부 체크(무관)하면 감시를 시작할 때의 공통 설정(위 '좌석' 칸)을 "
+            "그대로 따릅니다.",
+            justify="left",
+            wraplength=380,
+        ).pack(anchor="w", padx=12, pady=(12, 8))
+
+        direct = ttk.LabelFrame(window, text="직통 · 서버 추천 환승 (두 구간 같은 등급)")
+        direct.pack(fill="x", padx=12, pady=(0, 8))
+        ttk.Checkbutton(direct, text="일반실", variable=self.pick_general).pack(
+            side="left", padx=8, pady=6
         )
-        ttk.Checkbutton(row, text="특실", variable=self.pick_special).pack(
-            side="left", padx=(2, 12)
+        ttk.Checkbutton(direct, text="특실", variable=self.pick_special).pack(
+            side="left", padx=8, pady=6
         )
-        ttk.Label(row, text="이어서(구간별) — 1구간:").pack(side="left")
-        ttk.Checkbutton(row, text="일반실", variable=self.pick_leg1_general).pack(
-            side="left", padx=(4, 0)
+
+        custom = ttk.LabelFrame(window, text="이어서(직접 조합 환승) — 구간마다 따로")
+        custom.pack(fill="x", padx=12, pady=(0, 8))
+        leg1_row = ttk.Frame(custom)
+        leg1_row.pack(anchor="w", padx=8, pady=(6, 2))
+        ttk.Label(leg1_row, text="1구간:").pack(side="left")
+        ttk.Checkbutton(leg1_row, text="일반실", variable=self.pick_leg1_general).pack(
+            side="left", padx=(6, 0)
         )
-        ttk.Checkbutton(row, text="특실", variable=self.pick_leg1_special).pack(
-            side="left", padx=(2, 8)
-        )
-        ttk.Label(row, text="2구간:").pack(side="left")
-        ttk.Checkbutton(row, text="일반실", variable=self.pick_leg2_general).pack(
-            side="left", padx=(4, 0)
-        )
-        ttk.Checkbutton(row, text="특실", variable=self.pick_leg2_special).pack(
+        ttk.Checkbutton(leg1_row, text="특실", variable=self.pick_leg1_special).pack(
             side="left", padx=(2, 0)
         )
+        leg2_row = ttk.Frame(custom)
+        leg2_row.pack(anchor="w", padx=8, pady=(2, 6))
+        ttk.Label(leg2_row, text="2구간:").pack(side="left")
+        ttk.Checkbutton(leg2_row, text="일반실", variable=self.pick_leg2_general).pack(
+            side="left", padx=(6, 0)
+        )
+        ttk.Checkbutton(leg2_row, text="특실", variable=self.pick_leg2_special).pack(
+            side="left", padx=(2, 0)
+        )
+
+        ttk.Button(window, text="닫기", command=window.destroy).pack(pady=(0, 12))
+        window.grab_set()
+
+    def _seat_pick_summary_text(self) -> str:
+        """지금 좌석 체크박스 상태를 [담기] 옆에 보일 한 줄로.
+
+        팝업을 열지 않아도 지금 무엇이 골라져 있는지 알아야, 예전에 다른
+        여정을 담으며 바꿔 둔 값을 잊고 엉뚱한 등급으로 담는 일이 없습니다.
+        """
+
+        def name(classes: frozenset[KorailSeatClass]) -> str:
+            names = [
+                label
+                for seat_class, label in (
+                    (KorailSeatClass.GENERAL, "일반실"),
+                    (KorailSeatClass.SPECIAL, "특실"),
+                )
+                if seat_class in classes
+            ]
+            return "·".join(names) or "선택 없음"
+
+        direct = self._checked_classes(self.pick_general, self.pick_special)
+        leg1 = self._checked_classes(self.pick_leg1_general, self.pick_leg1_special)
+        leg2 = self._checked_classes(self.pick_leg2_general, self.pick_leg2_special)
+        both = _BOTH_SEAT_CLASSES
+        if direct == both and leg1 == both and leg2 == both:
+            return "무관"
+        parts = []
+        if direct != both:
+            parts.append(f"직통·환승 {name(direct)}")
+        if leg1 != both or leg2 != both:
+            parts.append(f"이어서 1구간 {name(leg1)}·2구간 {name(leg2)}")
+        return " / ".join(parts)
+
+    def _refresh_seat_pick_summary(self, *_args: object) -> None:
+        self.seat_pick_summary.set(self._seat_pick_summary_text())
 
     def sync_round_trip_panes(self) -> None:
         """왕복이면 표를 좌우로 나눕니다. 편도면 왼쪽 하나만 씁니다."""
