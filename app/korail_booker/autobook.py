@@ -47,8 +47,10 @@ from .holds import parse_deadline
 from .journeys import (
     Journey,
     JourneyKey,
+    JourneySource,
     SeatPreference,
     books_as_one_reservation,
+    first_leg_key,
     format_duration,
 )
 from .search import SearchRequest, search_journeys
@@ -66,6 +68,9 @@ MAX_CONSECUTIVE_TRANSPORT_FAILURES = 5
 
 Logger = Callable[[str], None]
 Notifier = Callable[[str], None]
+#: 대상 하나가 잡히면 어느 나머지를 함께 막을지 정하는 열쇠. 모양은
+#: :meth:`AutoBooker._settle_key` 참조.
+SettleKey = tuple[object, ...]
 #: 홀드 하나가 잡힐 때마다 불립니다 — (구분, 여정 한 줄, 종류, 방향, 응답,
 #: 묶음 값, 원래 여정 전체 한 줄, 이 홀드가 가리키는 여정).
 #:
@@ -128,6 +133,12 @@ class Target:
     request: SearchRequest
     #: 화면에 그대로 찍는 이름 — ``"가는 편"``, ``"오는 편"``, 편도면 빈 문자열.
     label: str = ""
+    #: 구간마다 받아들일 좌석 등급. ``None`` 이면 옛 방식대로
+    #: :attr:`BookingOptions.seat_preference`(전체 묶음 공통)를 따릅니다.
+    #: 있으면 :meth:`~korail_booker.journeys.Journey.bookable_seat_classes` 로
+    #: 구간마다 독립적으로 고릅니다 — 길이는 ``journey.legs`` 와 같아야
+    #: 합니다.
+    seat_choices: tuple[frozenset[KorailSeatClass], ...] | None = None
 
     @property
     def direction(self) -> tuple[str, str, str]:
@@ -215,7 +226,7 @@ def reserve_once(
     journey: Journey,
     *,
     passengers: KorailPassengerCounts,
-    seat_class: KorailSeatClass,
+    seat_class: KorailSeatClass | Sequence[KorailSeatClass],
     live: bool = True,
 ) -> list[MutationPreview | ReservationHoldResponse]:
     """지금 자리가 있는 여정 하나를 **한 번만** 잡습니다.
@@ -223,6 +234,11 @@ def reserve_once(
     자동예매를 걸지 않고 바로 누르는 [예약] 이 이것을 부릅니다. 되풀이하지
     않는다는 점 말고는 :class:`AutoBooker` 의 예약과 같은 길입니다 — 같은
     consent(``reserve`` 하나), 같은 갈래, 같은 즉시예약 job.
+
+    ``seat_class`` 는 등급 하나(모든 구간이 같은 등급)이거나, 구간 수만큼의
+    나열(구간마다 다른 등급)입니다 — 대부분의 부르는 곳은 등급 하나만
+    씁니다. 구간마다 다른 등급은 :meth:`~korail_booker.journeys.Journey.
+    bookable_seat_classes` 로 고른 결과를 그대로 넘길 때 씁니다.
 
     **돌려주는 것이 목록인 이유**는 직접 조합 환승 때문입니다. 서버가 검증한
     조합이 아니면 한 건으로 사지 않고 구간마다 따로 삽니다
@@ -235,6 +251,12 @@ def reserve_once(
     이미 잡혀 있습니다** — 그 사실을 잃지 않게
     :class:`PartialTransferError` 에 담아 올립니다.
     """
+    if isinstance(seat_class, KorailSeatClass):
+        classes: tuple[KorailSeatClass, ...] = (seat_class,) * len(journey.legs)
+    else:
+        classes = tuple(seat_class)
+        if len(classes) != len(journey.legs):
+            raise ValueError("seat_class 나열은 구간 수와 같은 길이여야 합니다")
     consent = reserve_consent(live=live)
     if not books_as_one_reservation(journey):
         return _reserve_each_leg(
@@ -242,7 +264,7 @@ def reserve_once(
             journey,
             consent=consent,
             passengers=passengers,
-            seat_class=seat_class,
+            seat_classes=classes,
         )
     if journey.is_transfer:
         return [
@@ -250,7 +272,7 @@ def reserve_once(
                 journey.legs,
                 consent=consent,
                 passengers=passengers,
-                seat_classes=[seat_class] * len(journey.legs),
+                seat_classes=classes,
             )
         ]
     return [
@@ -258,7 +280,7 @@ def reserve_once(
             journey.first,
             consent=consent,
             passengers=passengers,
-            seat_class=seat_class,
+            seat_class=classes[0],
             job_type=KorailReservationJobType.IMMEDIATE,
         )
     ]
@@ -293,11 +315,17 @@ def _reserve_each_leg(
     *,
     consent: MutationConsent,
     passengers: KorailPassengerCounts,
-    seat_class: KorailSeatClass,
+    seat_classes: Sequence[KorailSeatClass],
 ) -> list[MutationPreview | ReservationHoldResponse]:
-    """구간마다 따로 예약합니다. 각 구간은 그냥 직통 열차 한 편입니다."""
+    """구간마다 따로 예약합니다. 각 구간은 그냥 직통 열차 한 편입니다.
+
+    ``seat_classes`` 는 구간 수만큼입니다 — 구간마다 독립적으로 고른
+    등급을 그대로 씁니다(같은 등급이 반복될 수도 있습니다).
+    """
     done: list[MutationPreview | ReservationHoldResponse] = []
-    for number, leg in enumerate(journey.legs, start=1):
+    for number, (leg, seat_class) in enumerate(
+        zip(journey.legs, seat_classes, strict=True), start=1
+    ):
         try:
             done.append(
                 client.reserve(
@@ -344,31 +372,77 @@ class AutoBooker:
         #: 화면이 목록을 만들려면 그 짝이 필요합니다.
         self._on_hold = on_hold
         self._relogins = 0
-        #: 방향마다 한 여정만 잡습니다. 잡힌 방향은 여기 들어가고 더는 보지
-        #: 않습니다 — 같은 방향을 두 번 잡으면 중복 예약입니다.
+        #: 결판 단위마다 한 번만 잡습니다. 잡힌 단위는 여기 들어가고 더는
+        #: 보지 않습니다 — 무엇이 "같은 단위" 인지는 :meth:`_settle_key`
+        #: 참조.
         #:
         #: 값이 **묶음**인 것은 직접 조합 환승 때문입니다. 서버가 검증하지 않은
-        #: 조합은 구간마다 따로 사므로 한 방향에 예약이 둘이 됩니다. 빈 묶음은
+        #: 조합은 구간마다 따로 사므로 한 단위에 예약이 둘이 됩니다. 빈 묶음은
         #: "미리보기라 아무것도 보내지 않았다" 는 뜻입니다.
-        self._settled: dict[
-            tuple[str, str, str], tuple[ReservationHoldResponse, ...]
-        ] = {}
+        self._settled: dict[SettleKey, tuple[ReservationHoldResponse, ...]] = {}
         #: 예약 폼 자체가 만들어지지 않는 대상. 되풀이해도 달라지지 않으므로
         #: 한 번 걸리면 빼고 갑니다(서버가 그 행에 필요한 값을 안 준 경우).
         self._unusable: set[JourneyKey] = set()
-        #: 예약 요청이 전송 중에 끊긴 방향. 결과를 알 수 없는 상태이므로
+        #: 예약 요청이 전송 중에 끊긴 단위. 결과를 알 수 없는 상태이므로
         #: "미리보기라 아무것도 안 보냈다" 와 섞이면 안 됩니다.
-        self._broken: set[tuple[str, str, str]] = set()
+        self._broken: set[SettleKey] = set()
 
     @property
     def directions(self) -> tuple[tuple[str, str, str], ...]:
+        """이 묶음이 노리는 방향들 — **화면에 보여 줄 개수일 뿐**입니다.
+
+        결판을 가르는 열쇠는 :meth:`_settle_key` 이고, 여기서는 쓰지
+        않습니다. 방향이 같아도 서로 다른 열차면 따로 잡힙니다.
+        """
         return tuple(dict.fromkeys(target.direction for target in self.targets))
+
+    def _settle_key(self, target: Target, journey: Journey) -> SettleKey:
+        """이 대상이 잡히면 함께 막아야 하는 나머지를 정하는 열쇠.
+
+        **직접 조합 환승('이어서')**은 구간마다 따로 삽니다. 1구간이 같고
+        2구간만 다른 후보가 여럿이면, 하나가 잡히는 순간 1구간은 이미 산
+        것입니다 — 나머지를 계속 시도하면 1구간을 한 번 더 삽니다. 그런
+        후보끼리만 묶어 막으려고 원래 방향과 1구간 신원을 함께 씁니다
+        (방향까지 넣는 것은 서로 다른 감시 묶음이 우연히 같은 1구간을
+        걸었을 때 섞이지 않게 하기 위해서입니다).
+
+        **그 밖의 모든 경우**(직통, 서버 추천 환승)는 후보마다 완전히
+        다른 예약입니다. 같은 방향(출발역·도착역·날짜)에 서로 다른 열차를
+        여러 편 골라 두었다면, 하나가 잡혔다고 나머지를 막을 이유가
+        없습니다 — 사람이 "이 방향 아무거나 하나" 가 아니라 "이 열차들을
+        각각" 담은 것이기 때문입니다. 예전에는 방향으로 막아서, 같은
+        방향의 서로 다른 열차 여럿을 감시하다 하나가 잡히면 나머지 감시가
+        전부 끝나 버렸습니다(실제로 그렇게 담아 두면 곤란하다는 신고가
+        있었습니다). 그래서 정확한 열차 조합(``Journey.key()``)으로만
+        막습니다.
+        """
+        if journey.is_transfer and journey.source is JourneySource.CUSTOM_TRANSFER:
+            return ("leg1", target.direction, first_leg_key(journey))
+        return ("journey", journey.key())
+
+    def _bookable_classes(
+        self, target: Target, journey: Journey
+    ) -> tuple[KorailSeatClass, ...] | None:
+        """이 대상을 지금 어떤 등급으로 잡을 수 있는지. 못 잡으면 ``None``.
+
+        :attr:`Target.seat_choices` 가 있으면 구간마다 독립적으로 고릅니다
+        (:meth:`~korail_booker.journeys.Journey.bookable_seat_classes`) —
+        화면에서 이 대상만을 위해 고른 값입니다. 없으면 옛 방식대로 이
+        묶음 전체의 :attr:`BookingOptions.seat_preference` 를 모든 구간에
+        똑같이 적용합니다.
+        """
+        if target.seat_choices is not None:
+            return journey.bookable_seat_classes(target.seat_choices)
+        seat_class = journey.bookable_seat_class(self.options.seat_preference)
+        if seat_class is None:
+            return None
+        return (seat_class,) * len(journey.legs)
 
     def _pending(self) -> tuple[Target, ...]:
         return tuple(
             target
             for target in self.targets
-            if target.direction not in self._settled
+            if self._settle_key(target, target.journey) not in self._settled
             and target.journey.key() not in self._unusable
         )
 
@@ -536,39 +610,49 @@ class AutoBooker:
             return None
         self._report(poll, fresh)
         for target, journey in fresh:
-            if target.direction in self._settled:
+            if self._settle_key(target, journey) in self._settled:
                 continue
-            seat_class = journey.bookable_seat_class(self.options.seat_preference)
-            if seat_class is None:
+            seat_classes = self._bookable_classes(target, journey)
+            if seat_classes is None:
                 continue
-            result = self._try_reserve(target, journey, seat_class)
+            result = self._try_reserve(target, journey, seat_classes)
             if result is not None:
                 return result
         if self.options.allow_standby:
             for target, journey in fresh:
-                if target.direction not in self._settled and is_standby_available(
-                    journey
-                ):
+                if self._settle_key(
+                    target, journey
+                ) not in self._settled and is_standby_available(journey):
                     result = self._try_standby(target, journey)
                     if result is not None:
                         return result
         return None
 
-    def _open_directions(self) -> tuple[tuple[str, str, str], ...]:
-        """아직 결판이 안 난 방향. **노릴 대상이 남아 있어야** 셉니다.
+    def _open_settle_keys(self) -> tuple[SettleKey, ...]:
+        """아직 결판이 안 난 단위. **노릴 대상이 남아 있어야** 셉니다.
 
-        예전에는 잡힌 방향만 뺐습니다. 그래서 한 방향의 대상이 전부 '예약 폼을
-        만들 수 없음' 으로 빠지면, 그 방향은 영영 안 잡히는데도 끝나지 않은
+        예전에는 잡힌 것만 뺐습니다. 그래서 한 단위의 대상이 전부 '예약 폼을
+        만들 수 없음' 으로 빠지면, 그 단위는 영영 안 잡히는데도 끝나지 않은
         것으로 세어 감시가 빈 목록을 들고 계속 돌았습니다.
         """
-        alive = {target.direction for target in self._pending()}
-        return tuple(d for d in self.directions if d not in self._settled and d in alive)
+        alive = {self._settle_key(target, target.journey) for target in self._pending()}
+        all_keys = dict.fromkeys(
+            self._settle_key(target, target.journey) for target in self.targets
+        )
+        return tuple(key for key in all_keys if key not in self._settled and key in alive)
 
     def _finish(self, kind: str) -> BookingResult | None:
-        """방향이 다 끝났으면 마무리합니다. 남았으면 계속 지켜봅니다."""
-        remaining = self._open_directions()
+        """대상이 다 끝났으면 마무리합니다. 남았으면 계속 지켜봅니다.
+
+        **하나가 잡혔다고 끝내지 않습니다.** 서로 다른 열차를 여럿 감시하고
+        있었다면, 그중 하나가 열려 잡혔다는 것은 나머지 감시를 그만둘 이유가
+        아닙니다 — 사람이 각각을 노리고 담았을 수 있습니다. 이 묶음이 정말
+        끝나는 것은 아래 갈래(중지·시간 끝·되풀이해도 소용없는 실패)뿐이고,
+        그 밖에는 대상이 전부 결판 날 때까지 계속 지켜봅니다.
+        """
+        remaining = self._open_settle_keys()
         if remaining:
-            self.say(f"    남은 방향 {len(remaining)}개를 계속 지켜봅니다")
+            self.say(f"    남은 열차 {len(remaining)}개를 계속 지켜봅니다")
             return None
         holds = tuple(hold for group in self._settled.values() for hold in group)
         if not holds:
@@ -597,13 +681,24 @@ class AutoBooker:
 
     # -- 예약 ----------------------------------------------------------------
 
+    @staticmethod
+    def _seat_label(seat_classes: tuple[KorailSeatClass, ...]) -> str:
+        """로그·홀드에 적을 등급 문구. 구간마다 다르면 그것도 보여 줍니다."""
+        names = tuple(
+            "특실" if seat_class is KorailSeatClass.SPECIAL else "일반실"
+            for seat_class in seat_classes
+        )
+        if len(set(names)) == 1:
+            return names[0]
+        return " · ".join(f"{index + 1}구간 {name}" for index, name in enumerate(names))
+
     def _try_reserve(
         self,
         target: Target,
         journey: Journey,
-        seat_class: KorailSeatClass,
+        seat_classes: tuple[KorailSeatClass, ...],
     ) -> BookingResult | None:
-        label = "특실" if seat_class is KorailSeatClass.SPECIAL else "일반실"
+        label = self._seat_label(seat_classes)
         # 다시 조회한 여정에는 **이번 조회의** 출처가 붙어 있습니다. 사는 방법은
         # 사람이 담을 때 본 것을 따릅니다 — 확인 창이 "구간마다 따로 삽니다" 라고
         # 말해 놓고 한 건으로 사면 약속이 깨집니다. 구간의 값은 방금 받은 것을
@@ -624,11 +719,11 @@ class AutoBooker:
                 self.client,
                 journey,
                 passengers=target.request.passengers,
-                seat_class=seat_class,
+                seat_class=seat_classes,
                 live=self.options.live,
             )
         except PartialTransferError as exc:
-            return self._settle_partial(target, journey, exc)
+            return self._settle_partial(target, journey, exc, seat_classes=seat_classes)
         except (KorailSeatUnavailableError, KorailSoldOutError) as exc:
             self.say(f"    놓쳤습니다({exc.code}). 계속 지켜봅니다")
             return None
@@ -656,11 +751,17 @@ class AutoBooker:
             # 서버가 이 조합 자체를 거절했습니다(예: ERR911193 환승최소허용시간
             # 미달). 되풀이해도 답이 달라지지 않으므로 감시에서 뺍니다.
             return self._drop_unusable(target, f"{exc.code}: {exc.message}")
+        # 구간마다 다른 등급을 사람이 직접 골랐을 때만 문구에 등급을
+        # 덧붙입니다 — 옛 방식(묶음 공통 등급)의 문구는 그대로 둡니다.
+        chosen = target.seat_choices is not None
         return self._settle(
             results,
             target,
             journey,
-            kind="좌석 예약" if one_go else "좌석 예약(구간별)",
+            kind=(f"좌석 예약({label})" if chosen else "좌석 예약")
+            if one_go
+            else "좌석 예약(구간별)",
+            seat_classes=seat_classes if chosen else None,
         )
 
     def _settle_broken(
@@ -672,11 +773,12 @@ class AutoBooker:
         """예약 요청이 전송 중에 끊겼습니다. **결과를 알 수 없습니다.**
 
         서버가 그 요청을 받아 예약을 만들었는지 아닌지 판단할 근거가 없습니다.
-        그래서 이 방향은 여기서 끝내고 크게 알립니다 — 다시 보내면 중복 예약이
+        그래서 이 단위는 여기서 끝내고 크게 알립니다 — 다시 보내면 중복 예약이
         될 수 있고, 조용히 넘어가면 사람이 생긴 예약을 모른 채 기한을 넘깁니다.
         """
-        self._broken.add(target.direction)
-        self._settled[target.direction] = ()
+        key = self._settle_key(target, journey)
+        self._broken.add(key)
+        self._settled[key] = ()
         self.announce(
             "⚠️ 예약 요청이 전송 중에 끊겼습니다\n"
             f"{target.describe()}\n"
@@ -704,6 +806,8 @@ class AutoBooker:
         target: Target,
         journey: Journey,
         exc: PartialTransferError,
+        *,
+        seat_classes: tuple[KorailSeatClass, ...] | None = None,
     ) -> BookingResult | None:
         """앞 구간만 잡히고 뒤 구간에서 막혔습니다.
 
@@ -714,18 +818,25 @@ class AutoBooker:
         취소 권한을 아예 열지 않습니다.
         """
         held = tuple(h for h in exc.held if isinstance(h, ReservationHoldResponse))
-        self._settled[target.direction] = held
+        key = self._settle_key(target, journey)
+        self._settled[key] = held
         # 반만 잡혀도 한 번의 시도입니다 — 같은 batch 로 묶습니다.
         batch = uuid.uuid4().hex[:12]
         for number, hold in enumerate(held, start=1):
             if self._on_hold is not None:
+                # 구간마다 다른 등급을 사람이 직접 골랐을 때만 문구에 등급을
+                # 덧붙입니다 — 옛 방식의 문구는 그대로 둡니다.
+                kind = f"좌석 예약({number}구간)"
+                if seat_classes is not None:
+                    leg_label = self._seat_label((seat_classes[number - 1],))
+                    kind = f"좌석 예약({number}구간·{leg_label})"
                 # **여정 전체가 아니라 그 구간**입니다. 여정 한 줄로 적으면
                 # 잡은 예약 목록이 동탄→동대구를 다 샀다고 말하는데, 실제로는
                 # 동탄→대전 하나뿐입니다.
                 self._on_hold(
                     target.label,
                     journey.leg_hold_label(number - 1, partial=True),
-                    f"좌석 예약({number}구간)",
+                    kind,
                     target.direction,
                     hold,
                     batch,
@@ -836,15 +947,17 @@ class AutoBooker:
         journey: Journey,
         *,
         kind: str,
+        seat_classes: tuple[KorailSeatClass, ...] | None = None,
     ) -> BookingResult | None:
-        """한 방향이 끝났습니다. 남은 방향이 있으면 계속 지켜봅니다.
+        """이 대상이 끝났습니다. 남은 대상이 있으면 계속 지켜봅니다.
 
         ``results`` 가 여럿인 것은 구간마다 따로 산 경우입니다 — 그때는 예약이
         구간 수만큼 생기고, 결제 기한도 저마다 따로입니다.
         """
+        key = self._settle_key(target, journey)
         previews = [item for item in results if isinstance(item, MutationPreview)]
         if previews:
-            self._settled[target.direction] = ()
+            self._settled[key] = ()
             routes = ", ".join(preview.route for preview in previews)
             self.say(
                 f"{kind} 가능 — 하지만 아무것도 보내지 않았습니다(미리보기).\n"
@@ -854,7 +967,7 @@ class AutoBooker:
         holds = tuple(
             item for item in results if isinstance(item, ReservationHoldResponse)
         )
-        self._settled[target.direction] = holds
+        self._settled[key] = holds
         if not holds:
             self.say(f"{kind} 응답에 예약이 없습니다 — 코레일 앱에서 확인하세요")
             return self._finish(kind)
@@ -867,8 +980,15 @@ class AutoBooker:
         for number, hold in enumerate(holds, start=1):
             # 구간마다 따로 샀으면 '여정' 칸도 '종류' 칸도 구간별로 다르게
             # 적습니다. 여정 한 줄을 그대로 두 번 쓰면 PNR 도 운임도 다른데
-            # 칸만 똑같아 보여 사람이 중복 예약으로 오인합니다.
-            hold_kind = f"좌석 예약({number}구간)" if split else kind
+            # 칸만 똑같아 보여 사람이 중복 예약으로 오인합니다. 구간마다
+            # 다른 등급을 사람이 직접 골랐을 때만 그 등급도 덧붙입니다.
+            if split:
+                hold_kind = f"좌석 예약({number}구간)"
+                if seat_classes is not None:
+                    leg_label = self._seat_label((seat_classes[number - 1],))
+                    hold_kind = f"좌석 예약({number}구간·{leg_label})"
+            else:
+                hold_kind = kind
             hold_summary = (
                 journey.leg_hold_label(number - 1) if split else journey.summary()
             )

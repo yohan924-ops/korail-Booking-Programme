@@ -1183,27 +1183,52 @@ def test_a_round_trip_holds_one_per_direction_and_then_stops():
 
 
 def test_both_directions_finish_together():
-    recorder = _Recorder(
-        {SEARCH: _search_reply([_row("00101", general="11")]),
-         RESERVE: _reserve_reply()}
-    )
-    client = _client(recorder)
+    """왕복은 가는 편·오는 편이 서로 다른 열차라 둘 다 따로 잡힙니다."""
+    reserved: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == RESERVE:
+            reserved.append(RESERVE)
+            return httpx.Response(200, json=_reserve_reply())
+        body = httpx.QueryParams(request.content.decode())
+        going = body.get("txtGoStart") == "서울"
+        row = (
+            _row("00101", general="11")
+            if going
+            else _row("00101", departure="부산", arrival="서울",
+                      departure_code="0020", arrival_code="0001", general="11")
+        )
+        return httpx.Response(200, json=_search_reply([row]))
+
+    client = KorailClient(transport=httpx.MockTransport(handler))
+    client.session.current = KorailSession(jsessionid="synthetic-session")
     booker = AutoBooker(
         client,
         [
             _target(_journey(_summary(general="11")),
                     _request(departure="서울", arrival="부산"), "가는 편"),
-            _target(_journey(_summary(general="11")),
-                    _request(departure="부산", arrival="서울", date="20990105"),
-                    "오는 편"),
+            # 오는 편은 역이 바뀐 실제 반대 방향입니다 — 여정 열쇠가 가는
+            # 편과 우연히 같아지면(둘 다 그냥 "00101"), 정확한 조합으로
+            # 막는 새 규칙이 이것을 "같은 열차" 로 잘못 보게 됩니다.
+            _target(
+                _journey(
+                    TrainSummary.from_raw(
+                        _row("00101", departure="부산", arrival="서울",
+                             departure_code="0020", arrival_code="0001",
+                             general="11")
+                    )
+                ),
+                _request(departure="부산", arrival="서울", date="20990105"),
+                "오는 편",
+            ),
         ],
         BookingOptions(poll_interval_s=10.0, live=True),
         log=lambda message: None,
     )
     result = booker.run(threading.Event())
     assert result.outcome is Outcome.HELD
-    assert len(result.holds) == 2          # 방향마다 하나씩
-    assert recorder.count(RESERVE) == 2    # 그리고 딱 둘뿐
+    assert len(result.holds) == 2          # 서로 다른 열차이니 둘 다
+    assert len(reserved) == 2              # 그리고 딱 둘뿐
 
 
 def test_one_search_per_direction_not_per_target():
@@ -1717,6 +1742,59 @@ def test_the_target_table_carries_the_seat_columns_too():
     assert "journey.extras()" in row_values
 
 
+def test_all_three_tables_show_the_departure_and_arrival_stations():
+    """열차 조회·예매 대상·잡은 예약 모두 출발역·도착역 칸이 있어야 합니다.
+
+    시각(출발·도착)만으로는 어디서 어디로 가는 열차인지 알 수 없습니다 —
+    특히 여러 역을 오가는 목록을 한눈에 훑을 때는 역 이름이 더 먼저
+    보여야 합니다.
+    """
+    source = _ui_source()
+    for name in ("출발역", "도착역"):
+        assert f'("{name}"' in source, name
+
+    row_values = _ui_function("_journey_row_values")
+    assert "journey.first.departure_station_name" in row_values
+    assert "journey.last.arrival_station_name" in row_values
+
+    leg_values = _ui_function("_leg_row_values")
+    assert "leg.departure_station_name" in leg_values
+    assert "leg.arrival_station_name" in leg_values
+
+    # 칸 자리도 세 표가 같은 순서를 씁니다 — 출발역이 출발(시각) 바로 앞,
+    # 도착역이 도착(시각) 바로 앞입니다.
+    for layout_name in ("TARGET_LAYOUT", "HOLD_LAYOUT"):
+        layout = next(
+            ast.literal_eval(ast.unparse(node.value))
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == layout_name
+                for target in node.targets
+            )
+        )
+        names = [name for name, _width, _anchor in layout]
+        assert names.index("출발역") == names.index("출발") - 1, layout_name
+        assert names.index("도착역") == names.index("도착") - 1, layout_name
+
+
+def test_the_leg_picker_popup_lists_candidates_like_the_other_three_tables():
+    """'이어지는 구간 고르기' 팝업도 문장 한 줄이 아니라 표로 보여 줍니다.
+
+    예전에는 :class:`tkinter.Listbox` 에 ``journey.summary()`` 문장만
+    나열해, 정작 고를 때는 다른 세 표보다 못한 정보로 골라야 했습니다.
+    """
+    body = _ui_function("_offer_group_picker")
+    assert "tk.Listbox" not in body
+    assert "ttk.Treeview(" in body
+    assert "columns=tuple(TREE_COLUMNS)" in body
+    assert "self._configure_journey_columns(tree" in body
+    assert "self._journey_row_values(candidate.label, candidate.journey)" in body
+    assert "self._leg_row_values(candidate.journey, leg_index)" in body
+    # +/- 를 눌러 접고 펴는 것은 그대로 두고, 담지 않습니다.
+    assert "self._on_expander(tree, event)" in body
+
+
 # --- 바로 예약 ------------------------------------------------------------------
 
 
@@ -2000,13 +2078,21 @@ def test_selected_only_start_and_stop_both_exist():
 
 
 def test_a_watched_target_cannot_be_removed_from_the_list():
-    """빼도 그 묶음은 계속 노립니다 — 목록에 없는데 예약이 잡히면 알 수 없습니다."""
+    """빼도 그 묶음은 계속 노립니다 — 목록에 없는데 예약이 잡히면 알 수 없습니다.
+
+    감시 중이 아닌 것까지 얹어 막지는 않습니다 — 감시 중인 것만 남기고
+    나머지는 그대로 뺍니다(빼기·비우기 둘 다).
+    """
     body = _ui_function("remove_targets")
     assert "watching = self.watching_keys()" in body
-    assert "감시 중인 열차는 뺄 수 없습니다" in body
+    assert "감시 중인 열차 {len(busy)}편은 빼지 않았습니다" in body
+    assert "removable = [" in body
+    assert "if self.targets[index].journey.key() not in watching" in body
 
     cleared = _ui_function("clear_targets")
-    assert "self.any_running()" in cleared
+    assert "watching = self.watching_keys()" in cleared
+    assert "kept = [t for t in self.targets if t.journey.key() in watching]" in cleared
+    assert "self.targets[:] = kept" in cleared
 
 
 def test_every_booking_log_line_says_which_watch_it_came_from():
@@ -3107,8 +3193,8 @@ def test_the_watcher_stops_after_a_partial_hold_instead_of_trying_again():
         for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef) and node.name == "_settle_partial"
     )
-    # 이 방향은 여기서 끝냅니다. 계속 지켜보면 앞 구간을 또 잡습니다.
-    assert "self._settled[target.direction] = held" in settle
+    # 이 단위는 여기서 끝냅니다. 계속 지켜보면 앞 구간을 또 잡습니다.
+    assert "self._settled[key] = held" in settle
     assert "self._finish(" in settle
 
 
@@ -3193,6 +3279,72 @@ def test_the_watcher_buys_a_custom_combination_one_leg_at_a_time():
     # 찍혀서 중복 예약처럼 보이지 않습니다.
     assert made == ["좌석 예약(1구간)", "좌석 예약(2구간)"]
     assert len(result.holds) == 2
+
+
+def test_a_journey_can_pick_a_different_seat_class_per_leg():
+    """1구간은 일반실, 2구간은 특실 — 구간마다 독립적으로 고를 수 있습니다."""
+    first = _row("00009", arrival="대전", arrival_code="0010", arrival_time="091500",
+                 general="11", h_spe_rsv_cd="13")
+    second = _row("00503", departure="대전", departure_code="0010",
+                  departure_time="093700", arrival_time="110500",
+                  general="13", h_spe_rsv_cd="11")
+    journey = _journey(
+        TrainSummary.from_raw(first),
+        TrainSummary.from_raw(second),
+        source=J.JourneySource.CUSTOM_TRANSFER,
+    )
+    # 1구간은 일반실만 열려 있고, 2구간은 특실만 열려 있습니다.
+    assert journey.bookable_seat_classes(
+        (frozenset({KorailSeatClass.GENERAL}), frozenset({KorailSeatClass.SPECIAL}))
+    ) == (KorailSeatClass.GENERAL, KorailSeatClass.SPECIAL)
+    # 반대로 요구하면(1구간 특실만, 2구간 일반실만) 둘 다 못 잡습니다.
+    assert journey.bookable_seat_classes(
+        (frozenset({KorailSeatClass.SPECIAL}), frozenset({KorailSeatClass.GENERAL}))
+    ) is None
+
+
+def test_the_watcher_honours_a_targets_own_seat_choice():
+    """예매 대상마다 고른 좌석 등급이 있으면, 묶음 공통 설정 대신 그것을 씁니다."""
+    first = _row("00009", arrival="대전", arrival_code="0010", arrival_time="091500",
+                 general="11", h_spe_rsv_cd="13")
+    second = _row("00503", departure="대전", departure_code="0010",
+                  departure_time="093700", arrival_time="110500",
+                  general="13", h_spe_rsv_cd="11")
+    recorder = _Recorder({SEARCH: _search_reply([first, second]),
+                          RESERVE: _reserve_reply()})
+    journey = _journey(
+        TrainSummary.from_raw(first),
+        TrainSummary.from_raw(second),
+        source=J.JourneySource.CUSTOM_TRANSFER,
+    )
+    target = Target(
+        journey=journey,
+        request=_request(include_direct=False, include_transfer=True),
+        seat_choices=(
+            frozenset({KorailSeatClass.GENERAL}),
+            frozenset({KorailSeatClass.SPECIAL}),
+        ),
+    )
+    made: list[str] = []
+    booker = AutoBooker(
+        _client(recorder),
+        [target],
+        # 묶음 공통 설정은 특실만입니다 — 대상 자신의 선택이 이를 덮어써야
+        # 두 구간이 모두 잡힙니다(공통 설정을 그대로 썼다면 1구간은 특실이
+        # 없어 영원히 못 잡습니다).
+        BookingOptions(poll_interval_s=10.0, live=True, seat_preference=J.SeatPreference.SPECIAL),
+        log=lambda message: None,
+        on_hold=lambda label, summary, kind, direction, hold, group, full, hj: made.append(
+            kind
+        ),
+    )
+
+    result = booker.run(threading.Event())
+
+    assert result.outcome is Outcome.HELD
+    assert recorder.count(RESERVE) == 2
+    # 종류 칸에 구간별로 실제 쓰인 등급이 보입니다.
+    assert made == ["좌석 예약(1구간·일반실)", "좌석 예약(2구간·특실)"]
 
 
 def test_a_half_finished_custom_combination_stops_instead_of_retrying():
@@ -3329,10 +3481,56 @@ def test_a_broken_reserve_post_is_never_retried():
 
 
 def test_a_direction_with_nothing_left_to_watch_does_not_spin():
-    """폼을 못 만들어 전부 빠진 방향을 '아직 안 끝남' 으로 세면 감시가 헛돕니다."""
+    """폼을 못 만들어 전부 빠진 단위를 '아직 안 끝남' 으로 세면 감시가 헛돕니다."""
     booker = (APP_DIR / "korail_booker" / "autobook.py").read_text(encoding="utf-8")
-    assert "def _open_directions" in booker
-    assert "alive = {target.direction for target in self._pending()}" in booker
+    assert "def _open_settle_keys" in booker
+    assert (
+        "alive = {self._settle_key(target, target.journey) for target in "
+        "self._pending()}" in booker
+    )
+
+
+def test_one_success_does_not_end_a_watch_over_different_trains():
+    """서로 다른 열차를 여럿 감시하면, 하나가 잡혀도 나머지는 계속 지켜봅니다.
+
+    예전에는 방향(출발역·도착역·날짜)이 같으면 하나가 잡히는 순간 감시
+    전체가 끝났습니다. 사람이 서로 다른 열차 여러 편을 각각 잡으려고
+    담아 두었다면, 그중 하나가 열렸다고 나머지 감시를 멈출 이유가
+    없습니다.
+    """
+    first = _row("00101", general="11")
+    second = _row("00103", departure_time="090000", arrival_time="110000",
+                  general="13")
+    recorder = _Recorder(
+        {SEARCH: _search_reply([first, second]), RESERVE: _reserve_reply()}
+    )
+    booker = AutoBooker(
+        _client(recorder),
+        [
+            _target(_journey(TrainSummary.from_raw(first))),
+            _target(_journey(TrainSummary.from_raw(second))),
+        ],
+        BookingOptions(poll_interval_s=10.0, live=True, watch_minutes=1),
+        log=lambda message: None,
+    )
+    booker._sleep = lambda stop, deadline: None  # type: ignore[method-assign]
+    stop = threading.Event()
+    polls: list[int] = []
+    original = booker._poll
+
+    def limited():
+        polls.append(1)
+        if len(polls) > 2:
+            stop.set()
+        return original()
+
+    booker._poll = limited  # type: ignore[method-assign]
+    result = booker.run(stop)
+    # 00101 은 열려서 잡혔고, 00103 은 매진이라 못 잡았습니다 — 감시는
+    # (예약 성공이 아니라) 사람이 중지시켜서 끝났습니다.
+    assert result.outcome is Outcome.STOPPED
+    assert len(result.holds) == 1
+    assert recorder.count(RESERVE) == 1
 
 
 def test_the_request_decides_which_targets_share_a_search():
@@ -4061,3 +4259,67 @@ def test_query_locked_flag_starts_false_and_is_set_before_widgets_move():
     """플래그 자체가 있어야 하고, 초기값은 잠겨 있지 않은 상태입니다."""
     source = _ui_source()
     assert "self._query_locked = False" in source
+
+
+# --- 여정마다(구간마다) 좌석 등급 고르기 -----------------------------------------
+
+
+def test_bookable_seat_classes_picks_independently_per_leg():
+    """구간마다 다른 좌석 등급을 받아들일 수 있고, 하나라도 못 고르면 전체가 없습니다."""
+    first = _summary(train_no="00301", departure="동탄", arrival="대전",
+                     arrival_code="0010", general="11", h_spe_rsv_cd="13")
+    second = _summary(train_no="00003", departure="대전", arrival="동대구",
+                      departure_code="0010", arrival_code="0015",
+                      general="13", h_spe_rsv_cd="11")
+    journey = _journey(first, second, source=J.JourneySource.CUSTOM_TRANSFER)
+
+    # 1구간은 일반실만 열려 있고, 2구간은 특실만 열려 있습니다 — 둘 다
+    # 받아들이면(무관) 그 열린 등급을 각자 고릅니다.
+    both = frozenset({KorailSeatClass.GENERAL, KorailSeatClass.SPECIAL})
+    assert journey.bookable_seat_classes((both, both)) == (
+        KorailSeatClass.GENERAL, KorailSeatClass.SPECIAL,
+    )
+    # 1구간에 특실만 받아들이게 하면(그런데 1구간엔 특실이 없음) 전체가 None.
+    assert journey.bookable_seat_classes(
+        (frozenset({KorailSeatClass.SPECIAL}), both)
+    ) is None
+
+    with pytest.raises(ValueError):
+        journey.bookable_seat_classes((both,))  # 구간 수와 안 맞음
+
+
+def test_seat_pick_checkboxes_default_to_the_old_behaviour():
+    """체크박스를 안 건드리면(전부 체크=무관) 옛 방식(묶음 공통 설정)을 그대로 씁니다.
+
+    하나라도 떼야만 그 여정에 좌석 선택이 굳습니다 — 그래야 지금까지 이
+    콤보박스를 몰랐던 사람도 똑같이 씁니다.
+    """
+    source = _ui_source()
+    for name in ("pick_general", "pick_special", "pick_leg1_general",
+                 "pick_leg1_special", "pick_leg2_general", "pick_leg2_special"):
+        assert f"self.{name} = tk.BooleanVar(value=True)" in source, name
+
+    body = _ui_function("_seat_choices_for")
+    assert "return None" in body
+    assert "_BOTH_SEAT_CLASSES" in body
+    assert "raise ValueError(" in body
+
+    picked = _ui_function("_add_picked_targets")
+    assert "self._seat_choices_for(target.journey)" in picked
+    assert "replace(target, seat_choices=choices)" in picked
+
+
+def test_reserve_now_also_honours_a_targets_own_seat_choice():
+    """[바로 예약] 도 자동예매와 같은 규칙을 씁니다 — 담을 때 고른 등급이
+    있으면 그것을, 없으면 지금 좌석 콤보박스를 씁니다."""
+    body = _ui_function("on_reserve_now")
+    assert "if target.seat_choices is not None:" in body
+    assert "journey.bookable_seat_classes(target.seat_choices)" in body
+    assert "journey.bookable_seat_class(preference)" in body
+
+
+def test_the_target_status_column_shows_a_fixed_seat_choice():
+    """예매 대상 목록에서, 그 여정에 굳힌 좌석 선택이 보여야 나중에도 압니다."""
+    state = _ui_function("_target_state")
+    assert "target.seat_choices is not None" in state
+    assert "self._seat_choice_text(target.seat_choices)" in state

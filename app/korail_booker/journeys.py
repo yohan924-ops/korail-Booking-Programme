@@ -479,6 +479,42 @@ class Journey:
                 return seat_class
         return None
 
+    def leg_seat_available(self, index: int, seat_class: KorailSeatClass) -> bool:
+        """이 구간 **하나만** 볼 때 이 등급이 지금 열려 있는가.
+
+        :meth:`seat_state` 는 모든 구간이 같이 열려야 참이 됩니다 — 구간마다
+        다른 등급을 따로 고를 때는(:meth:`bookable_seat_classes`) 그 구간
+        하나만의 상태가 필요합니다.
+        """
+        code = _reservation_code(self.legs[index], seat_class)
+        return code == AVAILABLE_SEAT_CODE
+
+    def bookable_seat_classes(
+        self, choices: Sequence[frozenset[KorailSeatClass]]
+    ) -> tuple[KorailSeatClass, ...] | None:
+        """구간마다 **다른** 등급을 허용합니다. 없으면(어느 구간이든 하나도
+        못 고르면) 전체가 ``None`` 입니다.
+
+        ``choices[i]`` 는 i 번째 구간이 받아들일 등급들이고, 그중 지금 열린
+        것을 하나 고릅니다(일반실을 먼저 봅니다). 직접 조합 환승은 구간마다
+        따로 사므로 이렇게 구간별로 골라도 안전합니다 — 서버 추천 환승은
+        한 PNR 로 같이 사기 때문에(:func:`books_as_one_reservation`), 화면은
+        그 경우 모든 구간에 같은 ``choices`` 를 넘겨야 합니다.
+        """
+        if len(choices) != len(self.legs):
+            raise ValueError("choices 는 구간 수와 같은 길이여야 합니다")
+        chosen: list[KorailSeatClass] = []
+        for index, allowed in enumerate(choices):
+            pick: KorailSeatClass | None = None
+            for seat_class in (KorailSeatClass.GENERAL, KorailSeatClass.SPECIAL):
+                if seat_class in allowed and self.leg_seat_available(index, seat_class):
+                    pick = seat_class
+                    break
+            if pick is None:
+                return None
+            chosen.append(pick)
+        return tuple(chosen)
+
     def key(self) -> JourneyKey:
         """다시 조회했을 때 같은 여정인지 알아보는 값.
 

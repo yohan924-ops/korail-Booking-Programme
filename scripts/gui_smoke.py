@@ -99,7 +99,7 @@ def main() -> int:
     from korail_booker.journeys import Journey, JourneySource
     from korail_booker.search import TRANSFER_CUSTOM, SearchRequest
 
-    from korail_mobile_api import KorailPassengerCounts, TrainSummary
+    from korail_mobile_api import KorailPassengerCounts, KorailSeatClass, TrainSummary
 
     def train(**kwargs: str) -> TrainSummary:
         return TrainSummary.from_raw(_raw_train(**kwargs))
@@ -298,14 +298,14 @@ def main() -> int:
     picker = new_windows[0]
     check("팝업 제목이 '이어지는 구간 고르기' 다",
           picker.title() == "이어지는 구간 고르기", picker.title())
-    listboxes = find_widgets(picker, lambda w: isinstance(w, tk.Listbox))
-    listbox = listboxes[0] if listboxes else None
+    picker_trees = find_widgets(picker, lambda w: isinstance(w, ttk.Treeview))
+    picker_tree = picker_trees[0] if picker_trees else None
+    picker_rows = picker_tree.get_children() if picker_tree is not None else ()
     check("팝업 목록에 후보가 다 있다",
-          listbox is not None and listbox.size() == len(results),
-          listbox.size() if listbox is not None else None)
-    if listbox is not None:
-        listbox.selection_clear(0, "end")
-        listbox.selection_set(1)
+          picker_tree is not None and len(picker_rows) == len(results),
+          len(picker_rows) if picker_tree is not None else None)
+    if picker_tree is not None and picker_rows:
+        picker_tree.selection_set(picker_rows[1])
         pick_buttons = find_widgets(
             picker, lambda w: isinstance(w, ttk.Button) and w.cget("text") == "고른 것 담기"
         )
@@ -351,8 +351,8 @@ def main() -> int:
           len(target_children))
     row = app.target_list.item(target_children[0], "values")
     check("상태 칸이 구간별 예약임을 말한다", "구간별" in row[0], row[0])
-    # 칸 순서: 상태, 구분, 열차, 출발, 도착, 총 소요, 환승 대기, ...
-    check("환승 대기 칸이 촉박한 환승을 경고한다", "촉박" in row[6], row[6])
+    # 칸 순서: 상태, 구분, 열차, 출발역, 출발, 도착역, 도착, 총 소요, 환승 대기, ...
+    check("환승 대기 칸이 촉박한 환승을 경고한다", "촉박" in row[8], row[8])
 
     # 부모 줄을 고르면 그 아래 전부를 고른 것으로 칩니다.
     app.target_list.selection_set(target_top[0])
@@ -451,6 +451,42 @@ def main() -> int:
           app.targets and app.targets[0].direction == ("대전", "동대구", "20990101"),
           app.targets[0].direction if app.targets else None)
 
+    # -- 좌석 체크박스: 기본값(무관)은 None, 하나라도 떼면 굳는다 ------------
+    app.targets = []
+    app.tree.selection_set(solo_row)
+    app.add_targets()
+    root.update()
+    check("체크박스를 안 건드리면 좌석 선택이 옛 방식(None)이다",
+          app.targets and app.targets[0].seat_choices is None,
+          app.targets[0].seat_choices if app.targets else None)
+
+    app.targets = []
+    app.pick_leg1_special.set(False)  # 1구간은 일반실만
+    app.pick_leg2_general.set(False)  # 2구간은 특실만
+    app.tree.selection_set(solo_row)
+    app.add_targets()
+    root.update()
+    check("1구간/2구간을 따로 고르면 그 여정에 굳는다",
+          app.targets
+          and app.targets[0].seat_choices
+          == (frozenset({KorailSeatClass.GENERAL}), frozenset({KorailSeatClass.SPECIAL})),
+          app.targets[0].seat_choices if app.targets else None)
+    app.pick_leg1_special.set(True)
+    app.pick_leg2_general.set(True)
+
+    app.targets = []
+    app.pick_leg1_general.set(False)
+    app.pick_leg1_special.set(False)
+    shown.clear()
+    app.tree.selection_set(solo_row)
+    app.add_targets()
+    root.update()
+    check("구간에 등급을 하나도 안 고르면 담지 않고 알린다",
+          not app.targets and any("하나도 안 골랐습니다" in message for _t, message in shown),
+          (app.targets, shown))
+    app.pick_leg1_general.set(True)
+    app.pick_leg1_special.set(True)
+
     app.targets = []
     app.sync_target_list()
 
@@ -491,6 +527,36 @@ def main() -> int:
     app.holds = []
     app.sync_target_list()
     app.sync_holds()
+
+    # -- 감시 중인 예매 대상은 빼거나 비울 수 없는가(감시 중이 아닌 것은 된다) --
+    app.targets = [results[0], results[1]]
+    app.sync_target_list()
+    app.watches = [
+        types.SimpleNamespace(
+            running=True,
+            keys=frozenset([results[0].journey.key()]),
+            tag="A",
+            options=types.SimpleNamespace(poll_interval_s=30.0),
+            remaining=lambda now: "무제한",
+        )
+    ]  # type: ignore[list-item]
+    app.target_list.selection_set(*app.target_list.get_children())
+    app.remove_targets()
+    root.update()
+    check("감시 중인 예매 대상은 [빼기] 로 안 빠진다",
+          results[0] in app.targets, app.targets)
+    check("감시 중이 아닌 예매 대상은 [빼기] 로 빠진다",
+          results[1] not in app.targets, app.targets)
+
+    app.targets = [results[0], results[1]]
+    app.sync_target_list()
+    app.clear_targets()
+    root.update()
+    check("감시 중인 예매 대상은 [비우기] 로도 안 빠진다",
+          app.targets == [results[0]], app.targets)
+    app.watches = []
+    app.targets = []
+    app.sync_target_list()
 
     # 바인딩된 메서드는 볼 때마다 새 객체라 `is` 로는 비교되지 않습니다.
     check("알림 함수는 설정을 굽지 않는다",
@@ -541,9 +607,8 @@ def main() -> int:
     check("알림이 그 값을 쓴다", app._make_notifier() is not None)
 
     # -- 잡은 예약: 조회 결과와 같은 칸으로 채워지는가, 묶이는가 ----------------
-    # PNR 은 이제 11번째 칸(0-based index 10)입니다 — 구분·열차·출발·도착·
-    # 총 소요·환승 대기·일반실·특실·입석자유석대기 아홉 칸이 앞에 옵니다.
-    PNR_COL = 10
+    HOLD_COLUMNS = ui_module.HOLD_COLUMNS
+    PNR_COL = HOLD_COLUMNS.index("PNR")
     first_target = results[0]
     app.holds = [
         Held(
@@ -592,25 +657,18 @@ def main() -> int:
     # 각 칸을 짚어** 확인합니다 — 앞의 아홉 칸을 통째로 슬라이스만 하면,
     # '종류' 를 끝에 잘못 이어 붙여 뒤의 모든 칸이 한 칸씩 밀리는 버그를
     # 놓칩니다(실제로 그랬습니다 — 종류/열차 칸이 하나씩 밀려 보였습니다).
-    HOLD_COLUMNS = ui_module.HOLD_COLUMNS
     p1001 = next(
         item for item in group_children
         if app.hold_tree.item(item, "values")[PNR_COL] == "P1001"
     )
     p1001_values = app.hold_tree.item(p1001, "values")
     expected_kind, *expected_rest = app._journey_row_values("", first_target.journey)
-    checks = {
-        "구분": expected_kind,
-        "종류": "좌석 예약(1구간)",
-        "열차": expected_rest[0],
-        "출발": expected_rest[1],
-        "도착": expected_rest[2],
-        "총 소요": expected_rest[3],
-        "환승 대기": expected_rest[4],
-        "일반실": expected_rest[5],
-        "특실": expected_rest[6],
-        "입석·자유석·대기": expected_rest[7],
-    }
+    rest_names = [
+        "열차", "출발역", "출발", "도착역", "도착", "총 소요", "환승 대기",
+        "일반실", "특실", "입석·자유석·대기",
+    ]
+    checks = {"구분": expected_kind, "종류": "좌석 예약(1구간)"}
+    checks.update(dict(zip(rest_names, expected_rest, strict=True)))
     for name, expected_value in checks.items():
         col = HOLD_COLUMNS.index(name)
         check(f"잡은 예약의 '{name}' 칸이 조회 결과와 같다",
