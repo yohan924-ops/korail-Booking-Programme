@@ -12,3 +12,8 @@
 tests/fixtures/** -text
 LICENSE -text
 NOTICE -text
+
+# 실행기. .bat 는 CRLF 여야 cmd 가 제대로 읽고, .command 는 LF 여야 sh 가
+# 첫 줄의 셔뱅을 알아봅니다. 체크아웃이 이것을 바꾸면 둘 다 안 돕니다.
+*.bat text eol=crlf
+*.command text eol=lf

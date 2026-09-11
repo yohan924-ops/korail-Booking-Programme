@@ -1,0 +1,70 @@
+name: Desktop build
+
+# 파이썬이 없는 컴퓨터에서도 쓸 수 있는 실행 파일을 만듭니다. 저장소를
+# 클론하고 실행기를 더블클릭하는 길(`실행 (Windows).bat`)이 여전히 기본이고,
+# 이쪽은 "파일 하나만 받아서 쓰고 싶다" 는 사람을 위한 것입니다.
+#
+# 손으로 돌립니다(Actions 탭 → Desktop build → Run workflow). 푸시마다 돌 이유가
+# 없습니다 — 오프라인 CI 가 코드를 지키고, 여기서 나오는 것은 그 코드를 담은
+# 껍데기일 뿐입니다.
+on:
+  workflow_dispatch:
+
+# 이 워크플로는 저장소를 읽기만 합니다. 결과는 Actions 실행에 붙는 아티팩트로
+# 남고, 릴리스나 태그를 만들지 않습니다.
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows 실행 파일
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          # python.org 설치본과 같은 계열이라 tkinter 가 함께 옵니다.
+          python-version: '3.12'
+      - name: Install build tooling
+        # pillow 는 아이콘 때문입니다 — PyInstaller 는 .ico 가 아닌 그림을
+        # 받으면 pillow 로 바꿔 넣습니다. pystray 는 작업 표시줄 트레이
+        # 아이콘(창을 닫아도 자동예매가 백그라운드에서 계속되는 기능) 때문
+        # 입니다 — 이 venv 에 있어야 PyInstaller 가 exe 안에 함께 담습니다.
+        run: python -m pip install pyinstaller pillow httpx cryptography pystray
+
+      # --onefile   파일 하나로 나옵니다. 첫 실행 때 임시 폴더에 풀리느라
+      #             몇 초 걸립니다 -- 고장이 아닙니다.
+      # --windowed  검은 콘솔 창을 띄우지 않습니다. 얼린 판에서는 의존성이
+      #             함께 들어가므로, main.py 가 콘솔로 안내하던 "httpx 가
+      #             없습니다" 같은 갈래 자체가 생기지 않습니다.
+      # --paths     src 와 app 을 import 경로로 넘깁니다. desktop_entry.py 가
+      #             sys.path 를 실행 중에 만지지 않는 이유입니다.
+      # packaging/icon.png(또는 .ico)가 있으면 그것이 exe 아이콘이 됩니다.
+      # 없으면 기본 아이콘으로 나옵니다 — 없다고 빌드가 멈추지는 않습니다.
+      - name: Build
+        run: |
+          $icon = @()
+          if (Test-Path packaging/icon.ico) { $icon = "--icon", "packaging/icon.ico" }
+          elseif (Test-Path packaging/icon.png) { $icon = "--icon", "packaging/icon.png" }
+          pyinstaller --onefile --windowed `
+            --name NewRail `
+            @icon `
+            --paths src --paths app `
+            packaging/desktop_entry.py
+
+      # 만들어졌다는 것만 봅니다. 창이 뜨는지까지는 러너에서 확인할 수 없고,
+      # 확인한 척하지 않습니다.
+      - name: Check the file exists
+        run: |
+          if (-not (Test-Path dist/NewRail.exe)) { exit 1 }
+          Get-Item dist/NewRail.exe | Format-List Name, Length
+
+      # 태그를 SHA 로 고정하지 못했습니다. 다른 스텝처럼 고정하는 것이 이
+      # 저장소의 방식이지만, 확인하지 않은 SHA 를 적어 두는 것이 더 나쁩니다.
+      # 유지보수자가 확인해서 고정해 주세요.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NewRail-windows
+          path: dist/NewRail.exe
+          if-no-files-found: error

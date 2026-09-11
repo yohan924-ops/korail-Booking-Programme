@@ -1,0 +1,114 @@
+@echo off
+rem ============================================================================
+rem  뉴레일 (코레일의 새로운 예매 도우미) — Windows 실행기
+rem
+rem  이 파일을 더블클릭하면 됩니다. 처음 한 번만 준비 과정이 돌고(1~2분),
+rem  그 다음부터는 바로 창이 뜹니다.
+rem
+rem  하는 일은 셋뿐입니다.
+rem    1. 파이썬을 찾는다 (없으면 어디서 받는지 알려 주고 멈춘다)
+rem    2. 이 폴더 안에 .venv 를 만들고 httpx, cryptography 를 넣는다
+rem       — 컴퓨터에 이미 설치된 파이썬 환경은 건드리지 않는다
+rem    3. app\main.py 를 실행한다
+rem
+rem  창이 그냥 닫히면 안 됩니다. 무엇이 잘못됐는지 읽을 수 있어야 하므로
+rem  실패하는 모든 갈래가 pause 로 끝납니다.
+rem
+rem  --utf8 로 저 자신을 한 번 다시 부르는 것은 장식이 아닙니다. cmd 는 이
+rem  파일을 미리 한 뭉치 읽어 두는데, chcp 를 이 줄에서 걸어도 그 뭉치 안의
+rem  한글 섞인 줄들은 **이전 코드 페이지로 이미 읽힌 채로 남습니다.** 새
+rem  cmd 를 하나 더 열어 이 파일을 처음부터 다시 읽게 하면, 그때는 코드
+rem  페이지가 이미 65001 이라 처음부터 제대로 읽힙니다.
+rem
+rem  괄호 블록이 아니라 goto 로 짭니다. 괄호 안에서 cmd 의 종료 코드를 바로
+rem  읽으면, delayed expansion 없이는 그 값이 그 줄이 도는 시점이 아니라
+rem  괄호 블록이 펼쳐지는 시점의 것으로 굳어 진짜 종료 코드를 놓칩니다.
+if /I "%~1"=="--utf8" goto reinvoked
+chcp 65001 >nul
+cmd /d /c ""%~f0" --utf8"
+exit /b %errorlevel%
+
+:reinvoked
+shift
+setlocal enabledelayedexpansion
+cd /d "%~dp0"
+
+set "VENV=%CD%\.venv"
+set "VPY=%VENV%\Scripts\python.exe"
+
+rem --- 이미 준비돼 있으면 트레이 패키지만 채워 넣고 곧장 실행 ----------------
+if exist "%VPY%" goto trayonly
+
+rem --- 파이썬 찾기 ------------------------------------------------------------
+rem  py 런처를 먼저 봅니다. python.org 설치본이 함께 넣어 주고, 여러 버전이
+rem  깔린 컴퓨터에서도 옳은 것을 고릅니다. 없으면 python 을 봅니다 — 단,
+rem  Microsoft Store 의 가짜 python(설치 안내만 띄우고 끝나는 것)이 잡히면
+rem  버전 확인에서 걸러집니다.
+set "PY="
+py -3 --version >nul 2>&1 && set "PY=py -3"
+if not defined PY (
+  python --version >nul 2>&1 && set "PY=python"
+)
+
+if not defined PY (
+  echo.
+  echo   파이썬이 없습니다.
+  echo.
+  echo   https://www.python.org/downloads/windows/ 에서 받아 설치하세요.
+  echo   설치 화면에서 두 가지를 꼭 켜야 합니다:
+  echo     - Add python.exe to PATH
+  echo     - tcl/tk and IDLE          ^(이게 없으면 창이 안 뜹니다^)
+  echo.
+  echo   설치한 뒤 이 파일을 다시 더블클릭하세요.
+  echo.
+  pause
+  exit /b 1
+)
+
+rem --- 처음 한 번: 전용 환경 만들기 -------------------------------------------
+echo.
+echo   처음 실행이라 준비를 합니다. 1~2분 걸립니다 ^(다음부터는 바로 뜹니다^).
+echo.
+%PY% -m venv "%VENV%"
+if errorlevel 1 (
+  echo.
+  echo   전용 환경^(.venv^)을 만들지 못했습니다.
+  echo   파이썬이 제대로 설치됐는지 확인하세요.
+  echo.
+  pause
+  exit /b 1
+)
+
+"%VPY%" -m pip install --upgrade pip >nul 2>&1
+"%VPY%" -m pip install httpx cryptography
+if errorlevel 1 (
+  echo.
+  echo   필요한 것을 내려받지 못했습니다. 인터넷 연결을 확인하고 다시 하세요.
+  echo   준비가 중간에 멈췄으므로 .venv 폴더를 지우고 다시 시작합니다.
+  echo.
+  rmdir /s /q "%VENV%" 2>nul
+  pause
+  exit /b 1
+)
+
+:trayonly
+rem 새로 만든 .venv 든, 예전에 이미 만들어 둔 .venv 든(그 시절엔 pystray
+rem 가 없었을 수 있습니다 — 이 기능이 나중에 생겼습니다) 여기를 거칩니다.
+rem
+rem python -c 로 먼저 **로컬에서만** 있는지 없는지 봅니다 — 매번 pip 를
+rem 부르면 있어도 인터넷에 물어보느라 "두 번째부터는 바로 뜹니다" 가
+rem 깨집니다. 없을 때만 pip install 이 돌아 인터넷을 씁니다.
+"%VPY%" -c "import pystray" >nul 2>&1
+if errorlevel 1 "%VPY%" -m pip install pystray pillow >nul 2>&1
+
+rem --- 실행 -------------------------------------------------------------------
+:run
+"%VPY%" "%CD%\app\main.py"
+if errorlevel 1 (
+  echo.
+  echo   프로그램이 오류로 끝났습니다. 위 내용을 그대로 알려 주세요.
+  echo.
+  pause
+  exit /b 1
+)
+endlocal
