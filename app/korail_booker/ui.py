@@ -297,6 +297,28 @@ def _plain_station(text: str) -> str:
     return name.strip()
 
 
+#: 운행 일정 조회에서, 그 역에 없는 사건(출발역의 "도착", 종착역의 "출발")을
+#: 서버가 채우는 자리표시자 — **실측으로 확인했습니다**(2026-09-13
+#: 동대구→오송 KTX 012, 부산의 '도착' 과 서울의 '출발' 이 이 값으로 왔습니다).
+#: 시각인 것처럼 "99:99" 로 그리면 없는 시각을 있는 것처럼 보여 주게 되므로
+#: 걸러 냅니다.
+_MISSING_STOP_CLOCK = "999999"
+
+
+def _stop_clock(*candidates: str | None) -> str:
+    """정차역 시각 한 칸 — **실제 시각을 우선**하고, 자리표시자는 건너뜁니다.
+
+    후보를 앞에서부터 보다가 실제 시각이 있으면 그것으로, 전부 없거나
+    자리표시자뿐이면 "모르는 시각" 과 같은 ``"--:--"`` 로 남깁니다(지어내지
+    않습니다).
+    """
+    for candidate in candidates:
+        clock = normalize_clock(candidate)
+        if clock and clock != _MISSING_STOP_CLOCK:
+            return format_clock(clock)
+    return "--:--"
+
+
 class AutocompleteCombobox(ttk.Combobox):
     """치는 대로 목록이 좁혀지는 콤보. 직접 입력도 그대로 됩니다.
 
@@ -4082,14 +4104,16 @@ class BookerApp:
         ttk.Label(window, text=header, font=("", 10, "bold")).pack(
             anchor="w", padx=10, pady=(10, 2)
         )
-        # 이 조회를 실제 값 채워진 응답으로 검증한 적이 없다는 사실을
-        # 화면에도 그대로 적습니다 — 확인된 것처럼 보이면 안 됩니다.
+        # 처음 만들 때는 이 조회를 실제 값 채워진 응답으로 검증한 적이
+        # 없었습니다. 2026-09-13 KTX 012(동대구→오송) 편으로 실제 사용
+        # 화면을 받아 정차역·시각이 정상으로 채워짐을 확인했습니다 — 다만
+        # 이 프로그램이 자동으로 매번 검증하는 것은 아니므로, 이상하게
+        # 보이면 코레일 앱과 함께 확인하라는 안내는 남겨 둡니다.
         ttk.Label(
             window,
-            text="이 조회는 코레일 로그인이 필요 없지만, 실제 값이 채워진 응답을 "
-            "이 프로그램에서 아직 확인하지 못했습니다. 창이 비거나 오류가 떠도 "
-            "이 프로그램 탓이 아닐 수 있습니다 — 코레일 앱과 함께 확인하세요.",
-            foreground="#b3261e",
+            text="이 조회는 코레일 로그인이 필요 없습니다. 정차역이 하나도 안 뜨거나 "
+            "오류가 나면 코레일 앱과 함께 확인하세요.",
+            foreground="#666666",
             wraplength=540,
             justify="left",
         ).pack(anchor="w", padx=10, pady=(0, 6))
@@ -4136,12 +4160,12 @@ class BookerApp:
         """정차역 한 줄. **실제 시각을 우선**하고, 없으면 계획 시각으로.
 
         ``actual_*`` 은 그 역을 이미 지났을 때만 옵니다 — 아직 안 지난
-        역은 계획 시각(``planned_*``)만 있습니다. 지연은 숫자가 와야만
-        적고, 없으면 "-" 로 둡니다(0 인지 안 온 것인지 구분 없이 지연
-        없음으로 지어내지 않습니다).
+        역은 계획 시각(``planned_*``)만 있습니다. 출발역의 도착·종착역의
+        출발처럼 그 자체가 없는 자리는 서버가 자리표시자(``"999999"``)로
+        채워 보내므로 :func:`_stop_clock` 이 걸러 "99:99" 로 보이지 않게
+        합니다. 지연은 숫자가 와야만 적고, 없으면 "-" 로 둡니다(0 인지
+        안 온 것인지 구분 없이 지연 없음으로 지어내지 않습니다).
         """
-        arrival = stop.actual_arrival_time or stop.planned_arrival_time
-        departure = stop.actual_departure_time or stop.planned_departure_time
         delay = (
             f"{stop.actual_arrival_delay_count}분"
             if stop.actual_arrival_delay_count is not None
@@ -4152,8 +4176,8 @@ class BookerApp:
             "end",
             values=(
                 stop.station_name or "-",
-                format_clock(arrival),
-                format_clock(departure),
+                _stop_clock(stop.actual_arrival_time, stop.planned_arrival_time),
+                _stop_clock(stop.actual_departure_time, stop.planned_departure_time),
                 delay,
             ),
         )

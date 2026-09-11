@@ -4476,26 +4476,29 @@ def test_train_schedule_lookup_is_a_pure_read_with_no_login_or_consent():
     assert "consent=" not in body
 
 
-def test_the_schedule_window_admits_it_has_never_been_verified_live():
-    """이 조회는 실제 값이 채워진 응답으로 검증된 적이 없습니다 — 창에도 그대로 적습니다.
-
-    지금까지 실측에서는 전부 "열차가 존재하지 않습니다" 오류만 돌아왔습니다
-    (``docs/internal/deep-dive/impl-audit-2026-07-22.md``,
-    ``docs/internal/audit-2026-07-27/phase3/verifier-1.md`` P2CRO-15). 확인된
-    것처럼 보이면 안 되므로, 창을 열 때마다 이 사실을 그대로 보여 줍니다.
+def test_the_schedule_window_no_longer_warns_it_is_unverified():
+    """실사용(2026-09-13 KTX 012, 동대구→오송)으로 실제 값이 채워진 응답을
+    확인했으므로, 처음 만들 때 달았던 "아직 확인하지 못했습니다" 경고는 뗐습니다.
     """
     body = _ui_function("open_train_schedule")
-    assert "실제 값이 채워진 응답을" in body
-    assert "아직 확인하지 못했습니다" in body
+    assert "아직 확인하지 못했습니다" not in body
+    assert "코레일 로그인이 필요 없습니다" in body
 
 
-def test_schedule_stop_prefers_the_actual_time_over_the_planned_one():
-    """이미 지난 역은 실제 시각을, 아직 안 지난 역은 계획 시각을 씁니다.
-
-    지연 칸은 서버가 숫자를 줬을 때만 채우고, 없으면 "-" 입니다 — 0 분
-    지연과 "안 왔다" 를 구분 없이 지연 없음으로 지어내지 않습니다.
+def test_schedule_stop_filters_the_no_such_event_placeholder():
+    """출발역의 '도착'·종착역의 '출발'처럼 그 자체가 없는 자리는 서버가
+    ``"999999"`` 로 채워 보냅니다(실측으로 확인: 부산의 도착, 서울의 출발).
+    그 값을 "99:99" 로 그대로 보여 주면 없는 시각이 있는 것처럼 보이므로
+    걸러 냅니다.
     """
+    constant = _ui_source()
+    assert '_MISSING_STOP_CLOCK = "999999"' in constant
+
+    stop_clock = _ui_function("_stop_clock")
+    assert "clock != _MISSING_STOP_CLOCK" in stop_clock
+    assert "return '--:--'" in stop_clock
+
     body = _ui_function("_insert_schedule_stop")
-    assert "stop.actual_arrival_time or stop.planned_arrival_time" in body
-    assert "stop.actual_departure_time or stop.planned_departure_time" in body
+    assert "_stop_clock(stop.actual_arrival_time, stop.planned_arrival_time)" in body
+    assert "_stop_clock(stop.actual_departure_time, stop.planned_departure_time)" in body
     assert "stop.actual_arrival_delay_count is not None" in body

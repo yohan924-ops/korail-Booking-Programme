@@ -997,8 +997,14 @@ def main() -> int:
             assert run_date == first_target.journey.legs[0].departure_date
             assert train_no == first_target.journey.legs[0].train_no
             return TrainScheduleResponse(stops=(
-                # 아직 안 지난 역 — 계획 시각만 옵니다.
-                TrainScheduleStop(station_name="동탄", planned_departure_time="054700"),
+                # 출발역 — '도착' 이라는 사건 자체가 없어, 서버가 실측으로
+                # 확인된 자리표시자("999999")를 도착 칸에 채워 보냅니다.
+                TrainScheduleStop(
+                    station_name="동탄",
+                    planned_arrival_time="999999",
+                    actual_arrival_time="999999",
+                    planned_departure_time="054700",
+                ),
                 # 이미 지난 역 — 실제 시각과 지연이 함께 옵니다.
                 TrainScheduleStop(
                     station_name="대전",
@@ -1034,7 +1040,7 @@ def main() -> int:
         )
         check("운행 일정 창: 정차역이 다 들어온다", len(rows) == 2, rows)
         check(
-            "운행 일정 창: 아직 안 지난 역은 계획 시각을 쓴다",
+            "운행 일정 창: 없는 사건의 자리표시자('999999')를 '99:99' 로 보여 주지 않는다",
             bool(rows) and tuple(rows[0]) == ("동탄", "--:--", "05:47", "-"),
             rows,
         )
