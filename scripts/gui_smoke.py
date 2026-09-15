@@ -780,31 +780,6 @@ def main() -> int:
         collect(window)
         token_entry, chat_id_entry = entries[0], entries[1]
 
-        # -- 캡처 사진: 실제로 3장이 창에 박혔는가, 창은 화면 높이를 안 넘는가 --
-        guide_images = getattr(window, "guide_images", [])
-        check(
-            "안내 사진 3장이 실제로 창에 실렸다(파일이 없으면 조용히 빠지므로,"
-            " 다 있는 이 저장소에서는 정확히 3장이어야 한다)",
-            len(guide_images) == 3,
-            len(guide_images),
-        )
-        check(
-            "실린 사진은 진짜 PhotoImage 고, 크기도 0이 아니다",
-            all(
-                isinstance(photo, tk.PhotoImage)
-                and photo.width() > 0
-                and photo.height() > 0
-                for photo in guide_images
-            ),
-            [(photo.width(), photo.height()) for photo in guide_images],
-        )
-        window.update_idletasks()
-        screen_h = window.winfo_screenheight()
-        check(
-            "사진까지 곁들인 창도 화면의 80% 를 안 넘는다(넘는 만큼은 스크롤)",
-            window.winfo_height() <= int(screen_h * 0.8) + 2,
-            (window.winfo_height(), screen_h),
-        )
         check(
             "대화 ID 칸은 고쳐 쓸 수 없다(readonly) — 사람이 미리 알 방법이 없는 값",
             str(chat_id_entry.cget("state")) == "readonly",  # type: ignore[call-overload]
@@ -866,6 +841,53 @@ def main() -> int:
     finally:
         app._in_thread = real_in_thread  # type: ignore[method-assign]
         ui_module.TelegramNotifier = real_notifier_cls  # type: ignore[misc]
+
+    # -- 텔레그램 설정법 보기: 실제 캡처 사진이 제 크기로 보이는가 -------------
+    #
+    # 설정 창과 분리한 이유 자체가 "사진 셋을 한 창에 욱여넣으려 너무 줄여서
+    # 있어도 안 보이는 것이나 다름없다"는 실사용 지적이었습니다 — 그래서
+    # 여기서는 실제로 메인 화면의 [설정법 보기] 단추를 눌러 열리는 창에서,
+    # 사진이 줄어들기 전과 비슷한 크기로 실리는지까지 직접 잽니다.
+    guide_button = by_text(root, "설정법 보기")
+    check("메인 화면에 [설정법 보기] 단추가 있다", guide_button is not None)
+    if guide_button is not None:
+        guide_button.invoke()  # type: ignore[attr-defined]
+        root.update()
+    guide_window = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+    guide_images = getattr(guide_window, "guide_images", [])
+    check(
+        "안내 사진 3장이 실제로 창에 실렸다(파일이 없으면 조용히 빠지므로,"
+        " 다 있는 이 저장소에서는 정확히 3장이어야 한다)",
+        len(guide_images) == 3,
+        len(guide_images),
+    )
+    check(
+        "실린 사진은 진짜 PhotoImage 고, 크기도 0이 아니다",
+        all(
+            isinstance(photo, tk.PhotoImage)
+            and photo.width() > 0
+            and photo.height() > 0
+            for photo in guide_images
+        ),
+        [(photo.width(), photo.height()) for photo in guide_images],
+    )
+    # 예전 판(설정 창 하나에 욱여넣었을 때)은 가로 230px 까지 줄어 있었고,
+    # 그게 "사진이 안 보인다"는 지적의 원인이었습니다 — 분리한 뒤로는
+    # 훨씬 큽니다(가장 작은 사진도 200px 는 넘어야 합니다).
+    check(
+        "사진이 예전처럼 알아볼 수 없이 작은 크기로 줄지 않았다",
+        min(photo.width() for photo in guide_images) > 200,
+        [(photo.width(), photo.height()) for photo in guide_images],
+    )
+    guide_window.update_idletasks()
+    screen_h = guide_window.winfo_screenheight()
+    check(
+        "사진까지 실은 창도 화면의 80% 를 안 넘는다(넘는 만큼은 스크롤)",
+        guide_window.winfo_height() <= int(screen_h * 0.8) + 2,
+        (guide_window.winfo_height(), screen_h),
+    )
+    guide_window.destroy()
+    root.update()
 
     # -- 잡은 예약: 조회 결과와 같은 칸으로 채워지는가, 묶이는가 ----------------
     HOLD_COLUMNS = ui_module.HOLD_COLUMNS

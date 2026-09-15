@@ -2337,18 +2337,20 @@ def test_a_chat_without_a_name_still_gives_its_number():
 
 
 def test_the_token_dialog_walks_through_the_real_botfather_flow():
-    """텔레그램 설정 창은 실제로 봇을 만들어 본 사람의 화면(캡처 3장)을
-    그대로 따라간 1~4단계로 값 두 개(토큰·대화 ID)를 채우고 확인합니다.
-    처음엔 이 절차를 외부 글 링크 하나로만 때웠다가("성의없다" 는 지적),
-    그 다음엔 그 캡처의 순서·문구를 옮겨 적으면서도 링크는 남겨 뒀다가
-    ("보내준 사진을 직접 넣으라 했지 링크를 쓰라 한 게 아니다" 는 지적)
-    — 외부 링크는 뺐습니다. 실제 캡처 이미지 자체는
+    """[설정법 보기] 창은 실제로 봇을 만들어 본 사람의 화면(캡처 3장)을
+    그대로 따라간 1~4단계를 보여 줍니다. 값을 채우고 확인하는 칸은
+    [텔레그램 설정] 창에 따로 있습니다 — 사진 셋을 한 창에 욱여넣으려니
+    가로 230px 까지 줄어 "있어도 안 보이는 것이나 다름없다" 는 지적을
+    받고 나눴습니다. 처음엔 이 절차를 외부 글 링크 하나로만 때웠다가
+    ("성의없다" 는 지적), 그 다음엔 그 캡처의 순서·문구를 옮겨 적으면서도
+    링크는 남겨 뒀다가("보내준 사진을 직접 넣으라 했지 링크를 쓰라 한 게
+    아니다" 는 지적) — 외부 링크는 뺐습니다. 실제 캡처 이미지 자체는
     :func:`test_the_telegram_popup_actually_embeds_the_real_screenshots`
     가 확인합니다.
     """
     source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
 
-    for step in ("1단계 — 텔레그램 앱에서 봇 만들기", "2단계 — 토큰 붙여넣기",
+    for step in ("1단계 — 텔레그램 앱에서 봇 만들기", "2단계 — 토큰 복사하기",
                  "3단계 — 내 봇과 먼저 대화하기 (꼭 필요합니다)",
                  "4단계 — 대화 ID 채우기"):
         assert step in source, step
@@ -2411,23 +2413,29 @@ def test_the_guide_image_loader_never_blocks_the_dialog_if_missing():
 
 
 def test_the_telegram_popup_scrolls_instead_of_overflowing_small_screens():
-    """1~4단계 글에 캡처 사진까지 곁들이면 노트북 화면 높이를 쉽게
-    넘깁니다 — 실제로 1920x1080 화면에서 스크롤 없이 그리면 화면보다
-    길었습니다. 본 창(:meth:`_build`)과 같은 방식으로 세로 스크롤을
-    달고, 높이를 화면의 80% 로 눌러 나머지는 굴려서 보게 했습니다.
-    ``bind_all`` 은 쓰지 않습니다 — 이 팝업이 떠 있는 동안 본 창의 휠
-    스크롤까지 가로채면 안 되기 때문입니다(:meth:`_bind_wheel_recursive`
-    가 이 팝업 안의 위젯에만 직접 겁니다).
+    """순수 글만 있던 [텔레그램 설정] 창도 예전에 이미 작은 화면 높이를
+    넘긴 적이 있고, 사진을 곁들인 [설정법 보기] 창은 실제로 1920x1080
+    화면에서 스크롤 없이 그리면 화면보다 훨씬 길었습니다. 두 창 다 본
+    창(:meth:`_build`)과 같은 방식으로 세로 스크롤을 달고, 높이를 화면의
+    80% 로 눌러 나머지는 굴려서 보게 했습니다. ``bind_all`` 은 쓰지
+    않습니다 — 이 팝업이 떠 있는 동안 본 창의 휠 스크롤까지 가로채면 안
+    되기 때문입니다(:meth:`_bind_wheel_recursive` 가 이 팝업 안의 위젯에만
+    직접 겁니다).
     """
-    body = _ui_function("on_telegram_settings")
-    assert "canvas = tk.Canvas(window, highlightthickness=0)" in body
-    assert 'body = ttk.Frame(canvas)' in body
-    assert "int(window.winfo_screenheight() * 0.8)" in body
-    assert "self._bind_wheel_recursive(canvas, sequence, canvas)" in body
-    assert "bind_all" not in body
-    assert "먼저 말을 건 적이 없는 봇에게 대화 ID 를 주지" in body
+    for name in ("on_telegram_settings", "on_telegram_guide"):
+        body = _ui_function(name)
+        assert "canvas = tk.Canvas(window, highlightthickness=0)" in body, name
+        assert 'body = ttk.Frame(canvas)' in body, name
+        assert "int(window.winfo_screenheight() * 0.8)" in body, name
+        assert "self._bind_wheel_recursive(canvas, sequence, canvas)" in body, name
+        assert "bind_all" not in body, name
+
+    settings_body = _ui_function("on_telegram_settings")
     # 잘 안 될 때 어디를 고쳐야 하는지 갈라 줍니다.
-    assert "잘 안 되면:" in body
+    assert "잘 안 되면:" in settings_body
+
+    guide_body = _ui_function("on_telegram_guide")
+    assert "먼저 말을 건 적이 없는 봇에게 대화 ID 를 주지" in guide_body
 
 
 def test_the_example_token_is_not_a_real_one():
@@ -2905,9 +2913,17 @@ def test_both_exe_builds_bundle_the_telegram_guide_pictures():
     조용히 성공하고, 그 exe 를 받아 쓰는 사람 화면에만 사진이 안 뜹니다
     (``_load_telegram_guide_image`` 가 못 찾은 파일에 조용히 ``None`` 을
     돌려주도록 짜여 있어서, 빌드 실패로도 안 걸러집니다).
+
+    ``exe 만들기 (Windows).bat`` 은 상대 경로를 넘기면 안 됩니다 — 실제로
+    그렇게 했다가 ``ERROR: Unable to find '...\\build\\app\\assets'`` 로
+    빌드 자체가 실패했습니다(``--specpath`` 를 CWD 와 다르게 ``build\\`` 로
+    두므로, 아이콘과 같은 이유로 상대 경로가 workpath 기준으로 다시
+    풀립니다 — :func:`test_the_batch_builders_icon_path_is_absolute` 참고).
+    CI 워크플로는 ``--specpath`` 를 CWD 와 다르게 두지 않아 이 문제가
+    없으므로 그대로 상대 경로를 씁니다.
     """
     script = (REPO_ROOT / "exe 만들기 (Windows).bat").read_text(encoding="utf-8")
-    assert '--add-data "app\\assets;assets"' in script
+    assert '--add-data "%CD%\\app\\assets;assets"' in script
     workflow = (
         REPO_ROOT / ".github" / "workflows" / "desktop-build.yml"
     ).read_text(encoding="utf-8")
@@ -3248,15 +3264,15 @@ def test_telegram_settings_can_be_used_without_touching_the_disk():
 def test_the_telegram_popup_has_no_external_link_only_the_written_steps():
     """예전 판은 외부 글 링크 하나로 줄였다가("성의없다"), 링크를 남긴 채
     설명만 되살렸다가("사진을 프로그램에 넣으라 했지 링크를 쓰라 한 게
-    아니다") 두 번 지적을 받았습니다 — 이 세션에는 대화창에 붙여넣어진
-    사진을 파일로 저장할 방법이 없어 이미지 자체를 옮기지는 못했지만,
-    최소한 요청대로 외부 링크는 없앴고 1~4단계 설명은 이 창 안에
-    그대로 있습니다.
+    아니다") 두 번 지적을 받았습니다 — 요청대로 외부 링크는 없앴고,
+    1~4단계 설명은 이제 [설정법 보기] 창 안에 있습니다(값 입력 칸이 있는
+    [텔레그램 설정] 창과는 분리했습니다 — 사진 셋을 한 창에 욱여넣으려니
+    너무 작아져 "있어도 안 보인다" 는 지적을 받았기 때문입니다).
     """
     source = _ui_source()
     assert "open_telegram_guide" not in source
     assert "webbrowser" not in source
-    for step in ("1단계 — 텔레그램 앱에서 봇 만들기", "2단계 — 토큰 붙여넣기",
+    for step in ("1단계 — 텔레그램 앱에서 봇 만들기", "2단계 — 토큰 복사하기",
                  "3단계 — 내 봇과 먼저 대화하기 (꼭 필요합니다)",
                  "4단계 — 대화 ID 채우기"):
         assert step in source, step
@@ -3272,8 +3288,8 @@ def test_bot_username_and_chat_id_are_two_separate_readonly_fields():
     source = _ui_source()
     assert 'chat_row, textvariable=chat_id, width=18, state="readonly"' in source
     # 봇 아이디는 입력칸이 아니라 읽기 전용 표시(Label)입니다 — 대화 ID
-    # 칸과 다른 자리(2단계, 토큰 바로 아래)에 있습니다.
-    assert 'ttk.Label(step2, textvariable=bot_username' in source
+    # 칸과 다른 자리(봇 토큰 칸 바로 아래)에 있습니다.
+    assert 'ttk.Label(token_box, textvariable=bot_username' in source
     apply_body = _ui_function("check_token")
     assert "bot_username.set(f'확인된 봇: @{name}')" in apply_body
     assert "bot_username.set('(아직 확인 전)')" in apply_body
