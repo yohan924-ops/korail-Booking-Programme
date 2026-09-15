@@ -46,6 +46,7 @@ from korail_booker import notify as N
 from korail_booker import search as S
 from korail_booker import session as ST_SESSION
 from korail_booker import settings as ST
+from korail_booker import single_instance as SINGLE
 from korail_booker import sound as SOUND
 from korail_booker import tray as TRAY
 from korail_booker.autobook import (
@@ -5234,6 +5235,104 @@ def test_the_tray_status_never_lets_another_thread_touch_the_watch_list():
     assert "self._tray_icon.update_menu()" in body
 
     assert "self._refresh_tray_status()" in _ui_function("_tick_holds")
+
+
+# --- 프로그램은 한 번에 하나만: exe 를 두 번 실행해도 창이 늘지 않는다 -----
+#
+# single_instance.py 는 tray.py 와 마찬가지로 tkinter 를 import 하지 않으므로,
+# 여기서는 실제 소켓으로 부릅니다. 포트는 이 시험 전용 값을 씁니다 — 이
+# 컴퓨터에서 실제로 돌고 있을 수도 있는 뉴레일 본체(DEFAULT_PORT)와
+# 부딪히지 않기 위해서입니다.
+
+_TEST_PORT = 51919
+
+
+def test_the_first_launch_claims_the_port_and_becomes_the_original():
+    """아무도 그 포트를 안 쓰고 있으면, 이 인스턴스가 원본이 됩니다."""
+    should_open, server = SINGLE.negotiate(port=_TEST_PORT)
+    try:
+        assert should_open is True
+        assert server is not None
+    finally:
+        if server is not None:
+            server.close()
+
+
+def test_a_second_launch_signals_the_original_instead_of_opening_a_window():
+    """원본이 이미 그 포트를 잡고 있으면, 둘째는 신호만 보내고 창을
+    열지 말아야 합니다(``should_open is False``).
+    """
+    _should_open, original = SINGLE.negotiate(port=_TEST_PORT + 1)
+    assert original is not None
+    try:
+        should_open, server = SINGLE.negotiate(port=_TEST_PORT + 1)
+        assert should_open is False
+        assert server is None
+    finally:
+        original.close()
+
+
+def test_the_signal_actually_reaches_the_original_and_calls_back():
+    """둘째 사본의 신호가 실제로 원본의 콜백을 부르는지 — 네트워크 왕복을
+    실제로 하고, 콜백이 불릴 때까지 기다려 확인합니다(지어내지 않습니다).
+    """
+    import time
+
+    should_open, server = SINGLE.negotiate(port=_TEST_PORT + 2)
+    assert should_open is True
+    assert server is not None
+    called = []
+    try:
+        SINGLE.listen_for_duplicate_launches(server, lambda: called.append(True))
+        should_open2, server2 = SINGLE.negotiate(port=_TEST_PORT + 2)
+        assert should_open2 is False
+        assert server2 is None
+        for _ in range(50):
+            if called:
+                break
+            time.sleep(0.05)
+        assert called == [True]
+    finally:
+        server.close()
+
+
+def test_negotiate_still_opens_a_window_if_it_cannot_claim_or_signal():
+    """포트를 잡지도, 신호를 보내지도 못하는 극히 드문 경우에도 창은
+    열려야 합니다 — 아무 창도 안 뜨는 것보다는 낫습니다. 아무도 듣지
+    않는 포트로 신호를 보내려 하면(연결 자체가 거절됨) 이 갈래를 탑니다.
+    """
+    # 이 포트에 아무도 없는데, 클레임(bind)도 못 하는 상황은 실제로는
+    # 다른 프로세스가 그 순간에 갖고 있을 때뿐입니다 — 재현하려면
+    # 소켓 하나를 만든 뒤 bind 만 하고 listen 은 안 해서, connect 시도가
+    # 거절되게(ECONNREFUSED) 만듭니다.
+    import socket as socket_module
+
+    blocker = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_STREAM)
+    blocker.bind(("127.0.0.1", _TEST_PORT + 3))
+    # listen 을 부르지 않았으므로, 이 포트로의 connect 는 거절됩니다 —
+    # 원본이 죽어 가는 중이라 bind 는 아직 안 풀렸지만 accept 는 안 되는
+    # 상태를 흉내 냅니다.
+    try:
+        should_open, server = SINGLE.negotiate(port=_TEST_PORT + 3)
+        assert should_open is True
+        assert server is None
+    finally:
+        blocker.close()
+
+
+def test_running_starts_the_program_wants_to_bring_the_existing_window_forward():
+    """``run()`` 은 신호를 못 받으면(둘째 사본) 창을 아예 열지 않고, 신호를
+    받으면(원본) 그 콜백이 숨긴 창을 되살리는 :meth:`_restore_from_tray`
+    로 가야 합니다 — 소스를 직접 읽어 배선을 확인합니다(실제로 두 번째
+    ``tk.Tk()`` 를 여는 시험은 디스플레이 하나에 창을 겹쳐 띄우게 되므로
+    여기서는 소스로 확인합니다).
+    """
+    body = _ui_function("run")
+    assert "should_open, lock_socket = negotiate()" in body
+    assert "if not should_open:" in body
+    assert "return 0" in body
+    assert "listen_for_duplicate_launches(" in body
+    assert "app.events.put(app._restore_from_tray)" in body
 
 
 # --- 알림소리(딩동): 예약 성공 · 자동 감시 종료 -----------------------------

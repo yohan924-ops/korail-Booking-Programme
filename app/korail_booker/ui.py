@@ -89,6 +89,7 @@ from .search import (
 )
 from .session import build_client
 from .session import login as do_login
+from .single_instance import listen_for_duplicate_launches, negotiate
 from .sound import play_success_sound, play_watch_finished_sound
 from .tray import TrayHandlers, create_tray_icon
 
@@ -6192,9 +6193,23 @@ class BookerApp:
 
 
 def run() -> int:
-    """창을 띄웁니다. ``app/main.py`` 가 부르는 곳입니다."""
+    """창을 띄웁니다. ``app/main.py`` 가 부르는 곳입니다.
+
+    이미 떠 있는 사본이 있으면(트레이에 숨겨 둔 채 잊고 exe 를 다시
+    누른 경우를 포함해) 새 창을 열지 않고, 그 창을 앞으로 불러오라는
+    신호만 보내고 곧장 끝납니다(:mod:`korail_booker.single_instance`).
+    """
+    should_open, lock_socket = negotiate()
+    if not should_open:
+        return 0
     root = tk.Tk()
     app = BookerApp(root)
+    if lock_socket is not None:
+        listen_for_duplicate_launches(
+            lock_socket, lambda: app.events.put(app._restore_from_tray)
+        )
     root.protocol("WM_DELETE_WINDOW", app.on_close)
     root.mainloop()
+    if lock_socket is not None:
+        lock_socket.close()
     return 0
