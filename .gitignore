@@ -29,6 +29,10 @@ dist/
 *.egg-info/
 site/
 
+# 실행기가 만드는 전용 환경. 사용자 컴퓨터마다 내용이 다르고, 저장소에
+# 들어가면 sdist 가 수십 MB 로 불어납니다.
+.venv/
+
 # Python and pytest scratch.
 __pycache__/
 *.py[cod]

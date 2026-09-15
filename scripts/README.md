@@ -1,10 +1,10 @@
 # `scripts/` — what these are, and which ones touch the live server
 
-Four scripts are committed here. They are **operator tools, not part of the
+Five scripts are committed here. They are **operator tools, not part of the
 package**: nothing under `src/korail_mobile_api/` imports them, and they are not
 installed by `pip install`. Run them from a checkout with `python3 scripts/<name>.py`.
 
-Three of the four talk to the real KORAIL server. Read the rule first.
+Four of the five talk to the real KORAIL server. Read the rule first.
 
 ## The rule for every live script here
 
@@ -21,9 +21,11 @@ Three of the four talk to the real KORAIL server. Read the rule first.
 - **Importing is safe.** Each script performs no I/O, reads no environment
   variable and builds no client at import time; everything happens under
   `main()`. `tests/` asserts this structurally.
-- **They run against YOUR account.** These exist so a maintainer can check the
-  client against the live service once. They are not example code, not a
-  scraper, and not something to run on a schedule.
+- **They run against YOUR account.** Four of them exist so a maintainer can
+  check the client against the live service once; they are not example code, not
+  a scraper, and not something to run on a schedule. `watch_and_reserve.py` is
+  the exception that proves the rule: it is *meant* to run for a while, so it
+  paces itself twice over, stops after one hold, and ends at a deadline you set.
 
 ## The scripts
 
@@ -32,6 +34,24 @@ Three of the four talk to the real KORAIL server. Read the rule first.
 The only one that touches no network and needs no account. It takes a built
 wheel and sdist and checks the packaging invariants (metadata, file modes,
 nothing forbidden inside). `docs/RELEASE.md` shows where it fits in a release.
+
+### `gui_smoke.py` — offline, safe
+
+Opens the desktop app's window for real and checks the things a source-reading
+test cannot see: that a pane actually gives its buttons the height they need,
+that hand-picked transfer stations survive a refresh, that picking a bundle's
+parent row adds every combination under it, and that the Telegram "use once"
+button leaves the settings file alone. It touches no network and points `HOME`
+at a temporary directory, so it cannot write your real settings.
+
+```bash
+xvfb-run -a --server-args="-screen 0 1600x1200x24" python3 scripts/gui_smoke.py
+xvfb-run -a python3 scripts/gui_smoke.py --shot /tmp/main.png
+```
+
+It is not part of the offline gate — the test environment has no tkinter, so
+`app/korail_booker/ui.py` cannot even be imported there. Run it by hand after
+changing the layout: the offline tests can pass while a button is clipped.
 
 ### `capture_live_read_surface.py` — live, reads only
 
@@ -51,6 +71,26 @@ stdout and the summary are redacted; the raw bodies are not.
 
 Narrower version of the same idea for the seat-map reads. `docs/verification-record.md`
 shows the invocation that produced the evidence recorded there.
+
+### `watch_and_reserve.py` — live, and it CREATES A HOLD (never pays)
+
+The booking macro. It polls one route for as long as you tell it to and makes
+ONE unpaid hold the moment the cabin you asked for turns available
+(`h_gen_rsv_cd`/`h_spe_rsv_cd` == `"11"`), then stops. `--standby` adds 예약대기
+as a fallback on the 일반실 cabin; 입석+좌석 merge is deliberately absent because
+its second call, `reserve_merge`, has never gone out to the live server.
+
+It needs `KORAIL_MOBILE_API_LIVE=1` to run at all, and `KORAIL_LIVE_MUTATION=1`
+*plus* `--reserve` before any reservation request is sent. Without those it
+watches, prints the dry-run form the library would have sent, and exits. It
+never builds a payment, cancel or refund consent — no card value enters the
+process — so settling or cancelling the hold is done in the KORAIL app, or with
+`reserve_pay_refund_roundtrip.py --recover`.
+
+Two pacings apply at once: the 1.5s request spacing above, and the poll interval
+(`--interval`, default 30s, floor 10s, ±15% jitter). Do not lower them. It stops
+after the first hold on purpose — a retried reservation is a duplicate
+reservation.
 
 ### `reserve_pay_refund_roundtrip.py` — live, and it MOVES MONEY
 

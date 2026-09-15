@@ -60,6 +60,24 @@ from .read_models import TrainScheduleItem
 _DATE_RE = re.compile(r"[0-9]{8}")
 _TIME_RE = re.compile(r"[0-9]{6}")
 _DIGITS_RE = re.compile(r"[0-9]+")
+#: 열차 종별 코드(``txtTrnClsfCd``)는 숫자만이 **아니다.**
+#:
+#: 처음에는 이 값도 :func:`_required_digits` 로 받았다. 근거는 없었다 — APK
+#: 분석 어디에도 이 필드를 숫자로 제한하는 대목이 없고(``OJrny.java`` 도
+#: ``RsvInquiryResponse.TrainInfo`` 도 전부 ``String`` 이다), 실제로 본 값이
+#: 두 자리 숫자뿐이었기에 그렇게 좁혀 둔 것이다.
+#:
+#: 2026-09-09, 검색 응답이 수서→창원중앙 KTX-산천 387 행에
+#: ``h_trn_clsf_cd: "0A"`` 를 보냈다. 앱이라면 그 문자열을 그대로 폼에 실었을
+#: 것이고, 여기서 거절하는 것은 앱이라면 예약했을 열차를 거절하는 것이다 —
+#: :func:`~korail_mobile_api.models._train_scalar` 가 같은 이유로 숫자로 온
+#: 값을 받아들이는 것과 같은 판단이다.
+#:
+#: **알파벳과 길이는 확인된 것이 아니다.** 확인된 값은 ``"00"`` 계열과
+#: ``"0A"`` 뿐이고, 이 패턴은 그것을 담으면서도 ``None``·빈 문자열·엉뚱한
+#: 덩어리는 여전히 큰 소리로 막으라고 고른 것이다. 서버가 이 밖의 모양을
+#: 보내면 그때 다시 넓힌다.
+_TRAIN_CLASS_RE = re.compile(r"[0-9A-Za-z]{1,4}")
 
 
 def _required_digits(value: str | None, *, field: str) -> str:
@@ -399,9 +417,10 @@ def _merge_leg_fields(leg: TrainScheduleItem) -> dict[str, str]:
             leg.train_group_code,
             field="train_group_code",
         ),
-        "train_class_code": _required_digits(
+        "train_class_code": _required_pattern(
             leg.train_class_code,
             field="train_class_code",
+            pattern=_TRAIN_CLASS_RE,
         ),
         "run_date": _required_pattern(
             leg.run_date,
@@ -887,9 +906,10 @@ def _journey_fields(train: TrainSummary) -> dict[str, str]:
             train.train_group_code,
             field="train_group_code",
         ),
-        "train_class_code": _required_digits(
+        "train_class_code": _required_pattern(
             train.train_class_code,
             field="train_class_code",
+            pattern=_TRAIN_CLASS_RE,
         ),
         "run_date": _required_pattern(
             train.run_date,

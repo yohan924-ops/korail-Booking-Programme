@@ -84,7 +84,9 @@ testpaths = ["tests"]
 # editable install happens to resolve to. Without this, running pytest from a
 # git worktree imports the MAIN checkout's src/ and reports a green suite for
 # code that was never under test.
-pythonpath = ["src"]
+# app/ 은 배포되지 않는 GUI 프로그램이다. 시험이 그 순수 층(journeys/search/
+# autobook/notify/settings)을 import 할 수 있어야 하므로 경로에 함께 올린다.
+pythonpath = ["src", "app"]
 markers = [
   "live: tests that call live KORAIL services and require explicit opt-in",
 ]
@@ -150,11 +152,11 @@ extend-immutable-calls = ["korail_mobile_api.read_payloads.RefundCompanion"]
 # VSCode/Pylance 가 그대로 읽는 설정이다. 기준은 하나 — 이 저장소의 파일을 열었을
 # 때 빨간 줄이 없어야 한다. 그래서 아래 값은 고른 것이 아니라 실제로 돌려서 오류
 # 0 이 되는 조합을 찾은 결과다.
-include = ["src", "tests", "scripts"]
+include = ["src", "tests", "scripts", "app"]
 # src 레이아웃을 명시한다. pyright 는 ./src 를 알아서 찾아 주기도 하지만, 그건
 # 문서화된 계약이 아니라 휴리스틱이다. pytest 의 `pythonpath = ["src"]` 와 같은
 # 것을 같은 이유로 적어 둔다 — 설치 없이 체크아웃만 열어도 import 가 풀려야 한다.
-extraPaths = ["src"]
+extraPaths = ["src", "app"]
 pythonVersion = "3.11"  # requires-python 의 하한과 같다
 typeCheckingMode = "basic"
 
