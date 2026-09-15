@@ -251,13 +251,6 @@ LOGIN_BAD_COLOUR = "#b3261e"
 LOGIN_OFF_COLOUR = "#666666"
 #: 감시 묶음의 꼬리표. 기록에서 어느 묶음의 줄인지 이것으로 압니다.
 ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-#: 자동완성이 무시하는 키. 방향키와 기능키로는 목록을 다시 좁히지 않습니다.
-_NAVIGATION_KEYS = frozenset(
-    {
-        "Up", "Down", "Left", "Right", "Return", "Escape", "Tab",
-        "Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R",
-    }
-)
 
 
 def parse_clock_field(text: str, *, label: str) -> str:
@@ -400,7 +393,18 @@ class AutocompleteCombobox(ttk.Combobox):
         self._popup_list: tk.Listbox | None = None
         self._popup_matches: list[str] = []
         self._popup_active = -1
-        self.bind("<KeyRelease>", self._on_key_release)
+        # <KeyRelease> 대신 textvariable 의 write trace 로 "값이 실제로
+        # 바뀌었을 때" 를 봅니다. 한글은 자모(ㄷ+ㅗ+ㅇ)가 입력기 안에서
+        # 조합돼 한 음절(동)로 합쳐지는데, 그 조합을 끝내는 마지막
+        # 키보드 이벤트 시점과 <KeyRelease> 가 실제로 도착하는 시점이
+        # 안 맞을 수 있습니다 — 실제로 "동" 두 글자를 다 쳐도 팝업이 안
+        # 뜨고, 세 번째 글자를 눌러야 그제야 뜬다는 신고가 있었습니다.
+        # StringVar 의 write trace 는 원인이 키 입력이든 입력기 조합이든
+        # 프로그램이 직접 `.set()` 했든, **값이 실제로 바뀐 그 순간**에만
+        # 불려 이 경합 자체가 없습니다.
+        variable = kwargs.get("textvariable")
+        if isinstance(variable, tk.Variable):
+            variable.trace_add("write", self._on_text_changed)
         self.bind("<Down>", self._on_down)
         self.bind("<Up>", self._on_up)
         # add="+" — 이 칸을 만든 자리(_build_query 등)가 이 뒤에 따로
@@ -427,8 +431,14 @@ class AutocompleteCombobox(ttk.Combobox):
         self._completions = tuple(names)
         self.configure(values=list(self._completions))
 
-    def _on_key_release(self, event: tk.Event) -> None:
-        if not self._completions or event.keysym in _NAVIGATION_KEYS:
+    def _on_text_changed(self, *_args: object) -> None:
+        # 사람이 지금 이 칸에 타이핑하는 중이 아니면(맞바꾸기 단추,
+        # 후보를 고른 뒤의 확정, 저장된 값 불러오기 등으로 값이 바뀐
+        # 경우) 팝업을 보일 이유가 없습니다 — 포커스가 없는 칸 아래에
+        # 갑자기 팝업이 뜨는 것 자체가 이상합니다.
+        if self.focus_get() is not self:
+            return
+        if not self._completions:
             return
         text = self.get().strip()
         if not text:
@@ -1526,8 +1536,13 @@ class BookerApp:
         )
         self.transfer_list.configure(yscrollcommand=list_scroll.set)
         list_scroll.pack(side="left", fill="y")
+        # 이 칸이 빈 상자로만 보여 무엇을 치는 칸인지 알기 어렵다는 지적이
+        # 있었습니다 — 목록 위 "환승역" 머리글과 떨어져 있어 더 그랬습니다.
+        ttk.Label(right, text="환승역 검색", foreground="#666666").pack(
+            anchor="w", pady=(4, 0)
+        )
         adder = ttk.Frame(right)
-        adder.pack(anchor="w", pady=(4, 0))
+        adder.pack(anchor="w")
         # 서버가 준 후보에 없는 역으로도 갈아탈 수 있습니다. 직접 지정 모드는
         # 어차피 두 구간을 따로 조회하는 것이라, 역 이름만 알면 됩니다.
         self.transfer_query = tk.StringVar()

@@ -1554,6 +1554,13 @@ def main() -> int:
     # 눈에 보이는 후보 목록이 아예 없었습니다. 새 팝업(별도 Toplevel, 이
     # 칸에 포커스를 주지 않음)이 실제로 뜨는지, 그러면서도 포커스는 이
     # 칸에 그대로 있는지(한글 조합이 안 끊기는지) 확인합니다.
+    #
+    # <KeyRelease> 를 흉내 내는 대신 실제 위젯 메서드(insert/delete)로
+    # 값을 바꿉니다 — "동" 두 글자를 다 쳐도 팝업이 안 뜨고 세 번째
+    # 글자를 눌러야 뜬다는 신고가 있었는데, 원인이 <KeyRelease> 와 한글
+    # 입력기 조합 완료 시점이 어긋나는 것이었습니다. 지금은 textvariable
+    # 의 write trace 로 보므로, insert() 가 그 변수를 실제로 바꾸는 바로
+    # 그 호출 안에서(추가 이벤트 시뮬레이션 없이도) 팝업이 떠야 합니다.
     app._fill_stations(["서울", "부산", "동대구", "동탄", "동해", "대전"])
     root.update()
     box = app.departure_box
@@ -1561,10 +1568,10 @@ def main() -> int:
     root.update()
     box.delete(0, "end")
     box.insert(0, "동")
-    box._on_key_release(types.SimpleNamespace(keysym="8"))
     root.update()
     check(
-        "역 이름을 치면 아래에 후보 팝업이 실제로 뜬다",
+        "한 글자만 쳐도(추가 키 이벤트 없이) 아래에 후보 팝업이 실제로 뜬다"
+        " — <KeyRelease> 와 한글 입력기 조합 시점이 어긋나 안 뜨던 문제",
         box.popup_visible() and box._popup_matches == ["동대구", "동탄", "동해"],
         box._popup_matches,
     )
@@ -1584,7 +1591,6 @@ def main() -> int:
 
     box.delete(0, "end")
     box.insert(0, "동")
-    box._on_key_release(types.SimpleNamespace(keysym="8"))
     root.update()
     check("Escape 를 누르면 팝업만 닫히고 글자는 남는다",
           box.popup_visible(), box.popup_visible())
@@ -1593,7 +1599,6 @@ def main() -> int:
     check("글자는 지워지지 않는다", box.get() == "동", box.get())
 
     box.delete(0, "end")
-    box._on_key_release(types.SimpleNamespace(keysym="BackSpace"))
     root.update()
     check("칸을 비우면 팝업도 사라진다", not box.popup_visible())
 
@@ -1601,7 +1606,6 @@ def main() -> int:
     # 닫혀야 합니다 — 안 그러면 화면에 안 쓰는 칸의 후보 목록이 그대로
     # 남는 고아 팝업이 됩니다.
     box.insert(0, "동")
-    box._on_key_release(types.SimpleNamespace(keysym="8"))
     root.update()
     check("다른 칸(도착역)으로 넘어가기 전엔 팝업이 떠 있다", box.popup_visible())
     app.arrival_box.focus_set()
@@ -1612,8 +1616,18 @@ def main() -> int:
         not box.popup_visible(),
     )
     box.delete(0, "end")
+    # 두 칸 다 포커스를 뗍니다 — 맞바꾸기 단추나 설정 불러오기는 이
+    # 칸들에 포커스가 없는 상태에서 값을 바꿉니다.
+    root.focus_set()
+    root.update()
     app.departure.set("동탄")
     app.arrival.set("동대구")
+    root.update()
+    check(
+        "맞바꾸기·저장된 값 불러오기처럼 포커스 없이 값을 바꾸면 팝업이"
+        " 뜨지 않는다 — 타이핑 중이 아닌데 갑자기 뜨면 안 된다",
+        not box.popup_visible() and not app.arrival_box.popup_visible(),
+    )
 
     # -- 레이아웃: 환승역 목록은 더 길게, 기록은 조회 묶음 옆으로 ------------
     check("환승역 목록이 세로로 길어졌다(4줄 -> 12줄)",

@@ -705,6 +705,44 @@ def test_station_search_puts_prefix_matches_first():
 # 스스로 훔치지 않는지)을 봅니다.
 
 
+def test_the_popup_shows_on_the_first_character_not_the_next_one():
+    """한 글자만 쳐도(예: "동") 바로 아래 후보가 떠야 합니다 — 실제로는
+    두 글자를 다 쳐도 안 뜨고, 다음 글자를 눌러야 그제야 떴다는 신고가
+    있었습니다. 원인은 ``<KeyRelease>`` 가 한글 입력기의 조합 완료
+    시점과 어긋나는 것이었습니다(입력기가 자모를 음절로 합치는 순간과,
+    Tk 가 그 키 이벤트를 실제로 전달하는 순간이 딱 맞지 않을 수
+    있습니다). 그래서 키 이벤트 대신 ``textvariable`` 의 write trace로
+    바꿨습니다 — 값이 실제로 바뀐 바로 그 순간에만 불리므로, 원인이
+    키 입력이든 입력기 조합이든 경합이 없습니다. 실제 동작 확인은
+    scripts/gui_smoke.py(real Tk, 실제 Entry.insert() 호출)가 합니다 —
+    여기서는 그 메커니즘 자체(trace 를 쓰고, 더는 KeyRelease 에 기대지
+    않는지)만 소스로 확인합니다.
+    """
+    tree = ast.parse(_ui_source())
+    cls = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name == "AutocompleteCombobox"
+    )
+    body = ast.unparse(cls)
+    assert 'variable.trace_add(' in body
+    assert "'write'" in body
+    # <KeyRelease> 에 기대던 예전 방식은 완전히 빠져야 합니다 — 남아
+    # 있으면 두 메커니즘이 같은 팝업을 두 번 여닫는 혼선이 생깁니다.
+    assert "_on_key_release" not in body
+    assert "KeyRelease" not in body
+    assert "_NAVIGATION_KEYS" not in _ui_source()
+
+
+def test_the_popup_never_appears_from_a_focusless_value_change():
+    """맞바꾸기 단추, 저장된 값 불러오기처럼 **이 칸에 포커스가 없는데도**
+    값이 바뀌는 자리가 여럿 있습니다(``swap_departure_arrival`` 등).
+    trace 는 원인을 안 가리므로, 포커스가 없으면 팝업을 안 띄우도록
+    직접 걸러야 합니다 — 안 그러면 타이핑도 안 했는데 팝업이 뜹니다.
+    """
+    body = _ui_function("_on_text_changed")
+    assert "if self.focus_get() is not self:" in body
+
+
 def test_the_popup_never_steals_focus_from_the_entry():
     """팝업(Toplevel)이나 그 안의 Listbox 에 스스로 포커스를 주지
     않습니다 — 타이핑 중에 포커스가 옮겨 가면 한글 입력기의 글자 조합이
@@ -750,6 +788,15 @@ def test_the_transfer_station_comment_is_short_and_up_top():
     source = _ui_source()
     assert '"(검증) = 코레일이 이 구간에 답한 역."' in source
     assert "qry.chtnStn.do" not in source
+
+
+def test_the_transfer_search_box_says_what_it_is_for():
+    """역 추가 칸이 빈 상자로만 보여 무엇을 치는 칸인지 모르겠다는
+    지적이 있었습니다 — 목록 위 "환승역" 머리글과 떨어져 있어 더
+    그랬습니다. 그 칸 바로 위에 이름을 답니다.
+    """
+    source = _ui_source()
+    assert '"환승역 검색"' in source
 
 
 def test_station_codes_pass_through_and_unknown_names_are_refused():
