@@ -2114,6 +2114,18 @@ def _ui_function(name: str) -> str:
     )
 
 
+def _single_instance_function(name: str) -> str:
+    source = (APP_DIR / "korail_booker" / "single_instance.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    return next(
+        ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+
+
 def test_watches_are_remembered_by_journey_not_by_row_number():
     """자리 번호로 기억하면 사이에서 하나를 빼는 순간 전부 어긋납니다."""
     source = _ui_source()
@@ -2354,10 +2366,12 @@ def test_the_token_dialog_walks_through_the_real_botfather_flow():
                  "3단계 — 내 봇과 먼저 대화하기 (꼭 필요합니다)",
                  "4단계 — 대화 ID 채우기"):
         assert step in source, step
-    # 실제 캡처에 나온 그대로의 순서·문구입니다.
+    # 실제 캡처가 보여 준 순서(검색 → /newbot → 이름·아이디 → 토큰)를
+    # 간결한 문장으로 요약해 둡니다 — 지적을 받고 4~5줄짜리 단계별 인용문을
+    # 짧은 한 문단으로 줄였으므로, 캡처 속 문구를 그대로 따오지는 않습니다.
     assert "BotFather" in source and "/newbot" in source
-    assert "bot 으로 끝나야 합니다" in source
-    assert "Use this token to access the HTTP API" in source
+    assert "bot 으로 끝나는" in source
+    assert "답장의 토큰 줄을 복사해" in source
     assert 'text="토큰 확인"' in source
     assert 'text="내 대화 ID 찾기"' in source
     # 외부 링크는 더 안 씁니다 — webbrowser 자체를 더는 import 하지 않습니다.
@@ -2435,7 +2449,7 @@ def test_the_telegram_popup_scrolls_instead_of_overflowing_small_screens():
     assert "잘 안 되면:" in settings_body
 
     guide_body = _ui_function("on_telegram_guide")
-    assert "먼저 말을 건 적이 없는 봇에게 대화 ID 를 주지" in guide_body
+    assert "먼저 말을 걸지 않으면" in guide_body
 
 
 def test_the_example_token_is_not_a_real_one():
@@ -5272,6 +5286,33 @@ def test_the_first_launch_claims_the_port_and_becomes_the_original():
     finally:
         if server is not None:
             server.close()
+
+
+def test_windows_never_gets_the_posix_reuseaddr_that_lets_a_duplicate_steal_the_port():
+    """실사용자 보고: 프로그램이 트레이에 떠 있는데 exe 를 다시 눌러도
+    창이 하나 더 늘었습니다 — 이 저장소의 시험은 리눅스에서 돌아 통과했지만,
+    실제로 쓰는 곳은 윈도우뿐입니다.
+
+    원인은 ``SO_REUSEADDR`` 이 두 운영체제에서 뜻이 다르다는 것이었습니다.
+    POSIX(리눅스·macOS)에서는 방금 닫힌 소켓의 TIME_WAIT 상태만 재사용하게
+    해 주지만, 윈속(Winsock)의 같은 이름의 옵션은 **이미 다른 프로세스가
+    LISTEN 중인 포트에도 새 bind 를 그냥 성공시켜 버립니다** — 마이크로
+    소프트 자신이 포트 탈취 위험으로 문서화해 둔 동작입니다. 그래서
+    원본이 멀쩡히 떠 있어도 둘째 사본이 같은 포트를 또 잡아, 신호를
+    보내는 대신 자기 창을 열어 버렸습니다.
+
+    값을 지어내지 않고 실제 소스가 플랫폼을 가르는지 확인합니다 —
+    윈도우에서는 ``SO_REUSEADDR`` 를 켜지 않고(``SO_EXCLUSIVEADDRUSE`` 로
+    단독 바인드를 요구), 그 밖에서만 ``SO_REUSEADDR`` 를 켭니다.
+    """
+    body = _single_instance_function("_try_claim_port")
+    marker = "if sys.platform == 'win32':"
+    assert marker in body
+    win_branch, _, posix_branch = body.partition(marker)[2].partition("else:")
+    assert "SO_REUSEADDR" not in win_branch
+    assert "SO_EXCLUSIVEADDRUSE" in win_branch
+    assert "SO_REUSEADDR" in posix_branch
+    assert "SO_EXCLUSIVEADDRUSE" not in posix_branch
 
 
 def test_a_second_launch_signals_the_original_instead_of_opening_a_window():

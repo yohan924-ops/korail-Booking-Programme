@@ -26,6 +26,7 @@ Tkinter 는 여기서 import 하지 않습니다 — ``tray.py`` 와 같은 이�
 from __future__ import annotations
 
 import socket
+import sys
 import threading
 from collections.abc import Callable
 
@@ -44,12 +45,28 @@ _SIGNAL_TIMEOUT_S = 0.5
 def _try_claim_port(port: int) -> socket.socket | None:
     """이 포트를 잡아 봅니다. 성공하면 그 소켓(원본이 됐다는 뜻)을,
     이미 누가 쓰고 있으면 ``None`` 을 돌려줍니다.
+
+    ``SO_REUSEADDR`` 은 **POSIX(리눅스·macOS)에서만** 켭니다 — 방금
+    끝난 사본이 남긴 TIME_WAIT 상태 때문에 곧장 다시 뜬 새 사본이 괜히
+    "이미 떠 있다" 고 오판하지 않게 하려는 것입니다. 그런데 이 옵션은
+    윈도우에서는 뜻이 완전히 다릅니다 — POSIX 는 TIME_WAIT 소켓의 재사용만
+    허락하지만, 윈속(Winsock)의 ``SO_REUSEADDR`` 는 **이미 원본이
+    LISTEN 중인 포트에도 둘째의 bind 를 그냥 성공시켜 버립니다**(마이크로
+    소프트 자신도 이를 포트 탈취 위험으로 문서화해 뒀습니다). 실제로 이
+    프로그램은 윈도우 전용 exe 인데, 이 옵션을 무조건 켜 뒀던 판은 원본이
+    떠 있어도 둘째가 같은 포트를 또 잡아 창이 두 개로 늘어나는 것을 실제
+    사용자 보고로 확인했습니다 — 이 파일이 존재하는 이유 자체가 없어지는
+    버그였습니다. 대신 윈도우에서는 ``SO_EXCLUSIVEADDRUSE`` 로 "누구와도
+    공유하지 않는 단독 바인드" 를 명시적으로 요구합니다.
     """
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        # 방금 끝난 사본이 남긴 TIME_WAIT 상태 때문에 곧장 다시 뜬 새
-        # 사본이 괜히 "이미 떠 있다" 고 오판하지 않게 합니다.
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if sys.platform == "win32":
+            exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+            if exclusive is not None:
+                server.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+        else:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind(("127.0.0.1", port))
         server.listen(4)
     except OSError:

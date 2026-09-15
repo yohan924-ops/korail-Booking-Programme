@@ -6052,27 +6052,19 @@ class BookerApp:
         step1.grid(row=1, column=0, sticky="ew", padx=10, pady=4)
         ttk.Label(
             step1,
-            text="① 검색창에 BotFather 를 치면 파란 체크가 붙은 공식 계정이 "
-            "나옵니다 — 그 대화를 엽니다.\n"
-            "② [시작] 을 누르거나 /start 를 보낸 뒤, /newbot 을 보냅니다.\n"
-            '③ "봇 이름을 뭘로 할까요?" 라고 물으면 아무 이름이나 보냅니다 '
-            "(예: 코레일 알림).\n"
-            '④ "봇 아이디를 알려주세요. 반드시 bot 으로 끝나야 합니다"\n'
-            "     라고 물으면, bot 으로 끝나는 아이디를 보냅니다\n"
-            "     (예: my_korail_alarm_bot). 이미 쓰는 아이디면 다시 물어봅니다.\n"
-            '⑤ "Done! Congratulations…" 로 시작하는 답장이 오면 다 만들어진 '
-            "것입니다 — 그 답장 안에 토큰이 있습니다(2단계).",
+            text="BotFather 를 검색해 대화를 열고 /newbot 을 보냅니다. 봇 "
+            "이름과 (bot 으로 끝나는) 아이디를 순서대로 정하면(예: "
+            "my_korail_alarm_bot), 완료 답장 안에 토큰이 있습니다(2단계).",
             wraplength=460,
             justify="left",
         ).pack(anchor="w", padx=8, pady=6)
-        guide_image(step1, "step1_search_botfather.png", subsample=2)
+        guide_image(step1, "step1_search_botfather.png", subsample=1)
 
         step2 = ttk.LabelFrame(body, text="2단계 — 토큰 복사하기")
         step2.grid(row=2, column=0, sticky="ew", padx=10, pady=4)
         ttk.Label(
             step2,
-            text='BotFather 답장에서 "Use this token to access the HTTP API:" '
-            "바로 아랫줄을 통째로 복사해, [텔레그램 설정] 창의 토큰 칸에 "
+            text="답장의 토큰 줄을 복사해 [텔레그램 설정] 의 토큰 칸에 "
             "붙여넣고 [토큰 확인] 을 누르세요.",
             wraplength=460,
             justify="left",
@@ -6086,13 +6078,9 @@ class BookerApp:
         step3.grid(row=3, column=0, sticky="ew", padx=10, pady=4)
         ttk.Label(
             step3,
-            text="BotFather 답장 속 t.me/아이디 링크를 누르거나, 만든 봇 이름으로 "
-            "검색해 대화를 열고 [열기]/[시작] 을 누른 뒤, /start 를 한 번 "
-            "보냅니다(아무 메시지나 보내도 됩니다).\n"
-            "\n"
-            "텔레그램은 사용자가 먼저 말을 건 적이 없는 봇에게 대화 ID 를 "
-            "주지 않습니다. 그래서 이 단계를 건너뛰면 [텔레그램 설정] 의\n"
-            "[내 대화 ID 찾기] 가 늘 빈손으로 돌아옵니다.",
+            text="봇에게 말을 먼저 걸고(대화를 열어 /start), [텔레그램 설정] "
+            "에서 [내 대화 ID 찾기] 를 눌러보세요. 먼저 말을 걸지 않으면 "
+            "빈손으로 돌아옵니다.",
             wraplength=460,
             justify="left",
         ).pack(anchor="w", padx=8, pady=6)
@@ -6102,10 +6090,8 @@ class BookerApp:
         step4.grid(row=4, column=0, sticky="ew", padx=10, pady=4)
         ttk.Label(
             step4,
-            text="3단계를 마쳤으면 [텔레그램 설정] 창으로 돌아가 [내 대화 ID "
-            "찾기] 를 누르세요 — 봇이 받은 마지막 메시지에서 읽어 자동으로 "
-            "채워 줍니다. 모양: 123456789 — 숫자입니다(그룹이면 앞에 - 가 "
-            "붙습니다).",
+            text="[텔레그램 설정] 에서 [내 대화 ID 찾기] 를 누르면 자동으로 "
+            "채워집니다.",
             wraplength=460,
             justify="left",
         ).pack(anchor="w", padx=8, pady=6)
