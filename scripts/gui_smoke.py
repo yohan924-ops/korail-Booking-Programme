@@ -97,7 +97,7 @@ def main() -> int:
     from korail_booker.autobook import Target
     from korail_booker.holds import Held
     from korail_booker.journeys import Journey, JourneySource
-    from korail_booker.search import TRANSFER_CUSTOM, SearchRequest
+    from korail_booker.search import TRANSFER_CUSTOM, TRANSFER_SERVER, SearchRequest
 
     from korail_mobile_api import KorailPassengerCounts, KorailSeatClass, TrainSummary
 
@@ -1389,6 +1389,19 @@ def main() -> int:
         app._transfer_stations_loaded(("동대구", "동탄"), ["신경주"])
         check("같은 구간에서 다시 부르면 새로 받아 오려 하지 않는다(재요청 없음)",
               not fetch_calls, fetch_calls)
+        # 실사용에서 두 번 신고된 것: 코레일 추천⇄환승역 직접 선택을
+        # 바꿔도(구간은 그대로인데) 새로고침이 안 된다는 것이었습니다.
+        # 모드 전환은 [환승역 새로고침] 을 직접 누른 것과 같은 뜻으로
+        # 취급해(force=True) 같은 구간이어도 무조건 다시 받아 옵니다.
+        app.transfer_mode.set(TRANSFER_SERVER)
+        app._transfer_toggled()
+        check(
+            "같은 구간이어도 코레일 추천⇄환승역 직접 선택을 바꾸면 "
+            "[환승역 새로고침] 처럼 무조건 다시 받아 온다",
+            bool(fetch_calls), fetch_calls,
+        )
+        fetch_calls.clear()
+        app.transfer_mode.set(TRANSFER_CUSTOM)
         app.departure.set("부산")
         app.arrival.set("서울")
         app._offer_transfer_candidates()
@@ -1402,6 +1415,71 @@ def main() -> int:
         app.clear_transfer_stations()
         app.departure.set("동대구")
         app.arrival.set("동탄")
+
+    # -- 역 이름 자동완성: 아래에 후보가 실제로 보이는가 ---------------------
+    #
+    # "지금은 안 보인다" 는 신고가 있었습니다 — 예전엔 ttk.Combobox 자신의
+    # 드롭다운(한글 조합을 끊는 문제 때문에 스스로 펼치지 않음)만 있고,
+    # 눈에 보이는 후보 목록이 아예 없었습니다. 새 팝업(별도 Toplevel, 이
+    # 칸에 포커스를 주지 않음)이 실제로 뜨는지, 그러면서도 포커스는 이
+    # 칸에 그대로 있는지(한글 조합이 안 끊기는지) 확인합니다.
+    app._fill_stations(["서울", "부산", "동대구", "동탄", "동해", "대전"])
+    root.update()
+    box = app.departure_box
+    box.focus_set()
+    root.update()
+    box.delete(0, "end")
+    box.insert(0, "동")
+    box._on_key_release(types.SimpleNamespace(keysym="8"))
+    root.update()
+    check(
+        "역 이름을 치면 아래에 후보 팝업이 실제로 뜬다",
+        box.popup_visible() and box._popup_matches == ["동대구", "동탄", "동해"],
+        box._popup_matches,
+    )
+    check(
+        "팝업이 떠도 이 칸에 포커스가 그대로 있다(한글 조합이 안 끊긴다)",
+        root.focus_get() is box, root.focus_get(),
+    )
+    box._on_down(None)
+    box._on_down(None)
+    box._on_return(None)
+    root.update()
+    check(
+        "↓ 로 두 번째 후보까지 훑고 Enter 를 누르면 그 역으로 확정된다",
+        app.departure.get() == "동탄", app.departure.get(),
+    )
+    check("확정되면 팝업이 사라진다", not box.popup_visible())
+
+    box.delete(0, "end")
+    box.insert(0, "동")
+    box._on_key_release(types.SimpleNamespace(keysym="8"))
+    root.update()
+    check("Escape 를 누르면 팝업만 닫히고 글자는 남는다",
+          box.popup_visible(), box.popup_visible())
+    box._on_escape(None)
+    check("Escape 뒤에는 팝업이 사라진다", not box.popup_visible())
+    check("글자는 지워지지 않는다", box.get() == "동", box.get())
+
+    box.delete(0, "end")
+    box._on_key_release(types.SimpleNamespace(keysym="BackSpace"))
+    root.update()
+    check("칸을 비우면 팝업도 사라진다", not box.popup_visible())
+    app.departure.set("동탄")
+    app.arrival.set("동대구")
+
+    # -- 레이아웃: 환승역 목록은 더 길게, 기록은 조회 묶음 옆으로 ------------
+    check("환승역 목록이 세로로 길어졌다(4줄 -> 12줄)",
+          int(app.transfer_list.cget("height")) >= 10,
+          app.transfer_list.cget("height"))
+    log_paned = app.log_text.master.master  # LabelFrame -> 세로 PanedWindow
+    check(
+        "기록(로그)이 이제 '2. 열차 조회' 묶음 안, 환승 조건 오른쪽(3번째 "
+        "칸)에 있다 — 예전처럼 창 맨 아래 혼자 있는 칸이 아니다",
+        log_paned.master is app.query_frame
+        and int(log_paned.grid_info().get("column", -1)) == 2,
+        (log_paned.master is app.query_frame, log_paned.grid_info()),
+    )
 
     # -- 트레이: 창의 X 단추은 트레이가 있을 때만 숨긴다 ----------------------
     #

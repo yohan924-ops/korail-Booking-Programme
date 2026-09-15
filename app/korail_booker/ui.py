@@ -345,17 +345,37 @@ def _passenger_text(passengers: KorailPassengerCounts | None) -> str:
 
 
 class AutocompleteCombobox(ttk.Combobox):
-    """치는 대로 목록이 좁혀지는 콤보. 직접 입력도 그대로 됩니다.
+    """치는 대로 **아래에 후보 목록을 보여주는** 콤보. 직접 입력도 그대로 됩니다.
 
-    드롭다운을 **스스로 펼치지는 않습니다.** 한글 입력기가 글자를 조합하는
-    도중에 목록을 펼치면 조합이 끊어집니다. 목록만 좁혀 두고, 펼치는 것은
-    아래 화살표나 ``Down`` 키에 맡깁니다.
+    ttk.Combobox 자신의 드롭다운(펼치면 내부적으로 포커스·grab 을 건드립니다)
+    은 쓰지 않습니다 — 타이핑 중에 그걸 강제로 열면 한글 입력기가 글자를
+    조합하는 도중에 조합이 끊어집니다(실제로 그랬습니다, "지금은 안 보인다"
+    는 신고도 있었습니다). 그래서 이 칸(Entry) 에는 **절대 포커스를 주지
+    않는** 테두리 없는 작은 창(Toplevel, 시험 환경이 아닌 한 늘 위에 뜸)에
+    후보를 띄웁니다 — 타이핑 중인 커서·IME 상태는 건드리지 않으면서도
+    마우스로 고르거나, ↓/↑ 로 훑고 Enter 로 고를 수 있습니다.
     """
+
+    #: 한 번에 보여줄 후보 수. 너무 많으면 목록이 화면을 덮습니다.
+    _MAX_SUGGESTIONS = 8
 
     def __init__(self, master: tk.Misc, **kwargs: object) -> None:
         super().__init__(master, **kwargs)  # type: ignore[arg-type]
         self._completions: tuple[str, ...] = ()
+        self._popup: tk.Toplevel | None = None
+        self._popup_list: tk.Listbox | None = None
+        self._popup_matches: list[str] = []
+        self._popup_active = -1
         self.bind("<KeyRelease>", self._on_key_release)
+        self.bind("<Down>", self._on_down)
+        self.bind("<Up>", self._on_up)
+        # add="+" — 이 칸을 만든 자리(_build_query 등)가 이 뒤에 따로
+        # <Return> 을 걸어(조회를 부르거나, 환승역을 더하거나) 씁니다. 그
+        # 자리가 먼저 덮어써 버리면 안 되므로, 그쪽도 add="+" 로 걸어야
+        # 합니다 — 그래야 후보를 먼저 확정하고, 그 값으로 그 동작이 이어집니다.
+        self.bind("<Return>", self._on_return, add="+")
+        self.bind("<Escape>", self._on_escape)
+        self.bind("<FocusOut>", lambda _e: self._hide_popup())
         self.swallow_wheel(self)
 
     @staticmethod
@@ -376,13 +396,111 @@ class AutocompleteCombobox(ttk.Combobox):
     def _on_key_release(self, event: tk.Event) -> None:
         if not self._completions or event.keysym in _NAVIGATION_KEYS:
             return
-        if not self.get().strip():
+        text = self.get().strip()
+        if not text:
             # 다 지웠으면 목록도 통째로 되돌립니다. 좁힌 결과(앞의 30개)를
             # 그대로 두면, 지운 뒤에는 전국 역이 아니라 그 30개만 남습니다.
             self.configure(values=list(self._completions))
+            self._hide_popup()
             return
-        matches = filter_station_names(self._completions, self.get())
+        matches = filter_station_names(self._completions, text, limit=self._MAX_SUGGESTIONS)
         self.configure(values=matches or list(self._completions))
+        if matches:
+            self._show_popup(matches)
+        else:
+            self._hide_popup()
+
+    # -- 후보 팝업 -------------------------------------------------------
+
+    def _show_popup(self, matches: list[str]) -> None:
+        self._popup_matches = matches
+        self._popup_active = -1
+        if self._popup is None or not self._popup.winfo_exists():
+            popup = tk.Toplevel(self)
+            popup.wm_overrideredirect(True)
+            popup.wm_attributes("-topmost", True)
+            listbox = tk.Listbox(popup, exportselection=False, activestyle="none")
+            listbox.pack()
+            listbox.bind("<Button-1>", self._on_popup_click)
+            self._popup = popup
+            self._popup_list = listbox
+        listbox = self._popup_list
+        assert listbox is not None
+        listbox.delete(0, "end")
+        for name in matches:
+            listbox.insert("end", name)
+        listbox.configure(height=len(matches))
+        x = self.winfo_rootx()
+        y = self.winfo_rooty() + self.winfo_height()
+        assert self._popup is not None
+        self._popup.wm_geometry(f"+{x}+{y}")
+        self._popup.deiconify()
+        self._popup.lift()
+
+    def _hide_popup(self) -> None:
+        if self._popup is not None and self._popup.winfo_exists():
+            self._popup.withdraw()
+        self._popup_active = -1
+
+    def popup_visible(self) -> bool:
+        return (
+            self._popup is not None
+            and self._popup.winfo_exists()
+            and str(self._popup.state()) != "withdrawn"
+        )
+
+    def _move_active(self, step: int) -> None:
+        if not self.popup_visible() or not self._popup_matches:
+            return
+        listbox = self._popup_list
+        assert listbox is not None
+        count = len(self._popup_matches)
+        self._popup_active = (self._popup_active + step) % count
+        listbox.selection_clear(0, "end")
+        listbox.selection_set(self._popup_active)
+        listbox.activate(self._popup_active)
+        listbox.see(self._popup_active)
+
+    def _on_down(self, _event: tk.Event) -> str | None:
+        if not self.popup_visible():
+            return None
+        self._move_active(1)
+        return "break"
+
+    def _on_up(self, _event: tk.Event) -> str | None:
+        if not self.popup_visible():
+            return None
+        self._move_active(-1)
+        return "break"
+
+    def _on_return(self, _event: tk.Event) -> None:
+        """팝업이 떠 있으면 골라 확정합니다. **"break" 를 돌려주지 않습니다**
+        — add="+" 로 뒤에 걸린 이 칸의 원래 Enter 동작(조회, 역 추가 등)이
+        이 확정된 값을 그대로 이어받아 써야 하기 때문입니다.
+        """
+        if not self.popup_visible():
+            return
+        index = self._popup_active if self._popup_active >= 0 else 0
+        if 0 <= index < len(self._popup_matches):
+            self._pick(self._popup_matches[index])
+
+    def _on_escape(self, _event: tk.Event) -> str | None:
+        if not self.popup_visible():
+            return None
+        self._hide_popup()
+        return "break"
+
+    def _on_popup_click(self, event: tk.Event) -> None:
+        listbox = self._popup_list
+        assert listbox is not None
+        index = listbox.nearest(event.y)
+        if 0 <= index < listbox.size():
+            self._pick(listbox.get(index))
+
+    def _pick(self, name: str) -> None:
+        self.set(name)
+        self.icursor("end")
+        self._hide_popup()
 
 
 class CalendarPanel(tk.Frame):
@@ -787,11 +905,12 @@ class BookerApp:
         canvas.bind_all("<Shift-Button-5>", lambda e: self._on_wheel(e, "x"))
 
         self._build_login(body)
+        # 기록(로그)은 이제 별도 칸이 아니라 _build_query 안, 환승 조건
+        # 오른쪽에 붙습니다 — 3·4·5번 표에 세로 공간을 더 주려는 것입니다.
         self._build_query(body)
         self._build_results(body)
         self._build_targets(body)
         self._build_holds(body)
-        self._build_log(body)
         # 묶음을 다 붙인 뒤라야 최소 높이를 잴 수 있고, 그 합을 알아야 스크롤
         # 영역을 정할 수 있다 — 창이 그보다 작으면 굴려서 본다.
         self._settle_panes()
@@ -808,8 +927,10 @@ class BookerApp:
         # Enter 는 칸마다 답니다. 창 전체에 걸면 어느 칸에 있든 조회가
         # 돌았습니다 — 눈이 가 있는 칸이 무엇을 뜻하는지가 사람의 기대입니다.
         # 로그인 칸의 Enter 는 팝업 안에서 따로 답니다.
+        # add="+" — AutocompleteCombobox 자신도 <Return> 을 걸어 두므로
+        # (팝업에서 고른 역을 확정), 이 자리가 그걸 덮어쓰면 안 됩니다.
         for widget in self.query_fields:
-            widget.bind("<Return>", lambda _event: self.on_search())
+            widget.bind("<Return>", lambda _event: self.on_search(), add="+")
         # 켜자마자 로그인부터 묻습니다. 본 창은 그동안 눌리지 않습니다.
         self.root.after(300, self.open_login)
 
@@ -1265,6 +1386,11 @@ class BookerApp:
             row=0, column=1, rowspan=7, sticky="nw", padx=(12, 4), pady=(2, 6)
         )
         self.query_frame = frame
+        # 환승 조건 오른쪽, 이 묶음이 창 너비를 다 안 쓰는 만큼 남는 빈
+        # 자리에 기록(로그)을 둡니다 — 예전엔 이 창 맨 아래에 저 혼자 한
+        # 칸(세로로 늘었다 줄었다 하는 칸)을 차지해서, 그만큼 3·4·5번 표
+        # (조회 결과·예매 대상·잡은 예약)가 눌렸습니다.
+        self._build_log(frame)
         self.calendar = CalendarPanel(frame, self._calendar_picked)
         self._build_search_button(frame)
         left = ttk.Frame(self.transfer_frame)
@@ -1302,6 +1428,14 @@ class BookerApp:
         right = ttk.Frame(self.transfer_frame)
         right.grid(row=0, column=1, sticky="nw", padx=(10, 4), pady=4)
         ttk.Label(right, text="환승역 (Ctrl+클릭으로 여러 개)").pack(anchor="w")
+        # 예전엔 이 설명이 단추 줄 아래 긴 문단으로(구간을 바꾸면 자동으로
+        # 새로 불러온다는 말까지) 붙어 있었습니다. 간단히 줄이고, 목록을
+        # 보기 전에 먼저 읽도록 머리글 바로 아래로 옮겼습니다.
+        ttk.Label(
+            right,
+            text="(검증) = 코레일이 이 구간에 답한 역.",
+            foreground="#666666",
+        ).pack(anchor="w")
         # 이 목록이 무엇이고 지금 무슨 구실을 하는지는 모드마다 다릅니다.
         # 화면이 그것을 말하지 않으면 고른 역이 필터인지 조회 대상인지 알 수
         # 없습니다.
@@ -1316,8 +1450,10 @@ class BookerApp:
         ).pack(anchor="w")
         picker = ttk.Frame(right)
         picker.pack(anchor="w")
+        # 예전엔 4줄이라 몇 개만 골라도 스크롤해야 보였습니다 — 세로로
+        # 더 길게 늘렸습니다.
         self.transfer_list = tk.Listbox(
-            picker, selectmode="extended", height=4, width=20, exportselection=False
+            picker, selectmode="extended", height=12, width=20, exportselection=False
         )
         self.transfer_list.bind("<<ListboxSelect>>", self.mark_stale)
         self.transfer_list.pack(side="left")
@@ -1335,7 +1471,12 @@ class BookerApp:
             adder, textvariable=self.transfer_query, width=9
         )
         self.transfer_entry.pack(side="left")
-        self.transfer_entry.bind("<Return>", lambda _event: self.add_transfer_station())
+        # add="+" — AutocompleteCombobox 자신의 <Return> (팝업에서 고른
+        # 역 확정)을 덮어쓰지 않아야, 고른 역이 그대로 이 칸에 확정된 뒤
+        # 추가됩니다.
+        self.transfer_entry.bind(
+            "<Return>", lambda _event: self.add_transfer_station(), add="+"
+        )
         self.transfer_add_button = ttk.Button(
             adder, text="추가", width=5, command=self.add_transfer_station
         )
@@ -1360,16 +1501,6 @@ class BookerApp:
             command=self.clear_transfer_stations
         )
         self.transfer_clear_button.pack(side="left", padx=(2, 0))
-        ttk.Label(
-            right,
-            text="코레일이 이 구간에 답한 역입니다(qry.chtnStn.do) — 목록에 "
-            "(검증) 이 붙습니다. 구간(출발·도착)을 바꾸면 자동으로 새로 "
-            "불러옵니다. 같은 구간에서 [환승역 새로고침] 을 누르면 더하기만 "
-            "하고 지우지 않습니다 — 지우려면 [빼기]·[비우기].",
-            foreground="#666666",
-            wraplength=230,
-            justify="left",
-        ).pack(anchor="w", pady=(2, 0))
 
     def _section(
         self,
@@ -2858,17 +2989,21 @@ class BookerApp:
             foreground="#666666",
         ).grid(row=6, column=0, columnspan=2, sticky="w", padx=4, pady=(0, 6))
 
-    def _build_log(self, parent: tk.PanedWindow) -> None:
+    def _build_log(self, frame: ttk.LabelFrame) -> None:
         """기록을 둘로 나눕니다 — 조회 쪽과 자동예매 쪽.
 
         한 창에 섞어 두면 자동예매가 도는 동안 회차 기록이 조회 기록을 밀어
         올려, 정작 보고 싶은 "지금 몇 번째 조회에서 무엇이 매진인지" 가 흘러가
-        버립니다. 가운데 손잡이를 끌어 폭을 정할 수 있습니다.
+        버립니다.
+
+        "2. 열차 조회" 묶음(``frame``) 의 3번째 칸, 환승 조건 오른쪽에
+        위아래로 둡니다 — 예전엔 이 창 맨 아래에 저 혼자 한 칸을 차지해서
+        (세로로 늘었다 줄었다 하는 칸이라 3·4·5번 표와 자리를 다퉜습니다),
+        그만큼 조회 결과·예매 대상·잡은 예약 표가 눌렸습니다. 가운데
+        손잡이를 끌어 어느 쪽을 더 볼지 정할 수 있습니다.
         """
-        paned = ttk.PanedWindow(parent, orient="horizontal")
-        # 기록도 줄여도 됩니다. pady 는 tk.PanedWindow 에서 숫자 하나만
-        # 받습니다(튜플은 거절).
-        self._add_pane(parent, paned, minsize=110, stretch="always")
+        paned = ttk.PanedWindow(frame, orient="vertical")
+        paned.grid(row=0, column=2, rowspan=7, sticky="nsew", padx=(12, 4), pady=(2, 6))
         self.log_text = self._log_pane(
             paned, "기록 (로그인·조회)", self.clear_log, weight=3
         )
@@ -2888,7 +3023,7 @@ class BookerApp:
         parent.add(frame, weight=weight)
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
-        text = tk.Text(frame, height=6, width=40, wrap="word", state="disabled")
+        text = tk.Text(frame, height=6, width=34, wrap="word", state="disabled")
         text.grid(row=0, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
         text.configure(yscrollcommand=scroll.set)
@@ -2998,10 +3133,17 @@ class BookerApp:
     # -- 환승 조건 -----------------------------------------------------------
 
     def _transfer_toggled(self) -> None:
-        """환승 체크나 모드가 바뀌었을 때. 상태를 맞추고 결과를 낡음으로."""
+        """환승 체크나 모드가 바뀌었을 때. 상태를 맞추고 결과를 낡음으로.
+
+        사람이 직접 누른 것이므로, 목록이 이미 이 구간 것이어도 무조건
+        다시 받아 옵니다(``force=True``) — [환승역 새로고침] 을 누른 것과
+        같은 뜻입니다. 그러지 않으면 "이 구간에서 손댄 목록은 안 덮는다"
+        는 보호가 그대로 걸려, 코레일 추천⇄환승역 직접 선택을 오가도
+        목록이 안 바뀐 것처럼 보입니다 — 실제로 그런 신고가 있었습니다.
+        """
         self.sync_transfer_state()
         self.mark_stale()
-        self._offer_transfer_candidates()
+        self._offer_transfer_candidates(force=True)
 
     def _reset_transfer_load_button(self) -> None:
         """[환승역 새로고침] 을 지금 상태에 맞춰 되돌립니다."""
@@ -3019,17 +3161,23 @@ class BookerApp:
         """
         return self._transfer_list_route == route
 
-    def _offer_transfer_candidates(self) -> None:
+    def _offer_transfer_candidates(self, *, force: bool = False) -> None:
         """환승을 켜거나, 모드를 바꾸거나, 구간(출발·도착)을 바꾸면 부릅니다.
 
         두 모드에서 이 목록의 뜻이 다릅니다 — 서버 추천에서는 결과를 거르는
         필터, 직접 지정에서는 조회할 역 그 자체. 그래서 이 화면이 만들어지는
         순간(또는 구간이 바뀌는 순간) 대개 후보가 새로 필요합니다.
 
-        **그 구간 것으로 이미 확인된 목록은 덮지 않습니다**
-        (:meth:`_transfer_list_matches_route`). [환승역 새로고침] 은 그때만
-        더하기만 하고, 지우는 것은 [빼기]·[비우기] 뿐입니다 — 사람이 그
-        구간에서 손으로 고친 것을 지우면 안 되기 때문입니다.
+        **그 구간 것으로 이미 확인된 목록은 (``force`` 가 아니면) 덮지
+        않습니다** (:meth:`_transfer_list_matches_route`). [환승역 새로고침]
+        은 그때만 더하기만 하고, 지우는 것은 [빼기]·[비우기] 뿐입니다 —
+        사람이 그 구간에서 손으로 고친 것을 지우면 안 되기 때문입니다.
+        ``force=True`` 는 [환승역 새로고침] 을 직접 누른 것과 같은 뜻으로,
+        그 보호를 건너뛰고 무조건 다시 받아 옵니다(:meth:`_transfer_toggled`
+        가 씁니다 — 환승을 켜거나 모드를 바꾸는 것은 사람이 직접 한
+        일이므로, 같은 구간이라도 새로 확인해 주는 게 맞습니다). 받아 온
+        뒤에도 :meth:`_transfer_stations_loaded` 가 손으로 넣은 역은 그대로
+        두고 합치므로, ``force`` 라고 목록이 통째로 사라지지는 않습니다.
 
         그런데 **목록이 다른 구간 것이면(또는 구간을 모르면) 새로 채웁니다.**
         지난 구간에서 고른 역을 새 구간에 그대로 남겨 두면, "환승"을 처음
@@ -3047,7 +3195,11 @@ class BookerApp:
         if not departure or not arrival:
             return
         route = (departure, arrival)
-        if self.transfer_names() and self._transfer_list_matches_route(route):
+        if (
+            not force
+            and self.transfer_names()
+            and self._transfer_list_matches_route(route)
+        ):
             # 사람이 이 구간에서 손댄 목록입니다. 표시만 다시 그립니다.
             self._redraw_transfer_marks()
             return
@@ -3765,7 +3917,7 @@ class BookerApp:
         for box in (self.departure_box, self.arrival_box, self.transfer_entry):
             box.set_completions(names)
         self.station_state.set(f"역 {len(names)}곳")
-        self._write_log(f"역 {len(names)}개를 불러왔습니다. 칸에 치면 좁혀집니다.")
+        self._write_log(f"역 {len(names)}개를 불러왔습니다. 칸에 치면 아래로 후보가 뜹니다.")
 
     # -- 동작: 조회 ----------------------------------------------------------
 

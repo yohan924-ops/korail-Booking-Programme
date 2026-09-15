@@ -696,6 +696,61 @@ def test_station_search_puts_prefix_matches_first():
     assert S.filter_station_names(names, "대", limit=1) == ["대전"]
 
 
+# --- 역 이름 자동완성 팝업 ---------------------------------------------------
+#
+# 실제 동작(팝업이 뜨는지, 포커스가 안 옮겨 가는지, ↓/↑/Enter/Escape)은
+# scripts/gui_smoke.py 가 real Tk 로 확인합니다 — 여기서는 소스로만
+# 확인할 수 있는 것들(다른 자리가 Return 을 덮어쓰지 않는지, 포커스를
+# 스스로 훔치지 않는지)을 봅니다.
+
+
+def test_the_popup_never_steals_focus_from_the_entry():
+    """팝업(Toplevel)이나 그 안의 Listbox 에 스스로 포커스를 주지
+    않습니다 — 타이핑 중에 포커스가 옮겨 가면 한글 입력기의 글자 조합이
+    끊깁니다. 그래서 이 클래스 어디에도 ``focus_set`` 이 없어야 합니다.
+    """
+    tree = ast.parse(_ui_source())
+    cls = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name == "AutocompleteCombobox"
+    )
+    assert "focus_set" not in ast.unparse(cls)
+    assert "grab_set" not in ast.unparse(cls)
+
+
+def test_the_popup_return_binding_does_not_swallow_the_fields_own_enter():
+    """이 칸을 쓰는 세 자리(출발·도착 → 조회, 환승역 입력 → 추가) 모두
+    자기 <Return> 을 ``add="+"`` 로 걸어야 합니다 — 안 그러면
+    AutocompleteCombobox 자신의 <Return>(팝업에서 고른 역 확정)을
+    덮어써서, 팝업에서 고른 값이 조용히 무시됩니다.
+    """
+    source = _ui_source()
+    assert 'self.bind("<Return>", self._on_return, add="+")' in source
+    assert (
+        'widget.bind("<Return>", lambda _event: self.on_search(), add="+")'
+        in source
+    )
+    assert (
+        '"<Return>", lambda _event: self.add_transfer_station(), add="+"'
+        in source
+    )
+
+
+def test_the_transfer_station_list_is_taller_than_before():
+    """몇 개만 골라도 스크롤해야 보였다는 지적이 있어 세로로 늘렸습니다."""
+    source = _ui_source()
+    assert 'selectmode="extended", height=12, width=20' in source
+
+
+def test_the_transfer_station_comment_is_short_and_up_top():
+    """예전엔 단추 줄 아래 긴 문단으로 붙어 있었습니다 — 한 줄로 줄이고,
+    목록을 보기 전에 먼저 읽도록 머리글 바로 아래로 옮겼습니다.
+    """
+    source = _ui_source()
+    assert '"(검증) = 코레일이 이 구간에 답한 역."' in source
+    assert "qry.chtnStn.do" not in source
+
+
 def test_station_codes_pass_through_and_unknown_names_are_refused():
     index = {"서울": "0001", "부산": "0020"}
     assert S.resolve_station_code("서울", index) == "0001"
@@ -2596,7 +2651,13 @@ def test_the_whole_window_scrolls():
 
 
 def test_every_section_is_a_pane_the_user_can_resize():
-    """1~5 묶음과 기록이 서로 크기를 나눌 수 있어야 합니다."""
+    """1~5 묶음이 서로 크기를 나눌 수 있어야 합니다.
+
+    기록(로그)은 더는 그 다섯과 같은 층의 칸이 아닙니다 — "2. 열차 조회"
+    안, 환승 조건 오른쪽으로 옮겼습니다(:func:`test_the_log_moved_into_the_query_section`
+    참고). 대신 그 안에서 조회 로그와 자동예매 로그, 둘끼리는 여전히
+    손잡이로 크기를 나눌 수 있습니다.
+    """
     source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     builders = {
@@ -2606,13 +2667,29 @@ def test_every_section_is_a_pane_the_user_can_resize():
     }
 
     for name in ("_build_login", "_build_query", "_build_results",
-                 "_build_targets", "_build_holds", "_build_log"):
+                 "_build_targets", "_build_holds"):
         assert "_add_pane(parent" in builders[name], name
+    assert "ttk.PanedWindow(frame, orient='vertical')" in builders["_build_log"]
     # 자동예매 조건은 제 묶음이 아니라 예매 대상 묶음 안에 붙습니다 — 담는
     # 것과 그것을 노리는 조건은 한 가지 일이고, 묶음 머리 하나를 아끼면
     # 그만큼 표에 줄이 늘어납니다.
     assert "_build_booking" not in builders
     assert "self._build_booking_controls(frame)" in builders["_build_targets"]
+
+
+def test_the_log_moved_into_the_query_section():
+    """기록이 이 창 맨 아래 저 혼자 한 칸이던 것을, "2. 열차 조회" 묶음의
+    환승 조건 오른쪽(3번째 칸)으로 옮겼습니다 — 그만큼 3·4·5번 표(조회
+    결과·예매 대상·잡은 예약)에 세로 공간을 돌려줍니다.
+    """
+    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+    query = _ui_function("_build_query")
+    assert "self._build_log(frame)" in query
+    log = _ui_function("_build_log")
+    assert "paned.grid(row=0, column=2, rowspan=7" in log
+    # 예전처럼 body(창 전체를 세로로 나누는 최상위 칸)에 저 혼자 붙는
+    # 자리는 이제 없습니다.
+    assert "self._build_log(body)" not in source
 
 
 def test_the_query_section_uses_its_right_hand_space():
@@ -2650,9 +2727,10 @@ def test_a_pane_with_buttons_measures_its_own_minimum():
     # 단추가 잘릴 수 있는 묶음은 재서 씁니다.
     for name in ("_build_login", "_build_query", "_build_targets"):
         assert "minsize=" not in builders[name], name
-    # 줄여도 줄 수만 줄어드는 묶음만 숫자를 적습니다.
-    for name in ("_build_results", "_build_log"):
-        assert "minsize=" in builders[name], name
+    # 줄여도 줄 수만 줄어드는 묶음만 숫자를 적습니다. 기록(_build_log)은
+    # 더는 이 층의 칸이 아니라(_build_query 안에 embed) 여기 해당하지
+    # 않습니다.
+    assert "minsize=" in builders["_build_results"]
 
     # 본문 높이도 상수가 아니라 그 최소 높이들의 합입니다.
     assert "BODY_HEIGHT" not in source
@@ -4296,22 +4374,36 @@ def test_picking_a_bundle_head_opens_a_picker_instead_of_adding_everything():
     assert "self._add_picked_targets([chosen])" in picker
 
 
-def test_switching_transfer_mode_never_overwrites_a_curated_list():
-    """모드 전환이 [조회]·[환승역 새로고침] 규칙을 뒤로 돌아가면 안 됩니다 —
-    **단, 구간이 그대로일 때만.** 구간이 바뀌었으면(또는 처음이면) 새로
-    불러와야 "환승을 켜도/모드를 바꿔도 목록이 안 바뀐다" 는 신고가
-    다시 나지 않습니다.
+def test_switching_transfer_mode_always_refreshes_but_never_erases_a_curated_list():
+    """환승을 켜거나 코레일 추천⇄환승역 직접 선택을 바꾸는 것은 사람이
+    직접 한 일입니다 — 같은 구간이어도 [환승역 새로고침] 을 누른 것과
+    같은 뜻으로 **무조건 다시 받아 옵니다**(``force=True``). "모드를
+    바꿔도 목록이 안 바뀐다" 는 신고가 route 인식 보호를 넣은 뒤에도
+    다시 나서(그 보호가 mode 전환에도 걸려 있었기 때문입니다),
+    mode 전환만은 그 보호를 건너뛰도록 고쳤습니다. 다만 지우지는
+    않습니다 — 받아 온 뒤에도 ``_transfer_stations_loaded`` 가 손으로
+    넣은 역은 그대로 두고 합칩니다.
     """
+    toggled = _ui_function("_transfer_toggled")
+    assert "self._offer_transfer_candidates(force=True)" in toggled
+
     body = _ui_function("_offer_transfer_candidates")
-    # 이 구간에서 사람이 만든 목록이 있으면 표시만 다시 그립니다.
-    assert "if self.transfer_names() and self._transfer_list_matches_route(route):" in body
+    # force 가 아닐 때만(자동 새로고침 — FocusOut·맞바꾸기 등) 이 구간에서
+    # 사람이 만든 목록을 표시만 다시 그리고 그대로 둡니다.
+    assert (
+        "if not force and self.transfer_names() and "
+        "self._transfer_list_matches_route(route):"
+    ) in body
     assert "self._redraw_transfer_marks()" in body
-    # 다른 구간이면(또는 처음이면) 불러옵니다.
+    # force 든 아니든 다른 구간이면(또는 처음이면) 불러옵니다.
     assert "transfer_station_candidates(client, departure, arrival)" in body
     # 구간이 없거나 실패해도 모드 전환을 막지 않습니다.
     assert "if not departure or not arrival:" in body
     assert "except (KorailApiError, ValueError)" in body
-    assert "self._offer_transfer_candidates()" in _ui_function("_transfer_toggled")
+    # force 라고 손으로 넣은 역이 사라지지는 않습니다 — 합치기만 합니다.
+    assert "existing = list(self.transfer_names()) if same_route else []" in (
+        _ui_function("_transfer_stations_loaded")
+    )
 
 
 # --- 잡은 예약: 취소·정리 ---------------------------------------------------------
