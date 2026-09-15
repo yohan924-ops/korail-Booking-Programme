@@ -714,49 +714,132 @@ def main() -> int:
     check("알림 함수는 설정을 굽지 않는다",
           app._make_notifier().__func__ is type(app)._notify_now)
 
-    # -- 텔레그램: 이번만 쓰기 -----------------------------------------------
-    app.on_telegram_settings()
-    root.update()
-    window = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+    # -- 텔레그램: 봇 아이디·대화 ID 는 손으로 못 치고, 단추로만 채워진다 ----
+    #
+    # 둘 다 사람이 미리 알 방법이 없는 값(봇 아이디는 토큰에서, 대화 ID 는
+    # 먼저 대화를 나눈 뒤에만 나옵니다) — 그래서 두 칸 다 읽기 전용으로
+    # 두고, 실제 텔레그램 응답을 흉내 낸 가짜로 버튼이 정말 채우는지
+    # 확인합니다. 네트워크는 쓰지 않습니다.
+    from korail_booker.notify import ResolvedChat
 
-    def by_text(widget: tk.Misc, label: str) -> tk.Misc | None:
-        for child in widget.winfo_children():
-            try:
-                if child.cget("text") == label:  # type: ignore[call-overload]
-                    return child
-            except tk.TclError:
-                pass
-            found = by_text(child, label)
-            if found is not None:
-                return found
-        return None
+    class _FakeTelegramNotifier:
+        def __init__(self, config: object) -> None:
+            self.config = config
 
-    entries: list[tk.Misc] = []
+        def __enter__(self) -> _FakeTelegramNotifier:
+            return self
 
-    def collect(widget: tk.Misc) -> None:
-        for child in widget.winfo_children():
-            if child.winfo_class() == "TEntry":
-                entries.append(child)
-            collect(child)
+        def __exit__(self, *exc: object) -> bool:
+            return False
 
-    collect(window)
-    # 비우고 넣습니다. 그냥 insert 하면 이미 있던 값 뒤에 붙어, 확인하려던
-    # 값이 아니라 이어 붙은 쓰레기를 확인하게 됩니다.
-    entries[0].delete(0, "end")  # type: ignore[attr-defined]
-    entries[0].insert(0, "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ")  # type: ignore[attr-defined]
-    entries[1].delete(0, "end")  # type: ignore[attr-defined]
-    entries[1].insert(0, "987654321")  # type: ignore[attr-defined]
-    once = by_text(window, "이번만 쓰기")
-    check("[이번만 쓰기] 단추가 있다", once is not None)
-    if once is not None:
-        once.invoke()  # type: ignore[attr-defined]
+        def bot_username(self) -> str:
+            return "testbot"
+
+        def resolve_chat(self) -> ResolvedChat:
+            return ResolvedChat(chat_id="987654321", title="테스트")
+
+    real_in_thread = app._in_thread
+    real_notifier_cls = ui_module.TelegramNotifier
+    app._in_thread = lambda work, name: work()  # type: ignore[method-assign]
+    ui_module.TelegramNotifier = _FakeTelegramNotifier  # type: ignore[misc,assignment]
+
+    try:
+        app.on_telegram_settings()
         root.update()
-    check("이번 실행 값이 잡힌다",
-          app._telegram_once is not None
-          and app._telegram_once.chat_id == "987654321", app._telegram_once)
-    check("설정 파일에는 쓰지 않는다",
-          app.settings.telegram_token == "" and app.settings.telegram_chat_id == "")
-    check("알림이 그 값을 쓴다", app._make_notifier() is not None)
+        window = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+
+        def by_text(widget: tk.Misc, label: str) -> tk.Misc | None:
+            for child in widget.winfo_children():
+                try:
+                    if child.cget("text") == label:  # type: ignore[call-overload]
+                        return child
+                except tk.TclError:
+                    pass
+                # 이 칸(확인된 봇 아이디)은 고정 text 가 아니라 textvariable
+                # 로 그립니다 — 지금 그 변수가 실제로 들고 있는 값을 봐야
+                # 찾아집니다.
+                try:
+                    var_name = str(child.cget("textvariable"))  # type: ignore[call-overload]
+                except tk.TclError:
+                    var_name = ""
+                if var_name and root.tk.globalgetvar(var_name) == label:
+                    return child
+                found = by_text(child, label)
+                if found is not None:
+                    return found
+            return None
+
+        entries: list[tk.Misc] = []
+
+        def collect(widget: tk.Misc) -> None:
+            for child in widget.winfo_children():
+                if child.winfo_class() == "TEntry":
+                    entries.append(child)
+                collect(child)
+
+        collect(window)
+        token_entry, chat_id_entry = entries[0], entries[1]
+        check(
+            "대화 ID 칸은 고쳐 쓸 수 없다(readonly) — 사람이 미리 알 방법이 없는 값",
+            str(chat_id_entry.cget("state")) == "readonly",  # type: ignore[call-overload]
+            chat_id_entry.cget("state"),  # type: ignore[call-overload]
+        )
+        # readonly 라도 예외 없이 조용히 아무 일도 안 일어나야 합니다(직접
+        # insert 를 시도해도 값이 안 바뀌는지) — 손으로 숫자를 잘못 쳐 넣는
+        # 사고 자체가 안 나야 하므로.
+        chat_id_entry.delete(0, "end")  # type: ignore[attr-defined]
+        chat_id_entry.insert(0, "111")  # type: ignore[attr-defined]
+        check(
+            "readonly 라 직접 넣으려 해도 조용히 안 바뀐다",
+            chat_id_entry.get() == "",  # type: ignore[attr-defined]
+            chat_id_entry.get(),  # type: ignore[attr-defined]
+        )
+
+        # 토큰 칸은 그대로 손으로 넣습니다 — 이건 사람이 복사해 붙여 넣는
+        # 값입니다. 비우고 넣습니다. 그냥 insert 하면 이미 있던 값 뒤에
+        # 붙어, 확인하려던 값이 아니라 이어 붙은 쓰레기를 확인하게 됩니다.
+        token_entry.delete(0, "end")  # type: ignore[attr-defined]
+        token_entry.insert(0, "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ")  # type: ignore[attr-defined]
+
+        check_button = by_text(window, "토큰 확인")
+        check("[토큰 확인] 단추가 있다", check_button is not None)
+        if check_button is not None:
+            check_button.invoke()  # type: ignore[attr-defined]
+            app._drain()  # work() 가 events 큐에 올린 결과를 실제로 반영
+            root.update()
+        bot_label = by_text(window, "확인된 봇: @testbot")
+        check(
+            "[토큰 확인] 이 성공하면 봇 아이디가 화면에 표시된다"
+            "(손으로 치는 칸이 아니다)",
+            bot_label is not None,
+        )
+
+        find_button = by_text(window, "내 대화 ID 찾기")
+        check("[내 대화 ID 찾기] 단추가 있다", find_button is not None)
+        if find_button is not None:
+            find_button.invoke()  # type: ignore[attr-defined]
+            app._drain()
+            root.update()
+        check(
+            "[내 대화 ID 찾기] 를 누르면 대화 ID 가 (readonly 인데도) 채워진다",
+            chat_id_entry.get() == "987654321",  # type: ignore[attr-defined]
+            chat_id_entry.get(),  # type: ignore[attr-defined]
+        )
+
+        once = by_text(window, "이번만 쓰기")
+        check("[이번만 쓰기] 단추가 있다", once is not None)
+        if once is not None:
+            once.invoke()  # type: ignore[attr-defined]
+            root.update()
+        check("이번 실행 값이 잡힌다",
+              app._telegram_once is not None
+              and app._telegram_once.chat_id == "987654321", app._telegram_once)
+        check("설정 파일에는 쓰지 않는다",
+              app.settings.telegram_token == "" and app.settings.telegram_chat_id == "")
+        check("알림이 그 값을 쓴다", app._make_notifier() is not None)
+    finally:
+        app._in_thread = real_in_thread  # type: ignore[method-assign]
+        ui_module.TelegramNotifier = real_notifier_cls  # type: ignore[misc]
 
     # -- 잡은 예약: 조회 결과와 같은 칸으로 채워지는가, 묶이는가 ----------------
     HOLD_COLUMNS = ui_module.HOLD_COLUMNS

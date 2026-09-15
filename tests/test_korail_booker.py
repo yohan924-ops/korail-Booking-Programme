@@ -2338,10 +2338,12 @@ def test_a_chat_without_a_name_still_gives_its_number():
 def test_the_token_dialog_walks_through_the_real_botfather_flow():
     """텔레그램 설정 창은 실제로 봇을 만들어 본 사람의 화면(캡처 3장)을
     그대로 따라간 1~4단계로 값 두 개(토큰·대화 ID)를 채우고 확인합니다.
-    처음엔 이 절차를 외부 글 링크 하나로만 때웠는데("성의없다" 는 지적을
-    받았습니다) — 그 캡처가 보여 준 실제 순서·문구를 이 창 안에도
-    그대로 적어 둡니다. 사진을 보고 싶으면 [사진으로 보는 설정 방법]
-    으로 원본 글도 열 수 있습니다(둘 다 있습니다).
+    처음엔 이 절차를 외부 글 링크 하나로만 때웠다가("성의없다" 는 지적),
+    그 다음엔 그 캡처의 순서·문구를 그대로 옮겨 적으면서도 링크는
+    남겨 뒀다가("보내준 사진을 직접 넣으라 했지 링크를 쓰라 한 게
+    아니다" 는 지적) — 결국 **이미지 파일을 이 세션에 저장할 방법이
+    없어** 사진 자체는 못 옮기고, 외부 링크도 빼고, 그 사진들이 실제로
+    보여 준 문구만 이 창 안에 그대로 옮겨 적었습니다.
     """
     source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
 
@@ -2355,9 +2357,10 @@ def test_the_token_dialog_walks_through_the_real_botfather_flow():
     assert "Use this token to access the HTTP API" in source
     assert 'text="토큰 확인"' in source
     assert 'text="내 대화 ID 찾기"' in source
-    # 사진이 있는 원본 글로도 여전히 갈 수 있습니다 — 링크를 없애지 않았습니다.
-    assert 'text="사진으로 보는 설정 방법"' in source
-    assert "command=self.open_telegram_guide" in source
+    # 외부 링크는 더 안 씁니다 — webbrowser 자체를 더는 import 하지 않습니다.
+    assert "open_telegram_guide" not in source
+    assert "webbrowser" not in source
+    assert "playneko.github.io" not in source
     # 봇에게 먼저 말을 걸지 않으면 대화 ID 를 못 얻습니다. 이 문장은 소스에서
     # 줄바꿈으로 나뉜 문자열 리터럴 두 개라 _ui_function(ast.unparse 가
     # 이어 붙입니다)으로 봐야 이어져 있는지 확인됩니다.
@@ -3168,28 +3171,38 @@ def test_telegram_settings_can_be_used_without_touching_the_disk():
     assert "settings_module.save" not in once
 
 
-def test_the_telegram_popup_has_both_the_written_steps_and_the_screenshot_link():
-    """딱 한 번, 이 창을 외부 글 링크 하나로만 줄였다가 "성의없이 만들지
-    말라" 는 지적을 받았습니다 — 링크는 그대로 두되(사용자가 준 그
-    링크를 지우지 않습니다), 그 화면 캡처가 실제로 보여 준 순서·문구를
-    이 창 자신에도 적어 둬야 한다는 뜻이었습니다. 그래서 이제 **둘
-    다** 있습니다 — 사진이 있는 원본 글로 가는 단추와, 그 흐름을 그대로
-    옮긴 1~4단계 설명.
+def test_the_telegram_popup_has_no_external_link_only_the_written_steps():
+    """예전 판은 외부 글 링크 하나로 줄였다가("성의없다"), 링크를 남긴 채
+    설명만 되살렸다가("사진을 프로그램에 넣으라 했지 링크를 쓰라 한 게
+    아니다") 두 번 지적을 받았습니다 — 이 세션에는 대화창에 붙여넣어진
+    사진을 파일로 저장할 방법이 없어 이미지 자체를 옮기지는 못했지만,
+    최소한 요청대로 외부 링크는 없앴고 1~4단계 설명은 이 창 안에
+    그대로 있습니다.
     """
     source = _ui_source()
-    assert 'text="사진으로 보는 설정 방법"' in source
-    assert "command=self.open_telegram_guide" in source
-    guide = _ui_function("open_telegram_guide")
-    assert (
-        "webbrowser.open('https://playneko.github.io/2020/07/21/chatbot/chatbot-002/')"
-        in guide
-    )
-    # 사용자가 준 링크 그대로입니다 — 다른 글로 바뀌지 않았습니다.
-    assert "playneko.github.io/2020/07/21/chatbot/chatbot-002" in source
+    assert "open_telegram_guide" not in source
+    assert "webbrowser" not in source
     for step in ("1단계 — 텔레그램 앱에서 봇 만들기", "2단계 — 토큰 붙여넣기",
                  "3단계 — 내 봇과 먼저 대화하기 (꼭 필요합니다)",
                  "4단계 — 대화 ID 채우기"):
         assert step in source, step
+
+
+def test_bot_username_and_chat_id_are_two_separate_readonly_fields():
+    """봇 아이디(@이름)와 대화 ID(숫자)는 서로 다른 값이고, 둘 다 사람이
+    미리 알 방법이 없습니다 — 봇 아이디는 [토큰 확인] 이 텔레그램에서
+    읽어 오고, 대화 ID 는 [내 대화 ID 찾기] 가 읽어 옵니다. 그래서 두
+    칸 다 손으로 못 고치게(readonly) 두고, 서로 다른 칸에 나눠 보여
+    줍니다 — 하나를 다른 것 대신 손으로 쳐 넣을 수 있는 칸이 아닙니다.
+    """
+    source = _ui_source()
+    assert 'chat_row, textvariable=chat_id, width=18, state="readonly"' in source
+    # 봇 아이디는 입력칸이 아니라 읽기 전용 표시(Label)입니다 — 대화 ID
+    # 칸과 다른 자리(2단계, 토큰 바로 아래)에 있습니다.
+    assert 'ttk.Label(step2, textvariable=bot_username' in source
+    apply_body = _ui_function("check_token")
+    assert "bot_username.set(f'확인된 봇: @{name}')" in apply_body
+    assert "bot_username.set('(아직 확인 전)')" in apply_body
 
 
 # --- 팝업은 모니터 화면 한가운데에 --------------------------------------------

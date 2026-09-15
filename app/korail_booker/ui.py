@@ -19,7 +19,6 @@ import threading
 import time
 import tkinter as tk
 import uuid
-import webbrowser
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime
@@ -2936,9 +2935,6 @@ class BookerApp:
         ttk.Button(
             telegram_row, text="텔레그램 설정", command=self.on_telegram_settings
         ).pack(side="left", padx=(8, 4))
-        ttk.Button(
-            telegram_row, text="설정 방법 보기(사진 설명)", command=self.open_telegram_guide
-        ).pack(side="left")
         sound_row = ttk.Frame(notify)
         sound_row.pack(anchor="w", padx=6, pady=(2, 6))
         ttk.Checkbutton(sound_row, text="알림소리", variable=self.sound_enabled).pack(
@@ -5644,40 +5640,29 @@ class BookerApp:
 
     # -- 동작: 텔레그램 ------------------------------------------------------
 
-    def open_telegram_guide(self) -> None:
-        """텔레그램 봇 만드는 법을 사진과 함께 보여주는 글(외부)을 엽니다.
-
-        스크린샷을 이 프로그램 안에 옮겨 담지 않고 원본 글을 그대로 엽니다
-        — 그 사진들은 그 글쓴이의 것이라, 복사해 두는 대신 원본에서 보는
-        것이 맞습니다.
-        """
-        webbrowser.open("https://playneko.github.io/2020/07/21/chatbot/chatbot-002/")
-
     def on_telegram_settings(self) -> None:
         window = tk.Toplevel(self.root)
         window.title("텔레그램 알림 설정")
         window.transient(self.root)
         token = tk.StringVar(value=self.settings.telegram_token)
         chat_id = tk.StringVar(value=self.settings.telegram_chat_id)
-        # 실제로 봇을 만들어 본 사람의 화면 캡처(텔레그램에서 BotFather 를
-        # 찾아 /newbot 을 보내는 것부터, 토큰을 받고, 내 봇과 먼저 대화를
-        # 트는 것까지)를 그대로 따라가며 적었습니다 — 그 캡처 사진 자체는
-        # 이 프로그램 파일로 옮겨 담지 않고(용량·유지보수 문제도 있고,
-        # 다음에 텔레그램 화면이 바뀌면 낡은 사진이 됩니다) 원본 글을
-        # [사진으로 보는 설정 방법] 으로 열어 보게 했습니다 — 순서와 문구는
-        # 그 화면 그대로입니다.
+        # 봇 아이디(@이름)와 대화 ID(숫자)는 서로 다른 값이고, 서로 바꿔
+        # 넣는다고 되는 게 아닙니다 — 봇 아이디는 토큰만 있으면 텔레그램이
+        # 그대로 확인해 주는 값(3단계, check_token)이고, 대화 ID 는 "이
+        # 봇과 나눈 대화" 를 텔레그램이 알아야만(그래서 4단계 전에 먼저
+        # /start 로 말을 걸어야) 나오는 값입니다. 둘 다 사람이 손으로
+        # 치지 않고 이 화면이 확인해서 채웁니다 — 그래서 두 칸 다
+        # 고쳐 쓸 수 없게(readonly) 뒀습니다.
+        bot_username = tk.StringVar(value="(아직 확인 전)")
         ttk.Label(
             window,
             text="텔레그램으로 알림을 받으려면 봇 토큰과 대화 ID, 값이 둘 필요합니다.\n"
             "아래 1~4단계를 순서대로 하면 둘 다 채워집니다.",
             justify="left",
         ).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 4))
-        ttk.Button(
-            window, text="사진으로 보는 설정 방법", command=self.open_telegram_guide
-        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 10))
 
         step1 = ttk.LabelFrame(window, text="1단계 — 텔레그램 앱에서 봇 만들기")
-        step1.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
+        step1.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
         ttk.Label(
             step1,
             text="① 검색창에 BotFather 를 치면 파란 체크가 붙은 공식 계정이 "
@@ -5694,7 +5679,7 @@ class BookerApp:
         ).pack(anchor="w", padx=8, pady=6)
 
         step2 = ttk.LabelFrame(window, text="2단계 — 토큰 붙여넣기")
-        step2.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
+        step2.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
         ttk.Label(
             step2,
             text='BotFather 답장에서 "Use this token to access the HTTP API:" '
@@ -5719,12 +5704,20 @@ class BookerApp:
             "이 토큰은 봇을 통째로 조종할 수 있습니다. 남에게 보이지 마세요.",
             foreground="#666666",
             justify="left",
-        ).pack(anchor="w", padx=8, pady=(2, 6))
+        ).pack(anchor="w", padx=8, pady=(2, 2))
+        # 봇 아이디(@이름)는 손으로 치는 칸이 아닙니다 — [토큰 확인] 을
+        # 누르면 텔레그램이 이 토큰 주인인 봇의 아이디를 그대로 알려주므로,
+        # 여기 읽기 전용으로 보여만 줍니다. "이게 내 봇이 맞나" 확인하는
+        # 용도입니다 — 대화 ID(4단계, 전혀 다른 값)와 헷갈리지 않도록
+        # 일부러 칸을 나눴습니다.
+        ttk.Label(step2, textvariable=bot_username, foreground="#1f6feb").pack(
+            anchor="w", padx=8, pady=(0, 6)
+        )
 
         step3 = ttk.LabelFrame(
             window, text="3단계 — 내 봇과 먼저 대화하기 (꼭 필요합니다)"
         )
-        step3.grid(row=4, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
+        step3.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
         ttk.Label(
             step3,
             text="BotFather 답장 속 t.me/아이디 링크를 누르거나, 만든 봇 이름으로 "
@@ -5738,25 +5731,30 @@ class BookerApp:
         ).pack(anchor="w", padx=8, pady=6)
 
         step4 = ttk.LabelFrame(window, text="4단계 — 대화 ID 채우기")
-        step4.grid(row=5, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
+        step4.grid(row=4, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
         chat_row = ttk.Frame(step4)
         chat_row.pack(anchor="w", padx=8, pady=(6, 2))
-        ttk.Entry(chat_row, textvariable=chat_id, width=18).pack(side="left")
+        # 이 칸도 손으로 치지 않습니다 — 사람이 미리 알 방법이 없는
+        # 값이라, 아무 숫자나 잘못 쳐 넣는 사고를 아예 막아 둡니다.
+        # [내 대화 ID 찾기] 가 텔레그램에서 읽어 온 값으로만 채웁니다.
+        ttk.Entry(
+            chat_row, textvariable=chat_id, width=18, state="readonly"
+        ).pack(side="left")
         ttk.Button(
             chat_row, text="내 대화 ID 찾기", command=lambda: find_chat_id()
         ).pack(side="left", padx=(6, 0))
         ttk.Label(
             step4,
             text="모양: 123456789 — 숫자입니다(그룹이면 앞에 - 가 붙습니다).\n"
-            "직접 알 필요 없습니다 — 3단계를 마쳤으면 위 단추가 봇이 받은\n"
-            "마지막 메시지에서 읽어 자동으로 채워 줍니다.",
+            "이 칸은 고쳐 쓸 수 없습니다 — 3단계를 마치고 위 단추를 누르면\n"
+            "봇이 받은 마지막 메시지에서 읽어 자동으로 채워 줍니다.",
             foreground="#666666",
             justify="left",
         ).pack(anchor="w", padx=8, pady=(2, 6))
 
         status = tk.StringVar(value="")
         ttk.Label(window, textvariable=status, foreground="#666666").grid(
-            row=6, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 6)
+            row=5, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 6)
         )
 
         def find_chat_id() -> None:
@@ -5790,8 +5788,12 @@ class BookerApp:
             def apply(name: str | None) -> None:
                 if name:
                     status.set(f"토큰이 맞습니다 — 봇 @{name}. 이제 3단계로.")
+                    # 상태 글줄은 다른 동작(찾기·전송 등)이 누르면 곧 덮입니다
+                    # — 이 봇이 맞는지는 계속 보여야 하므로 따로 둡니다.
+                    bot_username.set(f"확인된 봇: @{name}")
                 else:
                     status.set("토큰이 틀렸거나 연결이 안 됩니다. 2단계를 다시 보세요.")
+                    bot_username.set("(아직 확인 전)")
 
             def work() -> None:
                 with TelegramNotifier(TelegramConfig(token=token.get().strip())) as bot:
@@ -5887,7 +5889,7 @@ class BookerApp:
             )
 
         buttons = ttk.Frame(window)
-        buttons.grid(row=7, column=0, columnspan=2, sticky="w", padx=10, pady=8)
+        buttons.grid(row=6, column=0, columnspan=2, sticky="w", padx=10, pady=8)
         ttk.Button(buttons, text="테스트 전송", command=send_test).pack(side="left")
         ttk.Button(buttons, text="저장하고 쓰기", command=store).pack(side="left", padx=6)
         ttk.Button(buttons, text="이번만 쓰기", command=use_once).pack(side="left")
@@ -5909,7 +5911,7 @@ class BookerApp:
             "남지 않습니다.",
             foreground="#666666",
             justify="left",
-        ).grid(row=8, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 10))
+        ).grid(row=7, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 10))
         self._center_window(window)
 
     # -- 트레이(작업 표시줄) ---------------------------------------------------
