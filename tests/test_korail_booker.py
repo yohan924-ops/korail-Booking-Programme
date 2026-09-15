@@ -5061,17 +5061,41 @@ def test_the_two_sounds_are_valid_short_wav_clips():
             assert handle.getsampwidth() == 2  # 16비트
             assert handle.getframerate() == SOUND.SAMPLE_RATE
             duration = handle.getnframes() / handle.getframerate()
-            assert 0.3 < duration < 1.5
+            assert 0.2 <= duration < 1.5
+
+
+def test_neither_sound_clips_even_where_two_notes_overlap():
+    """"딩동" 의 두 음이 겹치는 자리에서 진폭을 그대로 더하면 16비트
+    범위를 넘어 잘리고(클리핑), 그게 "찢어지는 소리"로 들린다는 신고가
+    있었습니다. 값을 지어내지 않고 실제 WAV 샘플을 다시 읽어, 최고 진폭이
+    ``_PEAK_TARGET`` (그리고 16비트 한계 자체)을 넘지 않는지 확인합니다.
+    """
+    import io
+    import struct
+    import wave
+
+    for make_bytes in (SOUND._success_wave_bytes, SOUND._watch_finished_wave_bytes):
+        with wave.open(io.BytesIO(make_bytes()), "rb") as handle:
+            frames = handle.readframes(handle.getnframes())
+        samples = struct.unpack(f"<{len(frames) // 2}h", frames)
+        peak_ratio = max(abs(s) for s in samples) / 32767
+        assert peak_ratio <= SOUND._PEAK_TARGET + 1e-6
+        assert peak_ratio < 0.99  # 16비트 한계에 끝까지 붙어 잘리지 않았다
 
 
 def test_the_two_sounds_are_actually_different():
-    """소리만 듣고 "성공" 과 "감시 종료" 를 가를 수 있어야 합니다 — 음높이도
-    간격도 다르게 뒀습니다. 값을 지어내지 않고, 실제 합성 결과(바이트)가
-    서로 다른지와, 그 차이의 근거인 상수(음높이)가 겹치지 않는지 둘 다
-    확인합니다.
+    """소리만 듣고 "성공"(딩동, 두 음) 과 "감시 종료"(삡, 외마디 한 음) 를
+    가를 수 있어야 합니다 — 음 개수 자체가 다르고, 음높이도 겹치지
+    않습니다. 값을 지어내지 않고, 실제 합성 결과(바이트)가 서로 다른지와,
+    그 근거인 상수(음높이)가 겹치지 않는지 둘 다 확인합니다.
     """
     assert SOUND._success_wave_bytes() != SOUND._watch_finished_wave_bytes()
-    assert set(SOUND._SUCCESS_NOTES_HZ).isdisjoint(SOUND._FINISHED_NOTES_HZ)
+    assert SOUND._FINISHED_BEEP_HZ not in SOUND._SUCCESS_NOTES_HZ
+    # 딩동은 두 음, 삡은 한 음입니다 — 파형을 만드는 함수 자체가 다릅니다.
+    import inspect
+
+    assert "_bell_tone_samples" in inspect.getsource(SOUND._success_wave_bytes)
+    assert "_beep_samples" in inspect.getsource(SOUND._watch_finished_wave_bytes)
 
 
 def test_the_sounds_never_raise_even_with_no_player_available():
