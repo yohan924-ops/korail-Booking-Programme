@@ -1548,6 +1548,22 @@ def main() -> int:
     box._on_key_release(types.SimpleNamespace(keysym="BackSpace"))
     root.update()
     check("칸을 비우면 팝업도 사라진다", not box.popup_visible())
+
+    # 다른 칸으로 넘어가도(포커스가 실제로 옮겨 가면) 이전 칸의 팝업은
+    # 닫혀야 합니다 — 안 그러면 화면에 안 쓰는 칸의 후보 목록이 그대로
+    # 남는 고아 팝업이 됩니다.
+    box.insert(0, "동")
+    box._on_key_release(types.SimpleNamespace(keysym="8"))
+    root.update()
+    check("다른 칸(도착역)으로 넘어가기 전엔 팝업이 떠 있다", box.popup_visible())
+    app.arrival_box.focus_set()
+    root.update()
+    check(
+        "다른 칸으로 포커스가 실제로 넘어가면 이전 칸의 팝업이 닫힌다"
+        "(고아 팝업이 안 남는다)",
+        not box.popup_visible(),
+    )
+    box.delete(0, "end")
     app.departure.set("동탄")
     app.arrival.set("동대구")
 
