@@ -2244,12 +2244,10 @@ def test_the_chat_id_is_a_number_not_a_bot_name():
     assert not N.looks_like_chat_id("123abc")
 
 
-def test_the_dialog_says_the_button_overwrites_whatever_is_typed():
+def test_the_dialog_says_the_button_fills_the_chat_id_for_you():
     source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
 
-    # Tk 은 마크다운을 모르므로 별표 없이 적습니다.
-    assert "뭐가 적혀 있든 보지 않고 덮어씁니다" in source
-    assert "봇 이름(@my_korail_alarm_bot 같은 것)을 넣는 칸이 아닙니다" in source
+    assert "이 칸이 자동으로 채워집니다" in source
     # 숫자가 아닌 값으로는 보내지도 저장하지도 않습니다.
     assert "def bad_chat_id()" in source
     assert "if bad_chat_id():" in source
@@ -2282,19 +2280,24 @@ def test_a_chat_without_a_name_still_gives_its_number():
     assert found is not None and found.chat_id == "-100" and found.title == ""
 
 
-def test_the_token_dialog_walks_through_the_whole_setup():
-    """BotFather 답장만 보고는 어느 값을 어디에 넣는지 헷갈립니다."""
+def test_the_token_dialog_has_the_essentials_without_the_old_wall_of_text():
+    """텔레그램 설정 창은 이제 값 두 개(토큰·대화 ID)를 채우고 확인하는
+    데만 집중합니다 — 봇을 만드는 자세한 절차(BotFather 대화)는 사진이
+    있는 외부 글로 옮겼습니다
+    (:func:`test_the_telegram_popup_links_out_to_a_screenshot_guide_instead_of_a_wall_of_text`).
+    """
     source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
 
-    for step in ("1단계 — 봇 만들기", "2단계 — 토큰 붙여넣기",
-                 "3단계 — 봇에게 먼저 말 걸기", "4단계 — 대화 ID 채우기"):
-        assert step in source, step
-    assert "@BotFather" in source and "/newbot" in source
-    assert "Use this token to access the HTTP API" in source
-    # 봇에게 먼저 말을 걸지 않으면 대화 ID 를 못 얻습니다. 여기서 막힙니다.
+    assert 'ttk.Label(token_row, text="봇 토큰")' in source
+    assert 'ttk.Label(chat_row, text="대화 ID")' in source
+    assert 'text="토큰 확인"' in source
+    assert 'text="내 대화 ID 찾기"' in source
+    # 봇에게 먼저 말을 걸지 않으면 대화 ID 를 못 얻습니다 — 실제로 자주
+    # 걸리는 지점이라, 외부 글을 다시 열지 않아도 이 창 안에서 보여야 합니다.
+    assert "/start" in source
     assert "먼저 말을 건 적이 없는 봇에게 대화 ID 를 주지" in source
-    # 잘 안 될 때 어디를 고쳐야 하는지 갈라 줍니다.
-    assert "잘 안 될 때:" in source
+    # 잘 안 될 때 어디를 고쳐야 하는지 짧게라도 갈라 줍니다.
+    assert "잘 안 되면:" in source
 
 
 def test_the_example_token_is_not_a_real_one():
@@ -3066,12 +3069,58 @@ def test_the_screen_draws_bundles_and_expands_them_when_picked():
 def test_telegram_settings_can_be_used_without_touching_the_disk():
     """남의 컴퓨터에서 한 번만 쓰고 싶을 때가 있습니다. 토큰은 봇 전체 열쇠입니다."""
     source = _ui_source()
-    assert 'text="⑥ 저장하고 쓰기"' in source
+    assert 'text="저장하고 쓰기"' in source
     assert 'text="이번만 쓰기"' in source
     assert 'text="저장된 값 지우기"' in source
     once = _ui_function("use_once")
     assert "self._telegram_once = TelegramConfig(" in once
     assert "settings_module.save" not in once
+
+
+def test_the_telegram_popup_links_out_to_a_screenshot_guide_instead_of_a_wall_of_text():
+    """예전에는 4단계짜리 긴 설명(캡처 없이 글로만)을 이 창에 통째로
+    담았습니다. 처음 쓰는 사람에게는 길기만 하고 실제 화면을 못 봐 오히려
+    헷갈렸다는 지적이 있어, 사진이 있는 원본 글로 안내하는 단추로 줄였습니다.
+    """
+    source = _ui_source()
+    assert 'text="사진으로 보는 설정 방법"' in source
+    assert "command=self.open_telegram_guide" in source
+    guide = _ui_function("open_telegram_guide")
+    assert (
+        "webbrowser.open('https://playneko.github.io/2020/07/21/chatbot/chatbot-002/')"
+        in guide
+    )
+    # 예전의 장문 4단계 설명(①②③④ 번호가 붙은 안내)은 이제 없습니다.
+    assert "1단계 — 봇 만들기" not in source
+    assert "2단계 — 토큰 붙여넣기" not in source
+
+
+# --- 팝업은 모니터 화면 한가운데에 --------------------------------------------
+
+
+def test_a_center_window_helper_places_popups_on_the_screen_middle():
+    """Tk 의 기본 자리(대개 화면 왼쪽 위 구석)가 아니라 화면 한가운데로
+    옮기는 공통 도구입니다 — "팝업이 모서리에 뜬다" 는 신고가 있었습니다.
+    """
+    body = _ui_function("_center_window")
+    assert "window.winfo_screenwidth()" in body
+    assert "window.winfo_screenheight()" in body
+    assert "window.geometry(f'{w}x{h}+{x}+{y}')" in body
+
+
+def test_every_popup_centers_itself_on_screen():
+    """로그인·좌석 등급·운행 일정·이어지는 구간 고르기·텔레그램 설정 —
+    Toplevel 을 만드는 팝업 다섯 곳 전부가 이 도구를 씁니다. 하나라도
+    빠지면 그 팝업만 예전처럼 화면 구석에 뜹니다.
+    """
+    for name in (
+        "open_login",
+        "open_seat_pick_dialog",
+        "open_train_schedule",
+        "_offer_group_picker",
+        "on_telegram_settings",
+    ):
+        assert "self._center_window(window" in _ui_function(name), name
 
 
 def test_a_one_time_telegram_setting_wins_over_the_stored_one():
@@ -3285,6 +3334,75 @@ def test_the_watcher_buys_a_custom_combination_one_leg_at_a_time():
     # 찍혀서 중복 예약처럼 보이지 않습니다.
     assert made == ["좌석 예약(1구간)", "좌석 예약(2구간)"]
     assert len(result.holds) == 2
+
+
+def test_a_watch_finishing_signals_once_regardless_of_outcome():
+    """감시 하나가 끝나면(잡았든, 중지됐든, 시간이 끝났든, 실패했든) 딱 한 번
+    ``on_finished`` 가 불립니다 — 화면의 "감시 종료" 알림소리가 여기서
+    답니다. 성공 갈래는 실제로 돌려 확인하고, 실패 갈래는 :meth:`run` 의
+    소스에서 두 곳(raise 전, return 전) 모두 부르는지 확인합니다 —
+    인위적으로 예외를 일으키는 가짜 스레드까지 만들면 시험이 오히려
+    무엇을 확인하는지 흐려집니다.
+    """
+    import inspect
+
+    first = _row("00009", arrival="대전", arrival_code="0010", arrival_time="091500",
+                 general="11")
+    second = _row("00503", departure="대전", departure_code="0010",
+                  departure_time="093700", arrival_time="110500", general="11")
+    recorder = _Recorder({SEARCH: _search_reply([first, second]),
+                          RESERVE: _reserve_reply()})
+    journey = _journey(
+        TrainSummary.from_raw(first),
+        TrainSummary.from_raw(second),
+        source=J.JourneySource.CUSTOM_TRANSFER,
+    )
+    finished_calls: list[None] = []
+    booker = AutoBooker(
+        _client(recorder),
+        [_target(journey, _request(include_direct=False, include_transfer=True))],
+        BookingOptions(poll_interval_s=10.0, live=True),
+        log=lambda message: None,
+        on_finished=lambda: finished_calls.append(None),
+    )
+
+    result = booker.run(threading.Event())
+
+    assert result.outcome is Outcome.HELD
+    assert finished_calls == [None]
+    assert inspect.getsource(AutoBooker.run).count("self._signal_finished()") == 2
+
+
+def test_a_broken_on_finished_does_not_break_the_booking_result():
+    """알림 실패가 이미 정해진 예약 결과를 건드리면 안 됩니다 —
+    :meth:`AutoBooker.announce` 와 같은 태도입니다.
+    """
+    first = _row("00009", arrival="대전", arrival_code="0010", arrival_time="091500",
+                 general="11")
+    second = _row("00503", departure="대전", departure_code="0010",
+                  departure_time="093700", arrival_time="110500", general="11")
+    recorder = _Recorder({SEARCH: _search_reply([first, second]),
+                          RESERVE: _reserve_reply()})
+    journey = _journey(
+        TrainSummary.from_raw(first),
+        TrainSummary.from_raw(second),
+        source=J.JourneySource.CUSTOM_TRANSFER,
+    )
+
+    def broken() -> None:
+        raise RuntimeError("boom")
+
+    booker = AutoBooker(
+        _client(recorder),
+        [_target(journey, _request(include_direct=False, include_transfer=True))],
+        BookingOptions(poll_interval_s=10.0, live=True),
+        log=lambda message: None,
+        on_finished=broken,
+    )
+
+    result = booker.run(threading.Event())
+
+    assert result.outcome is Outcome.HELD
 
 
 def test_a_journey_can_pick_a_different_seat_class_per_leg():
@@ -4921,31 +5039,42 @@ def test_the_tray_status_never_lets_another_thread_touch_the_watch_list():
     assert "self._refresh_tray_status()" in _ui_function("_tick_holds")
 
 
-# --- 예약 성공 종소리 --------------------------------------------------------
+# --- 알림소리(딩동): 예약 성공 · 자동 감시 종료 -----------------------------
 #
 # sound.py 는 tray.py 와 마찬가지로 tkinter 를 import 하지 않으므로, 여기서는
 # 실제로 import 해서 부릅니다.
 
 
-def test_the_chime_is_a_valid_short_wav_clip():
-    """합성한 종소리가 실제로 재생 가능한 모양의 WAV 인지 — 길이·채널·
+def test_the_two_sounds_are_valid_short_wav_clips():
+    """합성한 두 알림소리가 실제로 재생 가능한 모양의 WAV 인지 — 길이·채널·
     표본화율을 직접 읽어 확인합니다(지어내지 않습니다: 값을 만드는 함수와
     같은 상수를 다시 쓰지 않고, wave 모듈로 **결과물**을 읽습니다).
     """
     import io
     import wave
 
-    data = SOUND._bell_wave_bytes()
-    assert len(data) > 1000
-    with wave.open(io.BytesIO(data), "rb") as handle:
-        assert handle.getnchannels() == 1
-        assert handle.getsampwidth() == 2  # 16비트
-        assert handle.getframerate() == SOUND.SAMPLE_RATE
-        duration = handle.getnframes() / handle.getframerate()
-        assert 0.5 < duration < 2.0
+    for make_bytes in (SOUND._success_wave_bytes, SOUND._watch_finished_wave_bytes):
+        data = make_bytes()
+        assert len(data) > 1000
+        with wave.open(io.BytesIO(data), "rb") as handle:
+            assert handle.getnchannels() == 1
+            assert handle.getsampwidth() == 2  # 16비트
+            assert handle.getframerate() == SOUND.SAMPLE_RATE
+            duration = handle.getnframes() / handle.getframerate()
+            assert 0.3 < duration < 1.5
 
 
-def test_the_chime_never_raises_even_with_no_player_available():
+def test_the_two_sounds_are_actually_different():
+    """소리만 듣고 "성공" 과 "감시 종료" 를 가를 수 있어야 합니다 — 음높이도
+    간격도 다르게 뒀습니다. 값을 지어내지 않고, 실제 합성 결과(바이트)가
+    서로 다른지와, 그 차이의 근거인 상수(음높이)가 겹치지 않는지 둘 다
+    확인합니다.
+    """
+    assert SOUND._success_wave_bytes() != SOUND._watch_finished_wave_bytes()
+    assert set(SOUND._SUCCESS_NOTES_HZ).isdisjoint(SOUND._FINISHED_NOTES_HZ)
+
+
+def test_the_sounds_never_raise_even_with_no_player_available():
     """이 컴퓨터(시험 환경)에는 winsound 도, afplay/paplay/aplay 도 없습니다
     — 그런데도 예외를 던지면 안 됩니다. 자동예매가 예약을 잡은 그 순간
     소리 재생 하나 때문에 화면 갱신이 죽으면 안 되기 때문입니다.
@@ -4957,10 +5086,11 @@ def test_the_chime_never_raises_even_with_no_player_available():
     assert shutil.which("afplay") is None
     assert shutil.which("paplay") is None
     assert shutil.which("aplay") is None
-    SOUND.play_success_chime()  # 예외가 나면 이 시험 자체가 실패합니다.
+    SOUND.play_success_sound()  # 예외가 나면 이 시험 자체가 실패합니다.
+    SOUND.play_watch_finished_sound()
 
 
-def test_the_chime_only_imports_winsound_on_windows():
+def test_the_sounds_only_import_winsound_on_windows():
     """``winsound`` 는 윈도우에만 있는 표준 라이브러리입니다 — 다른
     플랫폼에서 모듈 맨 위(import 시점)에 그냥 import 하면 이 프로그램 전체가
     그 플랫폼에서 아예 뜨지 못합니다. 그래서 함수 안, 윈도우 갈래에서만
@@ -4973,30 +5103,64 @@ def test_the_chime_only_imports_winsound_on_windows():
     assert "    import winsound" in source  # 함수 안, 들여쓰기된 자리에만
 
 
-def test_the_ui_wires_the_chime_to_new_holds_and_respects_the_toggle():
-    """새 홀드가 생기는 **유일한 자리**(remember_hold)에서만 소리를 냅니다
-    — 자동예매든 [바로 예약]이든 전부 이 함수를 거치므로, 여기 하나만
-    걸면 됩니다. 꺼 두면(``sound_enabled`` 가 거짓) 나지 않습니다.
+def test_windows_playback_uses_a_file_not_a_memory_buffer():
+    """예전에는 ``SND_MEMORY`` 로 메모리 위의 WAV 바이트를 직접 넘겼는데,
+    실사용에서 "소리가 전혀 안 난다" 는 신고가 있었습니다. 더 널리 쓰이는
+    파일 재생 방식(``SND_FILENAME``)으로 바꿨는지 소스로 확인합니다 —
+    이 신고를 낳았던 방식으로 도로 돌아가지 않도록 하는 회귀 시험입니다.
+    """
+    import inspect
+
+    body = inspect.getsource(SOUND._play_windows)
+    assert "winsound.SND_FILENAME" in body
+    # 예전 방식을 설명하는 주석 자체는 남아 있어도 됩니다 — 실제로 그
+    # 상수를 다시 쓰지만 않으면 됩니다.
+    assert "winsound.SND_MEMORY" not in body
+
+
+def test_the_ui_wires_the_success_sound_to_new_holds_and_respects_the_toggle():
+    """새 홀드가 생기는 **유일한 자리**(remember_hold)에서만 성공 알림소리를
+    냅니다 — 자동예매든 [바로 예약]이든 전부 이 함수를 거치므로, 여기
+    하나만 걸면 됩니다. 꺼 두면(``sound_enabled`` 가 거짓) 나지 않습니다.
     """
     body = _ui_function("remember_hold")
     assert "if self.sound_enabled.get():" in body
-    assert "play_success_chime()" in body
+    assert "play_success_sound()" in body
 
 
-def test_the_preview_button_always_plays_regardless_of_the_toggle():
-    """[종소리 미리듣기] 는 켜져 있는지와 무관하게 늘 들려줍니다 — 꺼 둔
-    사람도 무슨 소리였는지 확인할 수 있어야 합니다.
+def test_the_ui_wires_the_watch_finished_sound_to_autobook_and_respects_the_toggle():
+    """자동예매 묶음이 끝나면(:class:`AutoBooker` 의 ``on_finished``) 화면
+    스레드로 넘겨(:meth:`_on_watch_finished` → 큐) 감시 종료 알림소리를
+    냅니다. 성공 알림과 마찬가지로 토글을 봅니다.
     """
-    body = _ui_function("play_test_sound")
-    assert "play_success_chime()" in body
-    assert "sound_enabled" not in body
+    assert "on_finished=self._on_watch_finished," in _ui_source()
+    signal = _ui_function("_on_watch_finished")
+    assert "self.events.put(self._play_watch_finished_sound_if_enabled)" in signal
+    play = _ui_function("_play_watch_finished_sound_if_enabled")
+    assert "if self.sound_enabled.get():" in play
+    assert "play_watch_finished_sound()" in play
 
 
-def test_the_sound_toggle_and_preview_button_are_on_screen():
+def test_the_preview_buttons_always_play_regardless_of_the_toggle():
+    """[성공 알림 미리듣기]/[감시 종료 알림 미리듣기] 는 켜져 있는지와
+    무관하게 늘 들려줍니다 — 꺼 둔 사람도 무슨 소리였는지 확인할 수
+    있어야 합니다.
+    """
+    success = _ui_function("play_test_success_sound")
+    assert "play_success_sound()" in success
+    assert "sound_enabled" not in success
+    finished = _ui_function("play_test_watch_finished_sound")
+    assert "play_watch_finished_sound()" in finished
+    assert "sound_enabled" not in finished
+
+
+def test_the_sound_toggle_and_two_preview_buttons_are_on_screen():
     source = _ui_source()
-    assert '"예약 성공 종소리"' in source
-    assert '"종소리 미리듣기"' in source
-    assert "command=self.play_test_sound" in source
+    assert '"알림소리"' in source
+    assert '"성공 알림 미리듣기"' in source
+    assert '"감시 종료 알림 미리듣기"' in source
+    assert "command=self.play_test_success_sound" in source
+    assert "command=self.play_test_watch_finished_sound" in source
 
 
 def test_the_sound_setting_is_remembered_across_restarts():

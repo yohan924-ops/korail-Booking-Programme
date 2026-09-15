@@ -19,6 +19,7 @@ import threading
 import time
 import tkinter as tk
 import uuid
+import webbrowser
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime
@@ -87,7 +88,7 @@ from .search import (
 )
 from .session import build_client
 from .session import login as do_login
-from .sound import play_success_chime
+from .sound import play_success_sound, play_watch_finished_sound
 from .tray import TrayHandlers, create_tray_icon
 
 
@@ -940,6 +941,24 @@ class BookerApp:
             self.login_button.configure(text="로그인")
             self.logout_button.grid_remove()
 
+    @staticmethod
+    def _center_window(
+        window: tk.Toplevel, width: int | None = None, height: int | None = None
+    ) -> None:
+        """새 팝업을 모니터 화면 한가운데에 둡니다.
+
+        Tk 의 기본 자리(대개 화면 왼쪽 위 구석 쪽)는 창을 열 때마다 매번
+        같은 구석에 겹쳐 뜨는데, 실제로 그렇게 뜬다는 신고가 있었습니다.
+        ``width``/``height`` 를 안 주면 지금까지 고른 위젯들로 이미 정해진
+        크기를 그대로 씁니다 — 그래서 위젯을 다 붙인 **뒤에** 불러야 합니다.
+        """
+        window.update_idletasks()
+        w = width if width is not None else window.winfo_width()
+        h = height if height is not None else window.winfo_height()
+        x = max(0, (window.winfo_screenwidth() - w) // 2)
+        y = max(0, (window.winfo_screenheight() - h) // 2)
+        window.geometry(f"{w}x{h}+{x}+{y}")
+
     def open_login(self) -> None:
         """로그인 팝업. 떠 있는 동안 **본 창은 눌리지 않습니다.**
 
@@ -1052,6 +1071,7 @@ class BookerApp:
         for field in (id_entry, pw_entry):
             field.bind("<Return>", lambda _event: attempt())
         window.protocol("WM_DELETE_WINDOW", skip)
+        self._center_window(window)
         window.grab_set()
         (pw_entry if self.login_id.get().strip() else id_entry).focus_set()
 
@@ -1714,6 +1734,7 @@ class BookerApp:
         )
 
         ttk.Button(window, text="닫기", command=window.destroy).pack(pady=(0, 12))
+        self._center_window(window)
         window.grab_set()
 
     def _seat_pick_summary_text(self) -> str:
@@ -2452,17 +2473,32 @@ class BookerApp:
         if item is not None:
             self.hold_tree.see(item)
         # 자동예매든 [바로 예약]이든, 새로 잡힌 예약이면 여기로 다 모입니다
-        # — 소리는 이 자리 하나에서만 울립니다. 창을 트레이에 숨겨 놔도
+        # — 알림소리는 이 자리 하나에서만 울립니다. 창을 트레이에 숨겨 놔도
         # 이 메서드 자체는 그대로 불립니다(감시가 큐를 거쳐 부르는 자리라,
         # 창이 보이는지와 무관합니다).
         if self.sound_enabled.get():
-            play_success_chime()
+            play_success_sound()
 
-    def play_test_sound(self) -> None:
-        """[종소리 미리듣기]. 켜져 있는지와 무관하게 늘 들려줍니다 —
+    def _on_watch_finished(self) -> None:
+        """감시(자동예매) 묶음 하나가 끝났습니다 — 잡았든, 시간이 끝났든,
+        사람이 멈췄든, 실패했든 무조건 옵니다. 배경 스레드(:class:`AutoBooker`
+        의 ``run``)에서 불리므로 큐를 거쳐 화면 스레드로 넘깁니다.
+        """
+        self.events.put(self._play_watch_finished_sound_if_enabled)
+
+    def _play_watch_finished_sound_if_enabled(self) -> None:
+        if self.sound_enabled.get():
+            play_watch_finished_sound()
+
+    def play_test_success_sound(self) -> None:
+        """[성공 알림 미리듣기]. 켜져 있는지와 무관하게 늘 들려줍니다 —
         꺼 둔 사람이 "이게 무슨 소리였더라" 하고 확인할 때도 써야 하므로.
         """
-        play_success_chime()
+        play_success_sound()
+
+    def play_test_watch_finished_sound(self) -> None:
+        """[감시 종료 알림 미리듣기]. 마찬가지로 늘 들려줍니다."""
+        play_watch_finished_sound()
 
     def sync_holds(self) -> None:
         """잡은 예약 표를 ``self.holds`` 에서 다시 그립니다.
@@ -2754,34 +2790,52 @@ class BookerApp:
         ttk.Checkbutton(row, text="예약대기도 시도(직통·일반실)", variable=self.allow_standby).pack(
             side="left"
         )
-        ttk.Checkbutton(row, text="텔레그램 알림", variable=self.notify_enabled).pack(
+
+        # 알림 종류(텔레그램·알림소리)를 조회 주기·감시 시간과 한 줄에 몰아
+        # 두면 무엇이 무엇인지 눈으로 가르기 어렵습니다 — 따로 묶습니다.
+        notify = ttk.LabelFrame(
+            frame, text="알림 (창을 트레이에 숨겨도 그대로 옵니다)"
+        )
+        notify.grid(row=4, column=0, columnspan=2, sticky="w", padx=4, pady=(0, 6))
+        telegram_row = ttk.Frame(notify)
+        telegram_row.pack(anchor="w", padx=6, pady=(6, 2))
+        ttk.Checkbutton(
+            telegram_row, text="텔레그램 알림", variable=self.notify_enabled
+        ).pack(side="left")
+        ttk.Button(
+            telegram_row, text="텔레그램 설정", command=self.on_telegram_settings
+        ).pack(side="left", padx=(8, 4))
+        ttk.Button(
+            telegram_row, text="설정 방법 보기(사진 설명)", command=self.open_telegram_guide
+        ).pack(side="left")
+        sound_row = ttk.Frame(notify)
+        sound_row.pack(anchor="w", padx=6, pady=(2, 6))
+        ttk.Checkbutton(sound_row, text="알림소리", variable=self.sound_enabled).pack(
             side="left"
         )
-        # 창을 트레이에 숨겨 놔도 이 소리는 그대로 납니다 — 화면을 보고
-        # 있지 않아도 예약이 잡혔다는 것을 바로 압니다.
-        ttk.Checkbutton(row, text="예약 성공 종소리", variable=self.sound_enabled).pack(
-            side="left"
-        )
-        row2 = ttk.Frame(frame)
-        row2.grid(row=4, column=0, columnspan=2, sticky="w", padx=4, pady=(0, 6))
-        ttk.Button(row2, text="텔레그램 설정", command=self.on_telegram_settings).pack(
-            side="left", padx=12
-        )
-        ttk.Button(row2, text="종소리 미리듣기", command=self.play_test_sound).pack(
-            side="left", padx=(0, 12)
-        )
+        ttk.Button(
+            sound_row, text="성공 알림 미리듣기", command=self.play_test_success_sound
+        ).pack(side="left", padx=(8, 4))
+        ttk.Button(
+            sound_row,
+            text="감시 종료 알림 미리듣기",
+            command=self.play_test_watch_finished_sound,
+        ).pack(side="left")
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=5, column=0, columnspan=2, sticky="w", padx=4, pady=(0, 6))
         # 담긴 것 전부와 고른 것만 — 넷으로 나눕니다. 하나로 두면 여러 여정을
         # 담아 두고 그중 하나만 노릴 수가 없습니다.
-        self.start_button = ttk.Button(row2, text="전체 시작", command=self.on_start)
+        self.start_button = ttk.Button(buttons, text="전체 시작", command=self.on_start)
         self.start_button.pack(side="left", padx=4)
-        ttk.Button(row2, text="고른 것만 시작", command=self.on_start_selected).pack(
+        ttk.Button(buttons, text="고른 것만 시작", command=self.on_start_selected).pack(
             side="left", padx=2
         )
         self.stop_button = ttk.Button(
-            row2, text="전체 중지", command=self.on_stop, state="disabled"
+            buttons, text="전체 중지", command=self.on_stop, state="disabled"
         )
         self.stop_button.pack(side="left", padx=(10, 2))
-        ttk.Button(row2, text="고른 것만 중지", command=self.on_stop_selected).pack(
+        ttk.Button(buttons, text="고른 것만 중지", command=self.on_stop_selected).pack(
             side="left"
         )
         # 미리보기 스위치는 없앴습니다. 켜는 것을 잊고 미리보기를 진짜라고
@@ -2789,7 +2843,7 @@ class BookerApp:
         # 때문입니다. 대신 시작할 때 확인 창이 뜨고, 로그인하지 않았으면
         # 시작 자체가 막힙니다.
         ttk.Label(
-            row2,
+            buttons,
             text="누르면 진짜 예약을 만듭니다 (결제는 하지 않음)",
             foreground="#a11",
         ).pack(side="left", padx=12)
@@ -2802,7 +2856,7 @@ class BookerApp:
             "고르고 [조건 바꿔 재시작]. 결제는 하지 않습니다 — 잡은 뒤 코레일 "
             "앱에서 기한 안에 결제하세요.",
             foreground="#666666",
-        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=4, pady=(0, 6))
+        ).grid(row=6, column=0, columnspan=2, sticky="w", padx=4, pady=(0, 6))
 
     def _build_log(self, parent: tk.PanedWindow) -> None:
         """기록을 둘로 나눕니다 — 조회 쪽과 자동예매 쪽.
@@ -4345,7 +4399,7 @@ class BookerApp:
         window.title(
             f"운행 일정 — {(leg.train_class_name or '').strip()} {train_no}".strip()
         )
-        window.geometry("560x420")
+        self._center_window(window, 560, 420)
 
         header = (
             f"{run_date[:4]}-{run_date[4:6]}-{run_date[6:]}  "
@@ -4754,6 +4808,7 @@ class BookerApp:
         buttons.pack(pady=(0, 12))
         ttk.Button(buttons, text="고른 것 담기", command=pick).pack(side="left", padx=(0, 6))
         ttk.Button(buttons, text="취소", width=8, command=window.destroy).pack(side="left")
+        self._center_window(window)
         window.grab_set()
 
     def _target_double_clicked(self, event: tk.Event) -> str | None:
@@ -5217,6 +5272,7 @@ class BookerApp:
             notify=self._make_notifier(),
             relogin=self.relogin if self._credentials else None,
             on_hold=self.on_hold_made,
+            on_finished=self._on_watch_finished,
         )
         title = " / ".join(target.describe() for target in targets[:2])
         if len(targets) > 2:
@@ -5436,91 +5492,72 @@ class BookerApp:
 
     # -- 동작: 텔레그램 ------------------------------------------------------
 
+    def open_telegram_guide(self) -> None:
+        """텔레그램 봇 만드는 법을 사진과 함께 보여주는 글(외부)을 엽니다.
+
+        스크린샷을 이 프로그램 안에 옮겨 담지 않고 원본 글을 그대로 엽니다
+        — 그 사진들은 그 글쓴이의 것이라, 복사해 두는 대신 원본에서 보는
+        것이 맞습니다.
+        """
+        webbrowser.open("https://playneko.github.io/2020/07/21/chatbot/chatbot-002/")
+
     def on_telegram_settings(self) -> None:
         window = tk.Toplevel(self.root)
         window.title("텔레그램 알림 설정")
         window.transient(self.root)
         token = tk.StringVar(value=self.settings.telegram_token)
         chat_id = tk.StringVar(value=self.settings.telegram_chat_id)
-        # 처음 쓰는 사람이 여기서 막힙니다. BotFather 답장만 보고는 어느 값을
-        # 어디에 넣는지, 왜 [내 대화 ID 찾기] 가 빈손으로 오는지 알 수 없습니다.
-        # 그래서 단계에 번호를 붙이고, 각 단계 옆에 그 단계의 단추를 둡니다.
+        # 예전에는 4단계로 나눈 긴 설명(캡처 없이 글로만)을 이 창에 통째로
+        # 담았는데, 처음 쓰는 사람에게는 길기만 하고 실제 화면을 못 봐
+        # 오히려 헷갈렸습니다. 사진이 있는 원본 글로 안내하고, 이 창은
+        # 값 두 개(토큰·대화 ID)를 채우고 확인하는 데만 집중합니다.
         ttk.Label(
             window,
-            text="텔레그램으로 알림을 받으려면 값이 둘 필요합니다 — 봇 토큰과 대화 ID.\n"
-            "아래 순서대로 하면 둘 다 채워집니다.",
+            text="텔레그램으로 알림을 받으려면 봇 토큰과 대화 ID, 값이 둘 필요합니다.\n"
+            "처음이면 아래 단추로 사진이 있는 설명을 먼저 보세요.",
             justify="left",
-        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 8))
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 4))
+        ttk.Button(
+            window, text="사진으로 보는 설정 방법", command=self.open_telegram_guide
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 10))
 
-        step1 = ttk.LabelFrame(window, text="1단계 — 봇 만들기 (텔레그램 앱에서)")
-        step1.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
-        ttk.Label(
-            step1,
-            text="① 텔레그램 검색창에 @BotFather 를 치고 (파란 체크가 붙은 것) 대화를 엽니다.\n"
-            "② /newbot 을 보냅니다.\n"
-            "③ 봇 이름을 아무거나 보냅니다 (예: 코레일 알림).\n"
-            "④ 봇 아이디를 보냅니다. 반드시 bot 으로 끝나야 합니다\n"
-            "     (예: my_korail_alarm_bot). 이미 쓰는 이름이면 다시 물어봅니다.",
-            justify="left",
-        ).pack(anchor="w", padx=8, pady=6)
-
-        step2 = ttk.LabelFrame(window, text="2단계 — 토큰 붙여넣기")
-        step2.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
-        ttk.Label(
-            step2,
-            text='BotFather 답장에서 "Use this token to access the HTTP API:" 바로\n'
-            "아랫줄을 통째로 복사해 아래 칸에 넣으세요.",
-            justify="left",
-        ).pack(anchor="w", padx=8, pady=(6, 2))
-        ttk.Entry(step2, textvariable=token, width=52, show="*").pack(
-            anchor="w", padx=8
+        token_row = ttk.Frame(window)
+        token_row.grid(row=2, column=0, columnspan=2, sticky="w", padx=10, pady=2)
+        ttk.Label(token_row, text="봇 토큰").pack(side="left")
+        ttk.Entry(token_row, textvariable=token, width=42, show="*").pack(
+            side="left", padx=6
         )
-        # 예시는 텔레그램 공식 문서의 것을 씁니다. 진짜 토큰을 예시로 적어 두면
-        # 그대로 붙여 넣는 사람이 생기고, 남의 봇 번호를 적어 둘 일도 아닙니다.
+        ttk.Button(token_row, text="토큰 확인", command=lambda: check_token()).pack(
+            side="left"
+        )
         ttk.Label(
-            step2,
-            text='모양: 123456789:ABCdefGHIjklMNOpqrSTUvwxYZ  (숫자 : 긴 문자열)\n'
-            "이 토큰은 봇을 통째로 조종할 수 있습니다. 남에게 보이지 마세요.",
+            window,
+            text='BotFather 가 준 "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ" 모양의 값입니다.'
+            " 남에게 보이지 마세요 — 봇을 통째로 조종할 수 있습니다.",
             foreground="#666666",
             justify="left",
-        ).pack(anchor="w", padx=8, pady=(2, 4))
-        ttk.Button(step2, text="토큰 확인", command=lambda: check_token()).pack(
-            anchor="w", padx=8, pady=(0, 6)
-        )
+        ).grid(row=3, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 8))
 
-        step3 = ttk.LabelFrame(window, text="3단계 — 봇에게 먼저 말 걸기 (이걸 빼먹으면 안 됩니다)")
-        step3.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
+        chat_row = ttk.Frame(window)
+        chat_row.grid(row=4, column=0, columnspan=2, sticky="w", padx=10, pady=2)
+        ttk.Label(chat_row, text="대화 ID").pack(side="left")
+        ttk.Entry(chat_row, textvariable=chat_id, width=18).pack(side="left", padx=6)
+        ttk.Button(
+            chat_row, text="내 대화 ID 찾기", command=lambda: find_chat_id()
+        ).pack(side="left")
         ttk.Label(
-            step3,
-            text="BotFather 답장 첫 줄의 t.me/… 링크를 눌러 내 봇과의 대화를 열고,\n"
-            "[시작] 단추를 누르거나 /start 를 한 번 보냅니다.\n"
-            "\n"
-            "텔레그램은 사용자가 먼저 말을 건 적이 없는 봇에게 대화 ID 를 주지\n"
-            "않습니다. 그래서 이 단계를 건너뛰면 아래 [내 대화 ID 찾기] 가 늘\n"
-            "빈손으로 돌아옵니다.",
-            justify="left",
-        ).pack(anchor="w", padx=8, pady=6)
-
-        step4 = ttk.LabelFrame(window, text="4단계 — 대화 ID 채우기")
-        step4.grid(row=4, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
-        ttk.Entry(step4, textvariable=chat_id, width=24).pack(anchor="w", padx=8, pady=(6, 2))
-        ttk.Label(
-            step4,
-            text="모양: 123456789 — 숫자입니다(그룹이면 앞에 - 가 붙습니다).\n"
-            "봇 이름(@my_korail_alarm_bot 같은 것)을 넣는 칸이 아닙니다. 텔레그램이\n"
-            "@이름을 받는 것은 채널·슈퍼그룹뿐이고, 봇 자신은 대화 상대가 될 수\n"
-            "없습니다.\n"
-            "\n"
-            "직접 알 필요 없습니다 — 3단계를 마쳤으면 아래 [내 대화 ID 찾기] 가\n"
-            "채워 줍니다. 그 단추는 이 칸에 뭐가 적혀 있든 보지 않고 덮어씁니다\n"
-            "(봇이 받은 마지막 메시지에서 읽어 옵니다). 그래서 뭘 쳐 넣었든\n"
-            "누르는 순간 숫자로 바뀝니다.",
+            window,
+            text="직접 몰라도 됩니다 — 내 봇과 먼저 대화를 한 번 나눈 뒤(/start) "
+            "[내 대화 ID 찾기] 를 누르면 이 칸이 자동으로 채워집니다. 텔레그램은\n"
+            "먼저 말을 건 적이 없는 봇에게 대화 ID 를 주지 않으므로, 이 순서를 "
+            "건너뛰면 늘 빈손으로 돌아옵니다.",
             foreground="#666666",
             justify="left",
-        ).pack(anchor="w", padx=8, pady=(0, 6))
+        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 8))
+
         status = tk.StringVar(value="")
         ttk.Label(window, textvariable=status, foreground="#666666").grid(
-            row=7, column=0, columnspan=2, sticky="w", padx=8, pady=6
+            row=6, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 6)
         )
 
         def find_chat_id() -> None:
@@ -5651,29 +5688,23 @@ class BookerApp:
             )
 
         buttons = ttk.Frame(window)
-        buttons.grid(row=8, column=0, columnspan=2, sticky="w", padx=10, pady=8)
-        ttk.Button(buttons, text="④ 내 대화 ID 찾기", command=find_chat_id).pack(side="left")
-        ttk.Button(buttons, text="⑤ 테스트 전송", command=send_test).pack(side="left", padx=6)
-        ttk.Button(buttons, text="⑥ 저장하고 쓰기", command=store).pack(side="left")
-        ttk.Button(buttons, text="이번만 쓰기", command=use_once).pack(side="left", padx=6)
-        ttk.Button(buttons, text="저장된 값 지우기", command=forget).pack(side="left")
+        buttons.grid(row=7, column=0, columnspan=2, sticky="w", padx=10, pady=8)
+        ttk.Button(buttons, text="테스트 전송", command=send_test).pack(side="left")
+        ttk.Button(buttons, text="저장하고 쓰기", command=store).pack(side="left", padx=6)
+        ttk.Button(buttons, text="이번만 쓰기", command=use_once).pack(side="left")
+        ttk.Button(buttons, text="저장된 값 지우기", command=forget).pack(
+            side="left", padx=6
+        )
         ttk.Label(
             window,
-            text="잘 안 될 때:\n"
-            "· [토큰 확인] 이 실패하면 → 2단계. 토큰을 잘못 복사한 것입니다\n"
-            "   (앞뒤 공백, 줄바꿈, 한 글자 빠짐).\n"
-            "· [토큰 확인] 은 되는데 대화 ID 를 못 찾으면 → 3단계를 안 한 것입니다.\n"
-            "   봇 대화에서 /start 를 한 번 보내고 다시 누르세요.\n"
-            "· 둘 다 채웠는데 테스트가 실패하면 → 봇 대화를 차단하지 않았는지 보세요.\n"
-            "\n"
-            "\n"
-            "[⑥ 저장하고 쓰기] 는 이 컴퓨터의 설정 파일에 적습니다 — 다음에 켤 때도\n"
-            "그대로 있습니다. [이번만 쓰기] 는 파일에 아무것도 쓰지 않고 이번 실행에만\n"
-            "씁니다(프로그램을 끄면 사라집니다). 어느 쪽이든 토큰은 화면과 기록에\n"
-            "남지 않습니다.",
+            text="잘 안 되면: 토큰 확인이 실패 → 토큰을 다시 복사하세요. 대화 ID를 못\n"
+            "찾으면 → 봇과 먼저 /start 로 대화를 나누고 다시 누르세요. 저장은 이\n"
+            "컴퓨터에 남고, 이번만 쓰기는 끄면 사라집니다 — 어느 쪽이든 토큰은\n"
+            "화면·기록에 남지 않습니다.",
             foreground="#666666",
             justify="left",
-        ).grid(row=9, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 10))
+        ).grid(row=8, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 10))
+        self._center_window(window)
 
     # -- 트레이(작업 표시줄) ---------------------------------------------------
     #

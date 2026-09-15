@@ -614,31 +614,52 @@ def main() -> int:
           any(h.pnr == "SMOKE1" for h in app.holds),
           [h.pnr for h in app.holds])
 
-    # -- 예약 성공 종소리: 켜고 끄기, [미리듣기]는 무관하게 울린다 -----------
-    chime_calls: list[bool] = []
-    real_chime = ui_module.play_success_chime
-    ui_module.play_success_chime = lambda: chime_calls.append(True)  # type: ignore[assignment]
+    # -- 알림소리: 성공·감시 종료 두 가지, 켜고 끄기, 미리듣기는 무관하게 -----
+    success_calls: list[bool] = []
+    finished_calls: list[bool] = []
+    real_success_sound = ui_module.play_success_sound
+    real_finished_sound = ui_module.play_watch_finished_sound
+    ui_module.play_success_sound = lambda: success_calls.append(True)  # type: ignore[assignment]
+    ui_module.play_watch_finished_sound = lambda: finished_calls.append(True)  # type: ignore[assignment]
 
     app.sound_enabled.set(True)
     app.remember_hold(Held(
         label="", summary="x", pnr="CHIME1", fare="-",
         deadline=None, deadline_text="모름",
     ))
-    check("종소리를 켜 두면 새 홀드가 생길 때 울린다", chime_calls == [True], chime_calls)
+    check("알림소리를 켜 두면 새 홀드가 생길 때 성공 알림이 울린다",
+          success_calls == [True] and finished_calls == [], success_calls)
 
-    chime_calls.clear()
+    success_calls.clear()
     app.sound_enabled.set(False)
     app.remember_hold(Held(
         label="", summary="x", pnr="CHIME2", fare="-",
         deadline=None, deadline_text="모름",
     ))
-    check("꺼 두면 새 홀드가 생겨도 안 울린다", chime_calls == [], chime_calls)
+    check("꺼 두면 새 홀드가 생겨도 안 울린다", success_calls == [], success_calls)
 
-    chime_calls.clear()
-    app.play_test_sound()
-    check("[종소리 미리듣기] 는 꺼 둬도 울린다", chime_calls == [True], chime_calls)
+    app.sound_enabled.set(True)
+    app._on_watch_finished()  # 자동예매 스레드가 실제로 부르는 자리
+    app._drain()
+    check("자동예매가 끝나면(성공과 다른) 감시 종료 알림이 울린다",
+          finished_calls == [True] and success_calls == [], finished_calls)
 
-    ui_module.play_success_chime = real_chime  # type: ignore[assignment]
+    finished_calls.clear()
+    app.sound_enabled.set(False)
+    app._on_watch_finished()
+    app._drain()
+    check("꺼 두면 감시 종료 알림도 안 울린다", finished_calls == [], finished_calls)
+
+    success_calls.clear()
+    finished_calls.clear()
+    app.play_test_success_sound()
+    check("[성공 알림 미리듣기] 는 꺼 둬도 울린다", success_calls == [True], success_calls)
+    app.play_test_watch_finished_sound()
+    check("[감시 종료 알림 미리듣기] 도 꺼 둬도, 성공 알림과 다르게 울린다",
+          finished_calls == [True] and success_calls == [True], (success_calls, finished_calls))
+
+    ui_module.play_success_sound = real_success_sound  # type: ignore[assignment]
+    ui_module.play_watch_finished_sound = real_finished_sound  # type: ignore[assignment]
     app.sound_enabled.set(True)
 
     # -- 1구간이 같고 2구간만 다른 조합은 서로를 막지 않는가 -----------------
@@ -1134,6 +1155,14 @@ def main() -> int:
     check("운행 일정 창: 창이 하나 뜬다", len(new_windows) == 1, new_windows)
     if new_windows:
         schedule_window = new_windows[0]
+        expected_x = max(0, (schedule_window.winfo_screenwidth() - 560) // 2)
+        expected_y = max(0, (schedule_window.winfo_screenheight() - 420) // 2)
+        check(
+            "운행 일정 창도 화면 한가운데에 뜬다(560x420 고정 크기도)",
+            abs(schedule_window.winfo_x() - expected_x) <= 2
+            and abs(schedule_window.winfo_y() - expected_y) <= 2,
+            (schedule_window.winfo_x(), schedule_window.winfo_y()),
+        )
         stop_trees = find_widgets(
             schedule_window, lambda w: isinstance(w, ttk.Treeview)
         )
@@ -1262,6 +1291,15 @@ def main() -> int:
     root.update()
     window = app._login_window
     assert window is not None, "로그인 팝업이 뜨지 않았습니다"
+    screen_w, screen_h = window.winfo_screenwidth(), window.winfo_screenheight()
+    expected_x = max(0, (screen_w - window.winfo_width()) // 2)
+    expected_y = max(0, (screen_h - window.winfo_height()) // 2)
+    check(
+        "로그인 팝업이 화면 한가운데에 뜬다(모서리가 아니다)",
+        abs(window.winfo_x() - expected_x) <= 2
+        and abs(window.winfo_y() - expected_y) <= 2,
+        (window.winfo_x(), window.winfo_y(), expected_x, expected_y),
+    )
     labels = find_widgets(window, lambda w: w.winfo_class() == "TLabel")
     check(
         "휴대폰번호는 하이픈 없이 넣으라고 안내한다",

@@ -364,6 +364,7 @@ class AutoBooker:
         notify: Notifier | None = None,
         relogin: Callable[[], None] | None = None,
         on_hold: HoldWatcher | None = None,
+        on_finished: Callable[[], None] | None = None,
     ) -> None:
         if not targets:
             raise ValueError("자동예매에는 열차를 하나 이상 골라야 합니다")
@@ -377,6 +378,9 @@ class AutoBooker:
         #: 결과에는 방향별 홀드만 남으므로 어느 여정의 것인지 잃습니다 —
         #: 화면이 목록을 만들려면 그 짝이 필요합니다.
         self._on_hold = on_hold
+        #: 이 감시(묶음) 하나가 끝나면(잡음·중지·시간 끝·실패 무엇이든) 꼭
+        #: 한 번 부릅니다 — 화면의 "감시 종료" 알림소리가 여기서 답니다.
+        self._on_finished = on_finished
         self._relogins = 0
         #: 결판 단위마다 한 번만 잡습니다. 잡힌 단위는 여기 들어가고 더는
         #: 보지 않습니다 — 무엇이 "같은 단위" 인지는 :meth:`_settle_key`
@@ -508,13 +512,28 @@ class AutoBooker:
                 f"{END_MARKS[Outcome.FAILED]} 자동예매 종료 (failed)\n"
                 f"{result.message}\n— {self.watching_text()}"
             )
+            self._signal_finished()
             raise
         self.announce(
             f"{END_MARKS.get(result.outcome, '■')} 자동예매 종료 "
             f"({result.outcome.value})\n{result.message}\n"
             f"— {self.watching_text()}"
         )
+        self._signal_finished()
         return result
+
+    def _signal_finished(self) -> None:
+        """이 감시 하나가 끝났다는 신호. 잡았든, 중지됐든, 시간이 끝났든,
+        실패했든 :meth:`run` 이 끝나는 모든 갈래에서 꼭 한 번 불립니다.
+        알림 실패가 이미 정해진 예약 결과를 건드리면 안 되므로 예외는
+        삼킵니다(:meth:`announce` 와 같은 태도입니다).
+        """
+        if self._on_finished is None:
+            return
+        try:
+            self._on_finished()
+        except Exception:
+            pass
 
     def _result(self, outcome: Outcome, message: str, *, polls: int = 0) -> BookingResult:
         """끝나는 갈래 하나. **이미 잡은 예약을 반드시 싣습니다.**
