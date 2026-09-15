@@ -2302,7 +2302,7 @@ def test_the_chat_id_is_a_number_not_a_bot_name():
 def test_the_dialog_says_the_button_fills_the_chat_id_for_you():
     source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
 
-    assert "이 칸이 자동으로 채워집니다" in source
+    assert "자동으로 채워 줍니다" in source
     # 숫자가 아닌 값으로는 보내지도 저장하지도 않습니다.
     assert "def bad_chat_id()" in source
     assert "if bad_chat_id():" in source
@@ -2335,23 +2335,36 @@ def test_a_chat_without_a_name_still_gives_its_number():
     assert found is not None and found.chat_id == "-100" and found.title == ""
 
 
-def test_the_token_dialog_has_the_essentials_without_the_old_wall_of_text():
-    """텔레그램 설정 창은 이제 값 두 개(토큰·대화 ID)를 채우고 확인하는
-    데만 집중합니다 — 봇을 만드는 자세한 절차(BotFather 대화)는 사진이
-    있는 외부 글로 옮겼습니다
-    (:func:`test_the_telegram_popup_links_out_to_a_screenshot_guide_instead_of_a_wall_of_text`).
+def test_the_token_dialog_walks_through_the_real_botfather_flow():
+    """텔레그램 설정 창은 실제로 봇을 만들어 본 사람의 화면(캡처 3장)을
+    그대로 따라간 1~4단계로 값 두 개(토큰·대화 ID)를 채우고 확인합니다.
+    처음엔 이 절차를 외부 글 링크 하나로만 때웠는데("성의없다" 는 지적을
+    받았습니다) — 그 캡처가 보여 준 실제 순서·문구를 이 창 안에도
+    그대로 적어 둡니다. 사진을 보고 싶으면 [사진으로 보는 설정 방법]
+    으로 원본 글도 열 수 있습니다(둘 다 있습니다).
     """
     source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
 
-    assert 'ttk.Label(token_row, text="봇 토큰")' in source
-    assert 'ttk.Label(chat_row, text="대화 ID")' in source
+    for step in ("1단계 — 텔레그램 앱에서 봇 만들기", "2단계 — 토큰 붙여넣기",
+                 "3단계 — 내 봇과 먼저 대화하기 (꼭 필요합니다)",
+                 "4단계 — 대화 ID 채우기"):
+        assert step in source, step
+    # 실제 캡처에 나온 그대로의 순서·문구입니다.
+    assert "BotFather" in source and "/newbot" in source
+    assert "bot 으로 끝나야 합니다" in source
+    assert "Use this token to access the HTTP API" in source
     assert 'text="토큰 확인"' in source
     assert 'text="내 대화 ID 찾기"' in source
-    # 봇에게 먼저 말을 걸지 않으면 대화 ID 를 못 얻습니다 — 실제로 자주
-    # 걸리는 지점이라, 외부 글을 다시 열지 않아도 이 창 안에서 보여야 합니다.
+    # 사진이 있는 원본 글로도 여전히 갈 수 있습니다 — 링크를 없애지 않았습니다.
+    assert 'text="사진으로 보는 설정 방법"' in source
+    assert "command=self.open_telegram_guide" in source
+    # 봇에게 먼저 말을 걸지 않으면 대화 ID 를 못 얻습니다. 이 문장은 소스에서
+    # 줄바꿈으로 나뉜 문자열 리터럴 두 개라 _ui_function(ast.unparse 가
+    # 이어 붙입니다)으로 봐야 이어져 있는지 확인됩니다.
     assert "/start" in source
-    assert "먼저 말을 건 적이 없는 봇에게 대화 ID 를 주지" in source
-    # 잘 안 될 때 어디를 고쳐야 하는지 짧게라도 갈라 줍니다.
+    body = _ui_function("on_telegram_settings")
+    assert "먼저 말을 건 적이 없는 봇에게 대화 ID 를 주지" in body
+    # 잘 안 될 때 어디를 고쳐야 하는지 갈라 줍니다.
     assert "잘 안 되면:" in source
 
 
@@ -3155,10 +3168,13 @@ def test_telegram_settings_can_be_used_without_touching_the_disk():
     assert "settings_module.save" not in once
 
 
-def test_the_telegram_popup_links_out_to_a_screenshot_guide_instead_of_a_wall_of_text():
-    """예전에는 4단계짜리 긴 설명(캡처 없이 글로만)을 이 창에 통째로
-    담았습니다. 처음 쓰는 사람에게는 길기만 하고 실제 화면을 못 봐 오히려
-    헷갈렸다는 지적이 있어, 사진이 있는 원본 글로 안내하는 단추로 줄였습니다.
+def test_the_telegram_popup_has_both_the_written_steps_and_the_screenshot_link():
+    """딱 한 번, 이 창을 외부 글 링크 하나로만 줄였다가 "성의없이 만들지
+    말라" 는 지적을 받았습니다 — 링크는 그대로 두되(사용자가 준 그
+    링크를 지우지 않습니다), 그 화면 캡처가 실제로 보여 준 순서·문구를
+    이 창 자신에도 적어 둬야 한다는 뜻이었습니다. 그래서 이제 **둘
+    다** 있습니다 — 사진이 있는 원본 글로 가는 단추와, 그 흐름을 그대로
+    옮긴 1~4단계 설명.
     """
     source = _ui_source()
     assert 'text="사진으로 보는 설정 방법"' in source
@@ -3168,9 +3184,12 @@ def test_the_telegram_popup_links_out_to_a_screenshot_guide_instead_of_a_wall_of
         "webbrowser.open('https://playneko.github.io/2020/07/21/chatbot/chatbot-002/')"
         in guide
     )
-    # 예전의 장문 4단계 설명(①②③④ 번호가 붙은 안내)은 이제 없습니다.
-    assert "1단계 — 봇 만들기" not in source
-    assert "2단계 — 토큰 붙여넣기" not in source
+    # 사용자가 준 링크 그대로입니다 — 다른 글로 바뀌지 않았습니다.
+    assert "playneko.github.io/2020/07/21/chatbot/chatbot-002" in source
+    for step in ("1단계 — 텔레그램 앱에서 봇 만들기", "2단계 — 토큰 붙여넣기",
+                 "3단계 — 내 봇과 먼저 대화하기 (꼭 필요합니다)",
+                 "4단계 — 대화 ID 채우기"):
+        assert step in source, step
 
 
 # --- 팝업은 모니터 화면 한가운데에 --------------------------------------------

@@ -5659,53 +5659,100 @@ class BookerApp:
         window.transient(self.root)
         token = tk.StringVar(value=self.settings.telegram_token)
         chat_id = tk.StringVar(value=self.settings.telegram_chat_id)
-        # 예전에는 4단계로 나눈 긴 설명(캡처 없이 글로만)을 이 창에 통째로
-        # 담았는데, 처음 쓰는 사람에게는 길기만 하고 실제 화면을 못 봐
-        # 오히려 헷갈렸습니다. 사진이 있는 원본 글로 안내하고, 이 창은
-        # 값 두 개(토큰·대화 ID)를 채우고 확인하는 데만 집중합니다.
+        # 실제로 봇을 만들어 본 사람의 화면 캡처(텔레그램에서 BotFather 를
+        # 찾아 /newbot 을 보내는 것부터, 토큰을 받고, 내 봇과 먼저 대화를
+        # 트는 것까지)를 그대로 따라가며 적었습니다 — 그 캡처 사진 자체는
+        # 이 프로그램 파일로 옮겨 담지 않고(용량·유지보수 문제도 있고,
+        # 다음에 텔레그램 화면이 바뀌면 낡은 사진이 됩니다) 원본 글을
+        # [사진으로 보는 설정 방법] 으로 열어 보게 했습니다 — 순서와 문구는
+        # 그 화면 그대로입니다.
         ttk.Label(
             window,
             text="텔레그램으로 알림을 받으려면 봇 토큰과 대화 ID, 값이 둘 필요합니다.\n"
-            "처음이면 아래 단추로 사진이 있는 설명을 먼저 보세요.",
+            "아래 1~4단계를 순서대로 하면 둘 다 채워집니다.",
             justify="left",
         ).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 4))
         ttk.Button(
             window, text="사진으로 보는 설정 방법", command=self.open_telegram_guide
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 10))
 
-        token_row = ttk.Frame(window)
-        token_row.grid(row=2, column=0, columnspan=2, sticky="w", padx=10, pady=2)
-        ttk.Label(token_row, text="봇 토큰").pack(side="left")
+        step1 = ttk.LabelFrame(window, text="1단계 — 텔레그램 앱에서 봇 만들기")
+        step1.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
+        ttk.Label(
+            step1,
+            text="① 검색창에 BotFather 를 치면 파란 체크가 붙은 공식 계정이 "
+            "나옵니다 — 그 대화를 엽니다.\n"
+            "② [시작] 을 누르거나 /start 를 보낸 뒤, /newbot 을 보냅니다.\n"
+            '③ "봇 이름을 뭘로 할까요?" 라고 물으면 아무 이름이나 보냅니다 '
+            "(예: 코레일 알림).\n"
+            '④ "봇 아이디를 알려주세요. 반드시 bot 으로 끝나야 합니다"\n'
+            "     라고 물으면, bot 으로 끝나는 아이디를 보냅니다\n"
+            "     (예: my_korail_alarm_bot). 이미 쓰는 아이디면 다시 물어봅니다.\n"
+            '⑤ "Done! Congratulations…" 로 시작하는 답장이 오면 다 만들어진 '
+            "것입니다 — 그 답장 안에 토큰이 있습니다(2단계).",
+            justify="left",
+        ).pack(anchor="w", padx=8, pady=6)
+
+        step2 = ttk.LabelFrame(window, text="2단계 — 토큰 붙여넣기")
+        step2.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
+        ttk.Label(
+            step2,
+            text='BotFather 답장에서 "Use this token to access the HTTP API:" '
+            "바로 아랫줄을 통째로 복사해 아래 칸에 넣으세요.",
+            justify="left",
+        ).pack(anchor="w", padx=8, pady=(6, 2))
+        token_row = ttk.Frame(step2)
+        token_row.pack(anchor="w", padx=8, pady=2)
         ttk.Entry(token_row, textvariable=token, width=42, show="*").pack(
-            side="left", padx=6
-        )
-        ttk.Button(token_row, text="토큰 확인", command=lambda: check_token()).pack(
             side="left"
         )
+        ttk.Button(token_row, text="토큰 확인", command=lambda: check_token()).pack(
+            side="left", padx=(6, 0)
+        )
+        # 예시는 텔레그램 공식 문서의 것을 씁니다(숫자 9자리 : 콜론 : 35자
+        # 안팎의 문자열 — 실제 봇 토큰과 같은 모양입니다). 진짜 토큰을
+        # 예시로 적어 두면 그대로 붙여 넣는 사람이 생기고, 남의 봇 토큰을
+        # 저장소에 남길 일도 아닙니다.
         ttk.Label(
-            window,
-            text='BotFather 가 준 "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ" 모양의 값입니다.'
-            " 남에게 보이지 마세요 — 봇을 통째로 조종할 수 있습니다.",
+            step2,
+            text='모양: 123456789:ABCdefGHIjklMNOpqrSTUvwxYZ  (숫자 : 콜론 : 긴 문자열)\n'
+            "이 토큰은 봇을 통째로 조종할 수 있습니다. 남에게 보이지 마세요.",
             foreground="#666666",
             justify="left",
-        ).grid(row=3, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 8))
+        ).pack(anchor="w", padx=8, pady=(2, 6))
 
-        chat_row = ttk.Frame(window)
-        chat_row.grid(row=4, column=0, columnspan=2, sticky="w", padx=10, pady=2)
-        ttk.Label(chat_row, text="대화 ID").pack(side="left")
-        ttk.Entry(chat_row, textvariable=chat_id, width=18).pack(side="left", padx=6)
+        step3 = ttk.LabelFrame(
+            window, text="3단계 — 내 봇과 먼저 대화하기 (꼭 필요합니다)"
+        )
+        step3.grid(row=4, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
+        ttk.Label(
+            step3,
+            text="BotFather 답장 속 t.me/아이디 링크를 누르거나, 만든 봇 이름으로 "
+            "검색해 대화를 열고 [열기]/[시작] 을 누른 뒤, /start 를 한 번 "
+            "보냅니다(아무 메시지나 보내도 됩니다).\n"
+            "\n"
+            "텔레그램은 사용자가 먼저 말을 건 적이 없는 봇에게 대화 ID 를 "
+            "주지 않습니다. 그래서 이 단계를 건너뛰면 아래 [내 대화 ID 찾기]\n"
+            "가 늘 빈손으로 돌아옵니다.",
+            justify="left",
+        ).pack(anchor="w", padx=8, pady=6)
+
+        step4 = ttk.LabelFrame(window, text="4단계 — 대화 ID 채우기")
+        step4.grid(row=5, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
+        chat_row = ttk.Frame(step4)
+        chat_row.pack(anchor="w", padx=8, pady=(6, 2))
+        ttk.Entry(chat_row, textvariable=chat_id, width=18).pack(side="left")
         ttk.Button(
             chat_row, text="내 대화 ID 찾기", command=lambda: find_chat_id()
-        ).pack(side="left")
+        ).pack(side="left", padx=(6, 0))
         ttk.Label(
-            window,
-            text="직접 몰라도 됩니다 — 내 봇과 먼저 대화를 한 번 나눈 뒤(/start) "
-            "[내 대화 ID 찾기] 를 누르면 이 칸이 자동으로 채워집니다. 텔레그램은\n"
-            "먼저 말을 건 적이 없는 봇에게 대화 ID 를 주지 않으므로, 이 순서를 "
-            "건너뛰면 늘 빈손으로 돌아옵니다.",
+            step4,
+            text="모양: 123456789 — 숫자입니다(그룹이면 앞에 - 가 붙습니다).\n"
+            "직접 알 필요 없습니다 — 3단계를 마쳤으면 위 단추가 봇이 받은\n"
+            "마지막 메시지에서 읽어 자동으로 채워 줍니다.",
             foreground="#666666",
             justify="left",
-        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 8))
+        ).pack(anchor="w", padx=8, pady=(2, 6))
 
         status = tk.StringVar(value="")
         ttk.Label(window, textvariable=status, foreground="#666666").grid(
@@ -5849,10 +5896,17 @@ class BookerApp:
         )
         ttk.Label(
             window,
-            text="잘 안 되면: 토큰 확인이 실패 → 토큰을 다시 복사하세요. 대화 ID를 못\n"
-            "찾으면 → 봇과 먼저 /start 로 대화를 나누고 다시 누르세요. 저장은 이\n"
-            "컴퓨터에 남고, 이번만 쓰기는 끄면 사라집니다 — 어느 쪽이든 토큰은\n"
-            "화면·기록에 남지 않습니다.",
+            text="잘 안 되면:\n"
+            "· [토큰 확인] 이 실패하면 → 2단계. 토큰을 잘못 복사한 것입니다\n"
+            "   (앞뒤 공백, 줄바꿈, 한 글자 빠짐).\n"
+            "· [토큰 확인] 은 되는데 대화 ID 를 못 찾으면 → 3단계를 안 한 것입니다.\n"
+            "   봇 대화에서 /start 를 한 번 보내고 다시 누르세요.\n"
+            "· 둘 다 채웠는데 테스트가 실패하면 → 봇 대화를 차단하지 않았는지 보세요.\n"
+            "\n"
+            "[저장하고 쓰기] 는 이 컴퓨터의 설정 파일에 적습니다 — 다음에 켤 때도\n"
+            "그대로 있습니다. [이번만 쓰기] 는 파일에 아무것도 쓰지 않고 이번 실행에만\n"
+            "씁니다(프로그램을 끄면 사라집니다). 어느 쪽이든 토큰은 화면과 기록에\n"
+            "남지 않습니다.",
             foreground="#666666",
             justify="left",
         ).grid(row=8, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 10))
