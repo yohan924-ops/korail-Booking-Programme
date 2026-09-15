@@ -68,7 +68,11 @@ def _try_claim_port(port: int) -> socket.socket | None:
         else:
             server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind(("127.0.0.1", port))
-        server.listen(4)
+        # 여유 있게 잡아 둡니다 — 창을 짓는 동안 accept 를 늦게 시작해도
+        # (``ui.py`` 의 ``run()`` 이 이미 그 지연 자체를 없앴지만, 이중
+        # 방비로) 사람이 exe 를 짧은 간격으로 여러 번 눌러도 backlog 가
+        # 먼저 차서 뒤엣것이 연결조차 못 하는 일이 없게 합니다.
+        server.listen(16)
     except OSError:
         server.close()
         return None

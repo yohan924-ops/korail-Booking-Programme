@@ -297,6 +297,13 @@ class PartialTransferError(RuntimeError):
 
     그냥 예외를 올리면 앞 구간이 잡혔다는 사실이 사라지고, 사람은 아무것도
     안 됐다고 생각한 채 결제 기한을 넘깁니다. 그래서 잡힌 것을 함께 싣습니다.
+
+    ``ambiguous`` 는 뒤 구간이 **정말 거절됐는지, 아니면 요청이 서버에
+    닿았는지조차 알 수 없는지**를 가릅니다. ``KorailTransportError`` (HTTP
+    왕복 자체가 끊긴 경우)는 서버가 그 구간을 실제로 잡았을 수도 있습니다
+    — 그런데도 이 구간을 "실패" 라고만 적으면, 사람이 이미 잡힌 뒤 구간을
+    모른 채 코레일 앱에서 확인도 안 하고 넘어갈 수 있습니다(:meth:`_settle_broken`
+    이 여정 전체가 끊겼을 때 이미 이렇게 가르는 것과 같은 이유입니다).
     """
 
     def __init__(
@@ -304,12 +311,20 @@ class PartialTransferError(RuntimeError):
         held: Sequence[MutationPreview | ReservationHoldResponse],
         leg_number: int,
         reason: str,
+        *,
+        ambiguous: bool = False,
     ) -> None:
         self.held = tuple(held)
         self.leg_number = leg_number
         self.reason = reason
+        self.ambiguous = ambiguous
+        outcome = (
+            "요청이 전송 중에 끊겨 서버에 닿았는지 알 수 없습니다"
+            if ambiguous
+            else f"막혔습니다({reason})"
+        )
         super().__init__(
-            f"{leg_number}구간에서 막혔습니다({reason}). "
+            f"{leg_number}구간에서 {outcome}. "
             f"앞 {len(self.held)}개 구간은 이미 잡혀 있습니다 — "
             "코레일 앱에서 확인해 취소하거나 결제하세요."
         )
@@ -342,6 +357,16 @@ def _reserve_each_leg(
                     job_type=KorailReservationJobType.IMMEDIATE,
                 )
             )
+        except KorailTransportError as exc:
+            if not done:
+                raise
+            # HTTP 왕복 자체가 끊긴 경우입니다 — 이 구간이 정말 거절됐는지,
+            # 서버에 닿아 실제로 잡혔는지 여기서는 알 길이 없습니다. 다른
+            # 예외와 같은 문구("실패")로 뭉뚱그리면 사람이 실제로 잡혔을 수
+            # 있는 이 구간을 확인도 안 하고 넘어갈 수 있습니다.
+            raise PartialTransferError(
+                done, number, f"{type(exc).__name__}: {exc}", ambiguous=True
+            ) from exc
         except Exception as exc:
             if not done:
                 raise
@@ -870,14 +895,32 @@ class AutoBooker:
                     target.request.passengers,
                 )
         pnrs = ", ".join((hold.pnr_no or "?") for hold in held) or "(없음)"
+        # 뒤 구간이 정말 거절된 것인지, 요청이 서버에 닿았는지조차 모르는
+        # 것인지에 따라 문구를 가릅니다 — 후자를 "실패" 라고만 적으면
+        # 사람이 실제로 잡혔을 수 있는 구간을 확인 없이 넘길 수 있습니다.
+        if exc.ambiguous:
+            leg_line = (
+                f"{exc.leg_number}구간: 요청이 전송 중에 끊겨 서버에 닿았는지 "
+                "알 수 없습니다 — 잡혔을 수도 있습니다"
+            )
+            closing = (
+                "서버가 검증한 조합이 아니라 구간마다 따로 샀기 때문에 이렇게 "
+                "됐습니다. 코레일 앱에서 잡힌 구간과 이 구간을 **모두** 확인해 "
+                "결제하거나 취소하세요 — 이 프로그램은 취소를 하지 않습니다."
+            )
+        else:
+            leg_line = f"{exc.leg_number}구간 실패: {exc.reason}"
+            closing = (
+                "서버가 검증한 조합이 아니라 구간마다 따로 샀기 때문에 한쪽만 "
+                "남았습니다. 코레일 앱에서 잡힌 구간을 결제하거나 취소하세요 — "
+                "이 프로그램은 취소를 하지 않습니다."
+            )
         self.announce(
             "⚠️ 환승 일부만 잡혔습니다\n"
             f"{target.describe()}\n"
             f"잡힌 구간의 PNR {pnrs}\n"
-            f"{exc.leg_number}구간 실패: {exc.reason}\n"
-            "서버가 검증한 조합이 아니라 구간마다 따로 샀기 때문에 한쪽만 "
-            "남았습니다. 코레일 앱에서 잡힌 구간을 결제하거나 취소하세요 — "
-            "이 프로그램은 취소를 하지 않습니다."
+            f"{leg_line}\n"
+            f"{closing}"
         )
         return self._finish("좌석 예약(구간별)")
 

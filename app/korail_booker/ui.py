@@ -784,6 +784,12 @@ class BookerApp:
         self._server_stations: set[str] = set()
         #: 떠 있는 로그인 팝업. 없으면 ``None``.
         self._login_window: tk.Toplevel | None = None
+        #: 떠 있는 텔레그램 설정/설정법 팝업. 없으면 ``None`` — 단추를
+        #: 두 번 눌러(또는 느리게 뜨는 사이 다시 눌러) 창이 두 개 뜨면,
+        #: 값이 서로 다른 두 창 중 나중에 저장한 쪽이 조용히 이기는
+        #: 사고가 날 수 있어 :meth:`open_login` 과 같은 방비를 둡니다.
+        self._telegram_settings_window: tk.Toplevel | None = None
+        self._telegram_guide_window: tk.Toplevel | None = None
         #: 잡아 둔 예약들. 결제 기한 카운트다운이 이것을 봅니다.
         self.holds: list[Held] = []
         self._hold_items: dict[int, str] = {}
@@ -2371,19 +2377,39 @@ class BookerApp:
             )
             self.remember_hold(held)
         pnrs = ", ".join(h.pnr_no or "?" for h in holds) or "(없음)"
+        # 뒤 구간이 정말 거절된 것인지, 요청이 서버에 닿았는지조차 모르는
+        # 것인지에 따라 문구를 가릅니다 — 엔진 쪽(_settle_partial)과 같은
+        # 이유입니다. 후자를 "실패" 라고만 적으면 실제로 잡혔을 수 있는
+        # 구간을 확인 없이 넘길 수 있습니다.
+        if exc.ambiguous:
+            leg_line = (
+                f"{exc.leg_number}구간: 요청이 전송 중에 끊겨 서버에 닿았는지 "
+                "알 수 없습니다 — 잡혔을 수도 있습니다"
+            )
+            closing = (
+                "코레일이 검증한 환승 조합이 아니라 구간마다 따로 샀기 때문에 "
+                "이렇게 됐습니다. 코레일 앱에서 잡힌 구간과 이 구간을 **모두** "
+                "확인해 결제하거나 취소하세요 — 이 프로그램은 취소를 하지 "
+                "않습니다."
+            )
+        else:
+            leg_line = f"{exc.leg_number}구간 실패: {exc.reason}"
+            closing = (
+                "코레일이 검증한 환승 조합이 아니라 구간마다 따로 샀기 때문에 "
+                "한쪽만 남았습니다. 코레일 앱에서 잡힌 구간을 결제하거나 "
+                "취소하세요 — 이 프로그램은 취소를 하지 않습니다."
+            )
         self._write_log(
             f"환승 일부만 잡혔습니다 — {target.describe()}\n"
-            f"잡힌 PNR {pnrs}\n{exc.leg_number}구간 실패: {exc.reason}",
+            f"잡힌 PNR {pnrs}\n{leg_line}",
             "bad",
         )
         messagebox.showwarning(
             "환승 일부만 잡혔습니다",
             f"{target.journey.summary()}\n\n"
             f"잡힌 구간의 PNR: {pnrs}\n"
-            f"{exc.leg_number}구간 실패: {exc.reason}\n\n"
-            "코레일이 검증한 환승 조합이 아니라 구간마다 따로 샀기 때문에 "
-            "한쪽만 남았습니다. 코레일 앱에서 잡힌 구간을 결제하거나 "
-            "취소하세요 — 이 프로그램은 취소를 하지 않습니다.",
+            f"{leg_line}\n\n"
+            f"{closing}",
         )
         # 다시 시도하지 않습니다 — 예매 대상에도 남겨 두지 않습니다. 남겨
         # 두면 한 번 더 누르고 싶어지는데, 그러면 이미 잡힌 앞 구간을 또
@@ -5712,7 +5738,17 @@ class BookerApp:
         것이나 다름없다는 지적을 받았습니다 — 사진은 따로 큰 창에서
         제 크기로 보여 주고, 이 창은 값 입력에만 집중합니다.
         """
+        existing = self._telegram_settings_window
+        if existing is not None and existing.winfo_exists():
+            # 두 번째 창을 또 열면 각자 다른 token/chat_id StringVar 를
+            # 들고 있어, 나중에 [저장하고 쓰기] 를 누른 쪽이 다른 쪽에서
+            # 방금 찾은 값을 모른 채로 덮어씁니다 — open_login() 과 같은
+            # 방비입니다.
+            existing.lift()
+            existing.focus_set()
+            return
         window = tk.Toplevel(self.root)
+        self._telegram_settings_window = window
         window.title("텔레그램 알림 설정")
         window.transient(self.root)
         window.columnconfigure(0, weight=1)
@@ -5826,8 +5862,15 @@ class BookerApp:
                 whose = f"({found.title} 님과의 대화)" if found.title else ""
                 status.set(f"대화 ID {found.chat_id} 를 찾아 넣었습니다 {whose}".strip())
 
+            # 토큰 값은 여기(메인 스레드)에서 미리 읽어 둡니다 — work() 는
+            # 별도 스레드에서 도는데, 그 안에서 token.get() 을 부르면 Tk
+            # 변수를 GUI 스레드가 아닌 곳에서 건드리는 셈이 됩니다(다른
+            # 작업 스레드는 다 이렇게 값을 미리 읽어 둡니다. send_test() 가
+            # 그 예입니다).
+            config = TelegramConfig(token=token.get().strip())
+
             def work() -> None:
-                with TelegramNotifier(TelegramConfig(token=token.get().strip())) as bot:
+                with TelegramNotifier(config) as bot:
                     found = bot.resolve_chat()
                 self.events.put(lambda: apply(found))
 
@@ -5855,8 +5898,11 @@ class BookerApp:
                     )
                     bot_username.set("(아직 확인 전)")
 
+            # 메인 스레드에서 미리 읽어 둡니다 — find_chat_id() 와 같은 이유입니다.
+            config = TelegramConfig(token=token.get().strip())
+
             def work() -> None:
-                with TelegramNotifier(TelegramConfig(token=token.get().strip())) as bot:
+                with TelegramNotifier(config) as bot:
                     name = bot.bot_username()
                 self.events.put(lambda: apply(name))
 
@@ -6000,7 +6046,13 @@ class BookerApp:
         :meth:`on_telegram_settings` 와 같은 방식으로 세로로 굴러가게
         감쌌습니다.
         """
+        existing = self._telegram_guide_window
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus_set()
+            return
         window = tk.Toplevel(self.root)
+        self._telegram_guide_window = window
         window.title("텔레그램 봇 설정법")
         window.transient(self.root)
         window.columnconfigure(0, weight=1)
@@ -6273,16 +6325,45 @@ def run() -> int:
     이미 떠 있는 사본이 있으면(트레이에 숨겨 둔 채 잊고 exe 를 다시
     누른 경우를 포함해) 새 창을 열지 않고, 그 창을 앞으로 불러오라는
     신호만 보내고 곧장 끝납니다(:mod:`korail_booker.single_instance`).
+
+    신호를 받는 스레드는 ``BookerApp`` 을 다 짓기 **전에** 미리
+    시작합니다. 위젯이 많아 짓는 데 제법 걸리는데, 그동안 accept 를
+    아무도 받아 주지 않으면 OS 의 backlog 한도를 넘는 순간부터는 뒤이어
+    몰려온 사본들이 연결조차 못 해 "원본이 없다" 고 오판하고 자기 창을
+    열어 버립니다 — 실제로 exe 를 짧은 간격으로 여러 번 눌렀을 때
+    이렇게 새는 것을 확인했습니다. ``app`` 이 없는 동안 들어온 신호는
+    ``pending_signals`` 에 쌓아 뒀다가, ``app`` 이 생기자마자 한 번에
+    흘려보냅니다.
     """
     should_open, lock_socket = negotiate()
     if not should_open:
         return 0
+
+    pending_signals: queue.Queue[None] = queue.Queue()
+    # 이 스레드가 부르는 시점에 ``app`` 이 아직 없을 수 있어, 리스트
+    # 하나(``restore_callback``)에 "생기면" 채워 넣는 식으로 넘깁니다 —
+    # 리스트가 비어 있으면 아직 없다는 뜻으로 보고 큐에 쌓아 둡니다.
+    restore_callback: list[Callable[[], None]] = []
+
+    def on_signal() -> None:
+        if restore_callback:
+            restore_callback[0]()
+        else:
+            pending_signals.put(None)
+
+    if lock_socket is not None:
+        listen_for_duplicate_launches(lock_socket, on_signal)
+
     root = tk.Tk()
     app = BookerApp(root)
-    if lock_socket is not None:
-        listen_for_duplicate_launches(
-            lock_socket, lambda: app.events.put(app._restore_from_tray)
-        )
+    restore_callback.append(lambda: app.events.put(app._restore_from_tray))
+    while True:
+        try:
+            pending_signals.get_nowait()
+        except queue.Empty:
+            break
+        restore_callback[0]()
+
     root.protocol("WM_DELETE_WINDOW", app.on_close)
     root.mainloop()
     if lock_socket is not None:

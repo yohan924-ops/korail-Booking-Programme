@@ -3451,6 +3451,67 @@ def test_a_leg_that_fails_never_hides_the_leg_that_was_already_held():
     assert "이미 잡혀" in str(caught.value)
 
 
+def test_a_broken_leg2_request_is_marked_unknown_not_a_definite_failure():
+    """앞 구간은 진짜로 잡혔는데, 뒤 구간 요청이 전송 중에 끊기면(연결
+    끊김 등, ``KorailTransportError``) 서버에 그 구간이 닿았는지조차 알
+    길이 없습니다 — 검증 오류(``ERR911193`` 같은, 서버가 실제로 거절한
+    경우)와 똑같이 "실패" 라고 적으면, 사람이 실제로 잡혔을 수 있는
+    구간을 코레일 앱에서 확인도 안 하고 넘길 수 있습니다. 여정 전체가
+    끊겼을 때(:func:`test_a_broken_reserve_post_is_never_retried`)와
+    같은 구분을 구간 단위에도 적용합니다.
+    """
+    recorder = _Recorder(sequences={RESERVE: [_reserve_reply()]})
+    client = _client(recorder)
+    real_reserve = client.reserve
+    calls = {"n": 0}
+
+    def flaky(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_reserve(*args, **kwargs)
+        raise KorailTransportError("synthetic connection reset")
+
+    client.reserve = flaky  # type: ignore[method-assign]
+
+    with pytest.raises(PartialTransferError) as caught:
+        reserve_once(
+            client,
+            _custom_transfer(),
+            passengers=KorailPassengerCounts(adult=1),
+            seat_class=KorailSeatClass.GENERAL,
+            live=True,
+        )
+
+    assert caught.value.leg_number == 2
+    assert caught.value.ambiguous is True
+    assert len(caught.value.held) == 1
+    assert "닿았는지 알 수 없습니다" in str(caught.value)
+    # 확정 실패 문구("막혔습니다(원인)")는 나오면 안 됩니다 — 정말 막힌 게
+    # 아니라 결과를 모르는 것이므로.
+    assert "막혔습니다(" not in str(caught.value)
+
+
+def test_settle_partial_and_reserve_now_partial_both_branch_on_ambiguity():
+    """엔진(``_settle_partial``)과 UI([바로 예약], ``_reserve_now_partial``)
+    둘 다 ``exc.ambiguous`` 를 보고 문구를 갈라야 합니다 — 한쪽만 고치면
+    같은 버그가 다른 쪽에 남습니다(이 파일에 실제로 그런 전례가 있습니다:
+    :func:`test_reserve_now_partial_also_names_the_leg_not_the_whole_journey`).
+    """
+    booker = (APP_DIR / "korail_booker" / "autobook.py").read_text(encoding="utf-8")
+    tree = ast.parse(booker)
+    settle = next(
+        ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_settle_partial"
+    )
+    assert "exc.ambiguous" in settle
+    assert "닿았는지" in settle
+
+    reserve_now_partial = _ui_function("_reserve_now_partial")
+    assert "exc.ambiguous" in reserve_now_partial
+    assert "닿았는지" in reserve_now_partial
+
+
 def test_the_watcher_stops_after_a_partial_hold_instead_of_trying_again():
     """다시 돌면 이미 잡아 둔 앞 구간을 한 번 더 잡습니다 — 중복 예약입니다."""
     body = _ui_source()
@@ -5353,6 +5414,58 @@ def test_the_signal_actually_reaches_the_original_and_calls_back():
         server.close()
 
 
+def test_signals_that_arrive_before_the_window_exists_are_not_lost():
+    """``run()`` 은 ``BookerApp``(창)을 다 짓기 전에 미리 신호를 받기
+    시작합니다 — 실제로 짓는 동안 accept 를 아무도 받아 주지 않으면, 그
+    사이 몰려온 사본들이 backlog 한도를 넘는 순간부터 연결조차 못 해
+    "원본이 없다" 고 오판하고 자기 창을 열어 버리는 사고가 있었습니다.
+    ``run()`` 자신은 실제 ``tk.Tk()`` 를 열어야 해서 여기서 그대로 부를
+    수 없으므로, ``run()`` 이 쓰는 것과 똑같은 "리스트가 비면 큐에 쌓고,
+    채워지면 그 자리에서 부른다" 패턴을 그대로 재현해 신호가 실제로
+    유실되지 않는지 확인합니다.
+    """
+    import queue
+    import time
+
+    should_open, server = SINGLE.negotiate(port=_TEST_PORT + 4)
+    assert should_open is True
+    assert server is not None
+    pending: queue.Queue[None] = queue.Queue()
+    restore_callback: list[Callable[[], None]] = []
+
+    def on_signal() -> None:
+        if restore_callback:
+            restore_callback[0]()
+        else:
+            pending.put(None)
+
+    try:
+        SINGLE.listen_for_duplicate_launches(server, on_signal)
+        # "창을 짓는 동안" 에 해당하는 자리 — 신호가 이미 왔는데도 아직
+        # restore_callback 은 비어 있습니다.
+        should_open2, server2 = SINGLE.negotiate(port=_TEST_PORT + 4)
+        assert should_open2 is False
+        assert server2 is None
+        for _ in range(50):
+            if not pending.empty():
+                break
+            time.sleep(0.05)
+        assert not pending.empty(), "신호가 유실됐습니다"
+        # "창이 다 지어진" 자리 — run() 과 같은 순서로 콜백을 채우고
+        # 쌓인 신호를 흘려보냅니다.
+        called = []
+        restore_callback.append(lambda: called.append(True))
+        while True:
+            try:
+                pending.get_nowait()
+            except queue.Empty:
+                break
+            restore_callback[0]()
+        assert called == [True]
+    finally:
+        server.close()
+
+
 def test_negotiate_still_opens_a_window_if_it_cannot_claim_or_signal():
     """포트를 잡지도, 신호를 보내지도 못하는 극히 드문 경우에도 창은
     열려야 합니다 — 아무 창도 안 뜨는 것보다는 낫습니다. 아무도 듣지
@@ -5390,6 +5503,13 @@ def test_running_starts_the_program_wants_to_bring_the_existing_window_forward()
     assert "return 0" in body
     assert "listen_for_duplicate_launches(" in body
     assert "app.events.put(app._restore_from_tray)" in body
+    # listen_for_duplicate_launches() 가 BookerApp 생성보다 먼저 불려야
+    # 합니다 — 늦게 부르면 창을 짓는 동안 온 신호를 받아 줄 스레드가
+    # 아직 없어, 그 사이 몰려온 사본이 유실됩니다
+    # (test_signals_that_arrive_before_the_window_exists_are_not_lost 가
+    # 이 패턴 자체는 실제로 신호를 안 잃는지 확인합니다).
+    assert body.index("listen_for_duplicate_launches(") < body.index("app = BookerApp(root)")
+    assert "pending_signals" in body
 
 
 # --- 알림소리(딩동): 예약 성공 · 자동 감시 종료 -----------------------------
