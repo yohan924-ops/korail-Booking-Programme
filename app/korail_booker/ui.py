@@ -15,6 +15,7 @@ from __future__ import annotations
 import calendar
 import math
 import queue
+import sys
 import threading
 import time
 import tkinter as tk
@@ -22,6 +23,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime
+from pathlib import Path
 from tkinter import messagebox, ttk
 
 from korail_mobile_api import (
@@ -341,6 +343,38 @@ def _passenger_text(passengers: KorailPassengerCounts | None) -> str:
     if passengers is None:
         return "모름"
     return f"{passengers.total}명"
+
+
+#: 텔레그램 설정 창에 보여줄, 실제로 봇을 만들어 본 사람의 화면 캡처
+#: 세 장(``app/assets/telegram_guide/``) — 진짜 봇 토큰이 찍혀 있던
+#: 자리는 이 저장소에 들어오기 전에 이미지 자체를 다시 그려 가렸습니다.
+_TELEGRAM_GUIDE_ASSET_DIR = "assets/telegram_guide"
+
+
+def _telegram_guide_asset_root() -> Path:
+    """이 그림들이 있는 자리. 소스로 돌 때와 PyInstaller onefile 로 얼어붙은
+    exe 안에서 돌 때가 다릅니다.
+
+    얼어붙은 exe 는 ``--add-data`` 로 함께 담은 파일을 ``sys._MEIPASS``
+    (실행마다 새로 풀리는 임시 폴더) 밑에 둡니다 — 소스 트리의
+    ``__file__`` 기준 상대 경로는 그 안에서 안 맞을 수 있어 따로 봅니다.
+    """
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(meipass)
+    return Path(__file__).resolve().parent.parent
+
+
+def _load_telegram_guide_image(name: str) -> tk.PhotoImage | None:
+    """캡처 그림 하나. 파일이 없거나 못 읽으면 조용히 ``None`` — 이 안내
+    창은 사진 없이 글만으로도 완결되므로, 그림 하나 없다고 창 전체를
+    포기할 이유가 없습니다(트레이 아이콘이 없을 때와 같은 태도입니다).
+    """
+    path = _telegram_guide_asset_root() / _TELEGRAM_GUIDE_ASSET_DIR / name
+    try:
+        return tk.PhotoImage(file=str(path))
+    except (tk.TclError, OSError):
+        return None
 
 
 class AutocompleteCombobox(ttk.Combobox):
@@ -1078,6 +1112,30 @@ class BookerApp:
         x = max(0, (window.winfo_screenwidth() - w) // 2)
         y = max(0, (window.winfo_screenheight() - h) // 2)
         window.geometry(f"{w}x{h}+{x}+{y}")
+
+    def _bind_wheel_recursive(
+        self, widget: tk.Misc, sequence: str, canvas: tk.Canvas
+    ) -> None:
+        """``widget`` 과 그 자손 전부에 휠을 걸어 ``canvas`` 를 굴립니다.
+
+        Tk 는 휠 이벤트를 포인터 바로 아래 위젯에만 보냅니다 — 부모에게
+        저절로 올라가지 않습니다. 팝업 안 어디에 마우스가 있어도 같은
+        스크롤이 되려면 자손 하나하나에 직접 걸어야 합니다. ``bind_all``
+        을 쓰지 않는 것은, 그러면 이 팝업이 떠 있는 동안 본 창의 휠까지
+        가로채기 때문입니다.
+        """
+
+        def handler(event: tk.Event) -> None:
+            if getattr(event, "num", 0) == 4:
+                canvas.yview_scroll(-1, "units")
+            elif getattr(event, "num", 0) == 5:
+                canvas.yview_scroll(1, "units")
+            else:
+                canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+
+        widget.bind(sequence, handler, add="+")
+        for child in widget.winfo_children():
+            self._bind_wheel_recursive(child, sequence, canvas)
 
     def open_login(self) -> None:
         """로그인 팝업. 떠 있는 동안 **본 창은 눌리지 않습니다.**
@@ -5644,6 +5702,25 @@ class BookerApp:
         window = tk.Toplevel(self.root)
         window.title("텔레그램 알림 설정")
         window.transient(self.root)
+        # 1~4단계 설명에 실제 화면 캡처까지 곁들이면 작은 화면(특히 노트북)
+        # 높이를 넘습니다 — 세로로 굴러가게 감쌉니다(본 창과 같은 방식).
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(0, weight=1)
+        canvas = tk.Canvas(window, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(window, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        body = ttk.Frame(canvas)
+        body_window = canvas.create_window((0, 0), window=body, anchor="nw")
+        canvas.bind(
+            "<Configure>",
+            lambda e: canvas.itemconfigure(body_window, width=e.width),
+        )
+        body.bind(
+            "<Configure>",
+            lambda _e: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
         token = tk.StringVar(value=self.settings.telegram_token)
         chat_id = tk.StringVar(value=self.settings.telegram_chat_id)
         # 봇 아이디(@이름)와 대화 ID(숫자)는 서로 다른 값이고, 서로 바꿔
@@ -5654,14 +5731,35 @@ class BookerApp:
         # 치지 않고 이 화면이 확인해서 채웁니다 — 그래서 두 칸 다
         # 고쳐 쓸 수 없게(readonly) 뒀습니다.
         bot_username = tk.StringVar(value="(아직 확인 전)")
+        # 실제로 봇을 만들어 본 사람이 보내 준 화면 캡처 세 장입니다 —
+        # 이 사람 자신의 대화 내용이라 저작권 문제 없이 그대로 씁니다.
+        # 토큰이 찍힌 자리만 이 저장소에 들어오기 전에 이미지 자체를
+        # 다시 그려 가렸습니다(app/assets/telegram_guide/). 파일이
+        # 없거나(예: PyInstaller 로 묶을 때 함께 담기지 않았으면) 못
+        # 읽으면 조용히 건너뜁니다 — 이 창은 사진 없이 글만으로도
+        # 완결되므로 사진 하나 못 띄운다고 창 전체가 막히면 안 됩니다.
+        # 가비지 컬렉션에 먹히지 않도록 이 창이 사는 동안 붙잡아 둡니다.
+        window.guide_images = []  # type: ignore[attr-defined]
+
+        def guide_image(parent: tk.Misc, name: str, subsample: int) -> None:
+            photo = _load_telegram_guide_image(name)
+            if photo is None:
+                return
+            if subsample > 1:
+                photo = photo.subsample(subsample, subsample)
+            window.guide_images.append(photo)  # type: ignore[attr-defined]
+            ttk.Label(parent, image=photo).pack(anchor="w", padx=8, pady=(2, 6))
+
         ttk.Label(
-            window,
+            body,
             text="텔레그램으로 알림을 받으려면 봇 토큰과 대화 ID, 값이 둘 필요합니다.\n"
-            "아래 1~4단계를 순서대로 하면 둘 다 채워집니다.",
+            "아래 1~4단계를 순서대로 하면 둘 다 채워집니다 — 실제로 만들어\n"
+            "본 화면 그대로입니다.",
+            wraplength=440,
             justify="left",
         ).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 4))
 
-        step1 = ttk.LabelFrame(window, text="1단계 — 텔레그램 앱에서 봇 만들기")
+        step1 = ttk.LabelFrame(body, text="1단계 — 텔레그램 앱에서 봇 만들기")
         step1.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
         ttk.Label(
             step1,
@@ -5675,17 +5773,22 @@ class BookerApp:
             "     (예: my_korail_alarm_bot). 이미 쓰는 아이디면 다시 물어봅니다.\n"
             '⑤ "Done! Congratulations…" 로 시작하는 답장이 오면 다 만들어진 '
             "것입니다 — 그 답장 안에 토큰이 있습니다(2단계).",
+            wraplength=440,
             justify="left",
         ).pack(anchor="w", padx=8, pady=6)
+        guide_image(step1, "step1_search_botfather.png", subsample=4)
 
-        step2 = ttk.LabelFrame(window, text="2단계 — 토큰 붙여넣기")
+        step2 = ttk.LabelFrame(body, text="2단계 — 토큰 붙여넣기")
         step2.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
         ttk.Label(
             step2,
             text='BotFather 답장에서 "Use this token to access the HTTP API:" '
             "바로 아랫줄을 통째로 복사해 아래 칸에 넣으세요.",
+            wraplength=440,
             justify="left",
         ).pack(anchor="w", padx=8, pady=(6, 2))
+        # 실제 답장 화면입니다 — 토큰이 찍혀 있던 자리는 가렸습니다.
+        guide_image(step2, "step2_newbot_token.png", subsample=5)
         token_row = ttk.Frame(step2)
         token_row.pack(anchor="w", padx=8, pady=2)
         ttk.Entry(token_row, textvariable=token, width=42, show="*").pack(
@@ -5703,6 +5806,7 @@ class BookerApp:
             text='모양: 123456789:ABCdefGHIjklMNOpqrSTUvwxYZ  (숫자 : 콜론 : 긴 문자열)\n'
             "이 토큰은 봇을 통째로 조종할 수 있습니다. 남에게 보이지 마세요.",
             foreground="#666666",
+            wraplength=440,
             justify="left",
         ).pack(anchor="w", padx=8, pady=(2, 2))
         # 봇 아이디(@이름)는 손으로 치는 칸이 아닙니다 — [토큰 확인] 을
@@ -5715,7 +5819,7 @@ class BookerApp:
         )
 
         step3 = ttk.LabelFrame(
-            window, text="3단계 — 내 봇과 먼저 대화하기 (꼭 필요합니다)"
+            body, text="3단계 — 내 봇과 먼저 대화하기 (꼭 필요합니다)"
         )
         step3.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
         ttk.Label(
@@ -5727,10 +5831,12 @@ class BookerApp:
             "텔레그램은 사용자가 먼저 말을 건 적이 없는 봇에게 대화 ID 를 "
             "주지 않습니다. 그래서 이 단계를 건너뛰면 아래 [내 대화 ID 찾기]\n"
             "가 늘 빈손으로 돌아옵니다.",
+            wraplength=440,
             justify="left",
         ).pack(anchor="w", padx=8, pady=6)
+        guide_image(step3, "step3_start_chat.png", subsample=5)
 
-        step4 = ttk.LabelFrame(window, text="4단계 — 대화 ID 채우기")
+        step4 = ttk.LabelFrame(body, text="4단계 — 대화 ID 채우기")
         step4.grid(row=4, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
         chat_row = ttk.Frame(step4)
         chat_row.pack(anchor="w", padx=8, pady=(6, 2))
@@ -5749,11 +5855,12 @@ class BookerApp:
             "이 칸은 고쳐 쓸 수 없습니다 — 3단계를 마치고 위 단추를 누르면\n"
             "봇이 받은 마지막 메시지에서 읽어 자동으로 채워 줍니다.",
             foreground="#666666",
+            wraplength=440,
             justify="left",
         ).pack(anchor="w", padx=8, pady=(2, 6))
 
         status = tk.StringVar(value="")
-        ttk.Label(window, textvariable=status, foreground="#666666").grid(
+        ttk.Label(body, textvariable=status, foreground="#666666").grid(
             row=5, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 6)
         )
 
@@ -5888,7 +5995,7 @@ class BookerApp:
                 else "설정 파일을 고치지 못했습니다(권한을 확인하세요)."
             )
 
-        buttons = ttk.Frame(window)
+        buttons = ttk.Frame(body)
         buttons.grid(row=6, column=0, columnspan=2, sticky="w", padx=10, pady=8)
         ttk.Button(buttons, text="테스트 전송", command=send_test).pack(side="left")
         ttk.Button(buttons, text="저장하고 쓰기", command=store).pack(side="left", padx=6)
@@ -5897,7 +6004,7 @@ class BookerApp:
             side="left", padx=6
         )
         ttk.Label(
-            window,
+            body,
             text="잘 안 되면:\n"
             "· [토큰 확인] 이 실패하면 → 2단계. 토큰을 잘못 복사한 것입니다\n"
             "   (앞뒤 공백, 줄바꿈, 한 글자 빠짐).\n"
@@ -5910,8 +6017,20 @@ class BookerApp:
             "씁니다(프로그램을 끄면 사라집니다). 어느 쪽이든 토큰은 화면과 기록에\n"
             "남지 않습니다.",
             foreground="#666666",
+            wraplength=440,
             justify="left",
         ).grid(row=7, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 10))
+
+        # 내용 폭에는 그대로 맞추고, 높이만 화면의 80% 로 눌러 나머지는
+        # 굴려서 봅니다 — 캡처 사진까지 곁들이면 작은 화면 높이를 쉽게
+        # 넘기기 때문입니다.
+        window.update_idletasks()
+        canvas.configure(
+            width=body.winfo_reqwidth(),
+            height=min(body.winfo_reqheight(), int(window.winfo_screenheight() * 0.8)),
+        )
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self._bind_wheel_recursive(canvas, sequence, canvas)
         self._center_window(window)
 
     # -- 트레이(작업 표시줄) ---------------------------------------------------

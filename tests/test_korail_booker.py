@@ -2339,11 +2339,11 @@ def test_the_token_dialog_walks_through_the_real_botfather_flow():
     """텔레그램 설정 창은 실제로 봇을 만들어 본 사람의 화면(캡처 3장)을
     그대로 따라간 1~4단계로 값 두 개(토큰·대화 ID)를 채우고 확인합니다.
     처음엔 이 절차를 외부 글 링크 하나로만 때웠다가("성의없다" 는 지적),
-    그 다음엔 그 캡처의 순서·문구를 그대로 옮겨 적으면서도 링크는
-    남겨 뒀다가("보내준 사진을 직접 넣으라 했지 링크를 쓰라 한 게
-    아니다" 는 지적) — 결국 **이미지 파일을 이 세션에 저장할 방법이
-    없어** 사진 자체는 못 옮기고, 외부 링크도 빼고, 그 사진들이 실제로
-    보여 준 문구만 이 창 안에 그대로 옮겨 적었습니다.
+    그 다음엔 그 캡처의 순서·문구를 옮겨 적으면서도 링크는 남겨 뒀다가
+    ("보내준 사진을 직접 넣으라 했지 링크를 쓰라 한 게 아니다" 는 지적)
+    — 외부 링크는 뺐습니다. 실제 캡처 이미지 자체는
+    :func:`test_the_telegram_popup_actually_embeds_the_real_screenshots`
+    가 확인합니다.
     """
     source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
 
@@ -2365,10 +2365,68 @@ def test_the_token_dialog_walks_through_the_real_botfather_flow():
     # 줄바꿈으로 나뉜 문자열 리터럴 두 개라 _ui_function(ast.unparse 가
     # 이어 붙입니다)으로 봐야 이어져 있는지 확인됩니다.
     assert "/start" in source
+
+
+def test_the_telegram_popup_actually_embeds_the_real_screenshots():
+    """링크만으로 두 번 때웠다가 지적을 받은 끝에, 실제로 봇을 만들어 본
+    사람이 보내 준 화면 캡처 세 장을 이 세션이 가진 자신의 대화 기록에서
+    직접 꺼내(base64 로 담겨 있었습니다) ``app/assets/telegram_guide/``
+    에 파일로 넣고, 이 창이 그 파일을 실제로 읽어 보여 줍니다 — 더는
+    "이미지를 저장할 방법이 없다" 는 말로 대신하지 않습니다.
+    """
+    asset_dir = APP_DIR / "assets" / "telegram_guide"
+    names = (
+        "step1_search_botfather.png",
+        "step2_newbot_token.png",
+        "step3_start_chat.png",
+    )
+    for name in names:
+        path = asset_dir / name
+        assert path.exists(), path
+        assert path.stat().st_size > 1000, f"{name} 이 너무 작습니다(빈 파일 의심)"
+
+    source = (APP_DIR / "korail_booker" / "ui.py").read_text(encoding="utf-8")
+    for name in names:
+        assert f'"{name}"' in source, name
+    assert "_load_telegram_guide_image" in source
+    assert "def _telegram_guide_asset_root() -> Path:" in source
+    # 캡처 2번(2단계, 토큰이 찍혀 있던 것)은 이 저장소에 들어오기 전에
+    # 이미 다시 그려 가렸습니다 — 원본 토큰의 흔적이 파일 바이트 어디에도
+    # 없어야 합니다(픽셀로 덮어 그린 것이지 위에 덧칠한 것이 아니므로).
+    redacted = (asset_dir / "step2_newbot_token.png").read_bytes()
+    assert b"8667115971" not in redacted
+    assert b"AAEIKKGUgIWP" not in redacted
+
+
+def test_the_guide_image_loader_never_blocks_the_dialog_if_missing():
+    """PyInstaller 로 묶을 때 그림 파일이 함께 담기지 않았거나, 파일이
+    깨졌거나 — 어떤 이유로든 못 읽으면 조용히 ``None`` 을 돌려줘야
+    합니다. 이 창은 사진 없이 글만으로도 완결되므로, 그림 하나 실패했다고
+    창 전체가 떠야 할 이유가 없습니다(트레이 아이콘과 같은 태도).
+    """
+    body = _ui_function("_load_telegram_guide_image")
+    assert "except (tk.TclError, OSError):" in body
+    assert "return None" in body
+
+
+def test_the_telegram_popup_scrolls_instead_of_overflowing_small_screens():
+    """1~4단계 글에 캡처 사진까지 곁들이면 노트북 화면 높이를 쉽게
+    넘깁니다 — 실제로 1920x1080 화면에서 스크롤 없이 그리면 화면보다
+    길었습니다. 본 창(:meth:`_build`)과 같은 방식으로 세로 스크롤을
+    달고, 높이를 화면의 80% 로 눌러 나머지는 굴려서 보게 했습니다.
+    ``bind_all`` 은 쓰지 않습니다 — 이 팝업이 떠 있는 동안 본 창의 휠
+    스크롤까지 가로채면 안 되기 때문입니다(:meth:`_bind_wheel_recursive`
+    가 이 팝업 안의 위젯에만 직접 겁니다).
+    """
     body = _ui_function("on_telegram_settings")
+    assert "canvas = tk.Canvas(window, highlightthickness=0)" in body
+    assert 'body = ttk.Frame(canvas)' in body
+    assert "int(window.winfo_screenheight() * 0.8)" in body
+    assert "self._bind_wheel_recursive(canvas, sequence, canvas)" in body
+    assert "bind_all" not in body
     assert "먼저 말을 건 적이 없는 봇에게 대화 ID 를 주지" in body
     # 잘 안 될 때 어디를 고쳐야 하는지 갈라 줍니다.
-    assert "잘 안 되면:" in source
+    assert "잘 안 되면:" in body
 
 
 def test_the_example_token_is_not_a_real_one():
@@ -2838,6 +2896,21 @@ def test_the_icon_is_optional_on_both_build_paths():
     assert 'if not defined ICON if exist "packaging\\icon.png"' in script
     assert "if (Test-Path packaging/icon.ico)" in workflow
     assert "elseif (Test-Path packaging/icon.png)" in workflow
+
+
+def test_both_exe_builds_bundle_the_telegram_guide_pictures():
+    """``app/assets/telegram_guide/*.png`` 는 소스로 돌 때는 저절로 보이지만,
+    ``--add-data`` 로 챙기지 않으면 exe 안에는 안 담깁니다 — 빌드는
+    조용히 성공하고, 그 exe 를 받아 쓰는 사람 화면에만 사진이 안 뜹니다
+    (``_load_telegram_guide_image`` 가 못 찾은 파일에 조용히 ``None`` 을
+    돌려주도록 짜여 있어서, 빌드 실패로도 안 걸러집니다).
+    """
+    script = (REPO_ROOT / "exe 만들기 (Windows).bat").read_text(encoding="utf-8")
+    assert '--add-data "app\\assets;assets"' in script
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "desktop-build.yml"
+    ).read_text(encoding="utf-8")
+    assert '--add-data "app/assets;assets"' in workflow
 
 
 def test_the_batch_builders_icon_path_is_absolute():

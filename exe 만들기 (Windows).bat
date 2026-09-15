@@ -106,10 +106,17 @@ rem              멈춥니다 -- 고장이 아닙니다.
 rem  --windowed  검은 콘솔 창을 띄우지 않습니다.
 rem  --paths     desktop_entry.py 가 sys.path 를 실행 중에 만지지 않는 이유.
 rem              PyInstaller 는 소스를 정적으로 훑으므로 여기서 알려 줍니다.
+rem  --add-data  app\assets 안의 그림(텔레그램 설정 안내에 쓰는 캡처 사진)이
+rem              exe 안에 실제로 담기게 합니다. 이걸 안 넣으면 소스로 돌릴
+rem              때는 사진이 보이다가, 이 exe 로 만들면 조용히 안 보입니다 —
+rem              ui.py 의 _load_telegram_guide_image() 가 파일을 못 찾을 때
+rem              창이 깨지지 않게 None 을 돌려주도록 짜여 있어서, 빌드가
+rem              실패하는 대신 사진만 빠진 채로 뜨기 때문입니다.
 "%VPY%" -m PyInstaller --onefile --windowed ^
   --name NewRail ^
   %ICON% ^
   --paths src --paths app ^
+  --add-data "app\assets;assets" ^
   --distpath "%CD%\dist" --workpath "%CD%\build" --specpath "%CD%\build" ^
   "%CD%\packaging\desktop_entry.py"
 if errorlevel 1 (

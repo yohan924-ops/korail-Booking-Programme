@@ -779,6 +779,32 @@ def main() -> int:
 
         collect(window)
         token_entry, chat_id_entry = entries[0], entries[1]
+
+        # -- 캡처 사진: 실제로 3장이 창에 박혔는가, 창은 화면 높이를 안 넘는가 --
+        guide_images = getattr(window, "guide_images", [])
+        check(
+            "안내 사진 3장이 실제로 창에 실렸다(파일이 없으면 조용히 빠지므로,"
+            " 다 있는 이 저장소에서는 정확히 3장이어야 한다)",
+            len(guide_images) == 3,
+            len(guide_images),
+        )
+        check(
+            "실린 사진은 진짜 PhotoImage 고, 크기도 0이 아니다",
+            all(
+                isinstance(photo, tk.PhotoImage)
+                and photo.width() > 0
+                and photo.height() > 0
+                for photo in guide_images
+            ),
+            [(photo.width(), photo.height()) for photo in guide_images],
+        )
+        window.update_idletasks()
+        screen_h = window.winfo_screenheight()
+        check(
+            "사진까지 곁들인 창도 화면의 80% 를 안 넘는다(넘는 만큼은 스크롤)",
+            window.winfo_height() <= int(screen_h * 0.8) + 2,
+            (window.winfo_height(), screen_h),
+        )
         check(
             "대화 ID 칸은 고쳐 쓸 수 없다(readonly) — 사람이 미리 알 방법이 없는 값",
             str(chat_id_entry.cget("state")) == "readonly",  # type: ignore[call-overload]
