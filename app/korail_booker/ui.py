@@ -87,6 +87,7 @@ from .search import (
 )
 from .session import build_client
 from .session import login as do_login
+from .sound import play_success_chime
 from .tray import TrayHandlers, create_tray_icon
 
 
@@ -724,6 +725,14 @@ class BookerApp:
         hscroll.grid(row=1, column=0, sticky="ew")
         canvas.configure(yscrollcommand=scroll.set, xscrollcommand=hscroll.set)
         self.canvas = canvas
+
+        # 스크롤 밖, 창 맨 아래에 늘 보이게 둡니다 — 안(body)에 두면 스크롤을
+        # 끝까지 안 내린 사람은 못 봅니다.
+        ttk.Label(
+            self.root,
+            text="개인 사용 목적의 프로그램입니다 — 무단 배포·상업적 이용을 금지합니다.",
+            foreground="#999999",
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=6, pady=(1, 3))
 
         # ttk 가 아니라 tk 의 PanedWindow 입니다. ttk 쪽은 칸마다 **최소 높이를
         # 줄 수 없어서**, 처음 뜰 때 로그인·조회 묶음이 0 픽셀로 눌렸습니다.
@@ -2400,6 +2409,18 @@ class BookerApp:
         item = self._hold_items.get(len(self.holds) - 1)
         if item is not None:
             self.hold_tree.see(item)
+        # 자동예매든 [바로 예약]이든, 새로 잡힌 예약이면 여기로 다 모입니다
+        # — 소리는 이 자리 하나에서만 울립니다. 창을 트레이에 숨겨 놔도
+        # 이 메서드 자체는 그대로 불립니다(감시가 큐를 거쳐 부르는 자리라,
+        # 창이 보이는지와 무관합니다).
+        if self.sound_enabled.get():
+            play_success_chime()
+
+    def play_test_sound(self) -> None:
+        """[종소리 미리듣기]. 켜져 있는지와 무관하게 늘 들려줍니다 —
+        꺼 둔 사람이 "이게 무슨 소리였더라" 하고 확인할 때도 써야 하므로.
+        """
+        play_success_chime()
 
     def sync_holds(self) -> None:
         """잡은 예약 표를 ``self.holds`` 에서 다시 그립니다.
@@ -2677,6 +2698,7 @@ class BookerApp:
         self.watch_minutes = tk.StringVar(value="60")
         self.allow_standby = tk.BooleanVar(value=False)
         self.notify_enabled = tk.BooleanVar(value=True)
+        self.sound_enabled = tk.BooleanVar(value=True)
         ttk.Separator(frame, orient="horizontal").grid(
             row=2, column=0, columnspan=2, sticky="ew", padx=4, pady=(2, 0)
         )
@@ -2693,10 +2715,18 @@ class BookerApp:
         ttk.Checkbutton(row, text="텔레그램 알림", variable=self.notify_enabled).pack(
             side="left"
         )
+        # 창을 트레이에 숨겨 놔도 이 소리는 그대로 납니다 — 화면을 보고
+        # 있지 않아도 예약이 잡혔다는 것을 바로 압니다.
+        ttk.Checkbutton(row, text="예약 성공 종소리", variable=self.sound_enabled).pack(
+            side="left"
+        )
         row2 = ttk.Frame(frame)
         row2.grid(row=4, column=0, columnspan=2, sticky="w", padx=4, pady=(0, 6))
         ttk.Button(row2, text="텔레그램 설정", command=self.on_telegram_settings).pack(
             side="left", padx=12
+        )
+        ttk.Button(row2, text="종소리 미리듣기", command=self.play_test_sound).pack(
+            side="left", padx=(0, 12)
         )
         # 담긴 것 전부와 고른 것만 — 넷으로 나눕니다. 하나로 두면 여러 여정을
         # 담아 두고 그중 하나만 노릴 수가 없습니다.
@@ -2815,6 +2845,7 @@ class BookerApp:
         self.watch_minutes.set(str(stored.watch_minutes))
         self.allow_standby.set(stored.allow_standby)
         self.notify_enabled.set(stored.notify_enabled)
+        self.sound_enabled.set(stored.sound_enabled)
         for key, var in self.passenger_vars.items():
             var.set(str(getattr(stored, key)))
         self.sync_transfer_state()
@@ -3180,6 +3211,7 @@ class BookerApp:
             min_transfer_minutes=request.min_transfer_minutes,
             max_transfer_minutes=request.max_transfer_minutes,
             notify_enabled=self.notify_enabled.get(),
+            sound_enabled=self.sound_enabled.get(),
             adult=request.passengers.adult,
             teenager=request.passengers.teenager,
             child=request.passengers.child,

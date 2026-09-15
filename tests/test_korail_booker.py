@@ -46,6 +46,7 @@ from korail_booker import notify as N
 from korail_booker import search as S
 from korail_booker import session as ST_SESSION
 from korail_booker import settings as ST
+from korail_booker import sound as SOUND
 from korail_booker import tray as TRAY
 from korail_booker.autobook import (
     AutoBooker,
@@ -4883,3 +4884,101 @@ def test_the_tray_status_never_lets_another_thread_touch_the_watch_list():
     assert "self._tray_icon.update_menu()" in body
 
     assert "self._refresh_tray_status()" in _ui_function("_tick_holds")
+
+
+# --- 예약 성공 종소리 --------------------------------------------------------
+#
+# sound.py 는 tray.py 와 마찬가지로 tkinter 를 import 하지 않으므로, 여기서는
+# 실제로 import 해서 부릅니다.
+
+
+def test_the_chime_is_a_valid_short_wav_clip():
+    """합성한 종소리가 실제로 재생 가능한 모양의 WAV 인지 — 길이·채널·
+    표본화율을 직접 읽어 확인합니다(지어내지 않습니다: 값을 만드는 함수와
+    같은 상수를 다시 쓰지 않고, wave 모듈로 **결과물**을 읽습니다).
+    """
+    import io
+    import wave
+
+    data = SOUND._bell_wave_bytes()
+    assert len(data) > 1000
+    with wave.open(io.BytesIO(data), "rb") as handle:
+        assert handle.getnchannels() == 1
+        assert handle.getsampwidth() == 2  # 16비트
+        assert handle.getframerate() == SOUND.SAMPLE_RATE
+        duration = handle.getnframes() / handle.getframerate()
+        assert 0.5 < duration < 2.0
+
+
+def test_the_chime_never_raises_even_with_no_player_available():
+    """이 컴퓨터(시험 환경)에는 winsound 도, afplay/paplay/aplay 도 없습니다
+    — 그런데도 예외를 던지면 안 됩니다. 자동예매가 예약을 잡은 그 순간
+    소리 재생 하나 때문에 화면 갱신이 죽으면 안 되기 때문입니다.
+    """
+    import shutil
+    import sys
+
+    assert sys.platform != "win32"
+    assert shutil.which("afplay") is None
+    assert shutil.which("paplay") is None
+    assert shutil.which("aplay") is None
+    SOUND.play_success_chime()  # 예외가 나면 이 시험 자체가 실패합니다.
+
+
+def test_the_chime_only_imports_winsound_on_windows():
+    """``winsound`` 는 윈도우에만 있는 표준 라이브러리입니다 — 다른
+    플랫폼에서 모듈 맨 위(import 시점)에 그냥 import 하면 이 프로그램 전체가
+    그 플랫폼에서 아예 뜨지 못합니다. 그래서 함수 안, 윈도우 갈래에서만
+    import 해야 합니다.
+    """
+    import inspect
+
+    source = inspect.getsource(SOUND)
+    assert "import winsound" not in source.splitlines()[0:20]  # 파일 맨 위가 아니다
+    assert "    import winsound" in source  # 함수 안, 들여쓰기된 자리에만
+
+
+def test_the_ui_wires_the_chime_to_new_holds_and_respects_the_toggle():
+    """새 홀드가 생기는 **유일한 자리**(remember_hold)에서만 소리를 냅니다
+    — 자동예매든 [바로 예약]이든 전부 이 함수를 거치므로, 여기 하나만
+    걸면 됩니다. 꺼 두면(``sound_enabled`` 가 거짓) 나지 않습니다.
+    """
+    body = _ui_function("remember_hold")
+    assert "if self.sound_enabled.get():" in body
+    assert "play_success_chime()" in body
+
+
+def test_the_preview_button_always_plays_regardless_of_the_toggle():
+    """[종소리 미리듣기] 는 켜져 있는지와 무관하게 늘 들려줍니다 — 꺼 둔
+    사람도 무슨 소리였는지 확인할 수 있어야 합니다.
+    """
+    body = _ui_function("play_test_sound")
+    assert "play_success_chime()" in body
+    assert "sound_enabled" not in body
+
+
+def test_the_sound_toggle_and_preview_button_are_on_screen():
+    source = _ui_source()
+    assert '"예약 성공 종소리"' in source
+    assert '"종소리 미리듣기"' in source
+    assert "command=self.play_test_sound" in source
+
+
+def test_the_sound_setting_is_remembered_across_restarts():
+    """다시 켜도 껐던(또는 켰던) 상태 그대로 있어야 합니다."""
+    assert ST.Settings().sound_enabled is True
+    assert "self.sound_enabled.set(stored.sound_enabled)" in _ui_function("_restore")
+    assert "sound_enabled=self.sound_enabled.get()" in _ui_function("_remember")
+
+
+def test_the_app_states_it_is_not_for_redistribution_or_commercial_use():
+    """무단 배포·상업적 이용 금지 문구가 화면(스크롤 밖, 늘 보이는 자리)과
+    app/README.md 양쪽에 있어야 합니다.
+    """
+    source = _ui_source()
+    assert "무단 배포" in source
+    assert "상업적 이용" in source
+
+    readme = (APP_DIR.parent / "app" / "README.md").read_text(encoding="utf-8")
+    assert "무단 배포를 금지합니다" in readme
+    assert "상업적" in readme and "금지합니다" in readme

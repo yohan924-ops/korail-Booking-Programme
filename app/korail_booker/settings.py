@@ -53,6 +53,9 @@ class Settings:
     telegram_token: str = ""
     telegram_chat_id: str = ""
     notify_enabled: bool = True
+    #: 예약이 잡히면 종소리를 낼지. 창을 트레이에 숨겨 놔도 이 소리는 그대로
+    #: 납니다 — 텔레그램·기록 창과 달리 화면을 보고 있지 않아도 바로 압니다.
+    sound_enabled: bool = True
     departure: str = "서울"
     arrival: str = "부산"
     depart_after: str = ""

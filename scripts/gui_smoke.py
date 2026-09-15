@@ -590,6 +590,33 @@ def main() -> int:
           any(h.pnr == "SMOKE1" for h in app.holds),
           [h.pnr for h in app.holds])
 
+    # -- 예약 성공 종소리: 켜고 끄기, [미리듣기]는 무관하게 울린다 -----------
+    chime_calls: list[bool] = []
+    real_chime = ui_module.play_success_chime
+    ui_module.play_success_chime = lambda: chime_calls.append(True)  # type: ignore[assignment]
+
+    app.sound_enabled.set(True)
+    app.remember_hold(Held(
+        label="", summary="x", pnr="CHIME1", fare="-",
+        deadline=None, deadline_text="모름",
+    ))
+    check("종소리를 켜 두면 새 홀드가 생길 때 울린다", chime_calls == [True], chime_calls)
+
+    chime_calls.clear()
+    app.sound_enabled.set(False)
+    app.remember_hold(Held(
+        label="", summary="x", pnr="CHIME2", fare="-",
+        deadline=None, deadline_text="모름",
+    ))
+    check("꺼 두면 새 홀드가 생겨도 안 울린다", chime_calls == [], chime_calls)
+
+    chime_calls.clear()
+    app.play_test_sound()
+    check("[종소리 미리듣기] 는 꺼 둬도 울린다", chime_calls == [True], chime_calls)
+
+    ui_module.play_success_chime = real_chime  # type: ignore[assignment]
+    app.sound_enabled.set(True)
+
     # -- 1구간이 같고 2구간만 다른 조합은 서로를 막지 않는가 -----------------
     app.targets = []
     app.holds = []
