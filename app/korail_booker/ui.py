@@ -586,8 +586,22 @@ class BookerApp:
         self._next_tag = 0
         self.events: queue.Queue[Callable[[], None]] = queue.Queue()
         self._credentials: tuple[str, str] | None = None
-        #: 환승역 목록이 어느 구간 것인지. 같은 구간이면 다시 묻지 않습니다.
+        #: 마지막으로 환승역 후보를 **물어본** 구간. 조회가 같은 구간을
+        #: 두 번 묻지 않게 캐시로만 씁니다(:meth:`_refresh_transfer_stations`)
+        #: — 목록에 실제로 뭐가 채워져 있는지는 :attr:`_transfer_list_route`
+        #: 가 압니다. 서버에 물어봤다고 목록에 그 답이 꼭 채워지는 것은
+        #: 아니기 때문입니다(같은 구간이면 사람이 손댄 목록을 지키려고
+        #: 안 채울 때가 있습니다).
         self._transfer_route: tuple[str, str] | None = None
+        #: 지금 환승역 목록(:attr:`transfer_list`)에 실제로 채워진 내용이
+        #: 어느 구간 것인지. ``None`` 이면 모릅니다(이번 세션에서 아직 그
+        #: 구간으로 채운 적이 없거나, 지난 세션 설정에서 그냥 불러온
+        #: 것이라 구간을 모릅니다). 구간을 바꿨는데 이 값이 새 구간과
+        #: 다르면(또는 없으면), 목록이 낡은 구간 것이라는 뜻이라 자동으로
+        #: 새로 채웁니다(:meth:`_offer_transfer_candidates`) — 예전에는
+        #: "목록이 비어 있지 않으면 안 채운다" 만 봐서, 구간을 바꿔도
+        #: 지난 구간의 역이 그대로 남아 있었습니다.
+        self._transfer_list_route: tuple[str, str] | None = None
         #: 전국 역 이름. 자동완성과 환승역 추가가 이것을 씁니다.
         self.station_names: tuple[str, ...] = ()
         #: 묶음의 부모 줄 → 그 아래 여정들의 번호.
@@ -718,7 +732,7 @@ class BookerApp:
         scroll = ttk.Scrollbar(self.root, orient="vertical", command=canvas.yview)
         scroll.grid(row=0, column=1, sticky="ns")
         # 가로도 굴러갑니다. 없으면 창보다 넓은 묶음의 오른쪽이 **그냥
-        # 잘립니다** — 환승 조건 칸의 [후보 갱신]·[비우기] 가 실제로 그렇게
+        # 잘립니다** — 환승 조건 칸의 [환승역 새로고침]·[비우기] 가 실제로 그렇게
         # 사라져 있었습니다. 세로만 굴러가는 창에서는 그 사실조차 보이지
         # 않습니다.
         hscroll = ttk.Scrollbar(self.root, orient="horizontal", command=canvas.xview)
@@ -1121,6 +1135,13 @@ class BookerApp:
         self.arrival_box.pack(side="left", padx=(2, 14))
         #: 이 칸들에서 Enter 를 누르면 조회합니다. 로그인 칸과 갈라 둡니다.
         self.query_fields = (self.departure_box, self.arrival_box)
+        # 구간을 바꾸고 이 칸을 떠나면(다른 칸을 클릭하거나 Tab) 환승역
+        # 후보도 그 구간 것으로 자동으로 새로 불러옵니다 — 키 하나하나마다
+        # (아직 다 안 친 역 이름으로) 서버에 묻지 않도록 **떠날 때만** 봅니다.
+        for box in (self.departure_box, self.arrival_box):
+            box.bind(
+                "<FocusOut>", lambda _e: self._offer_transfer_candidates(), add="+"
+            )
         self.station_state = tk.StringVar(value="역 불러오는 중…")
 
         people = self._section(frame, 1, "승객")
@@ -1230,7 +1251,7 @@ class BookerApp:
         left.grid(row=0, column=0, sticky="nw", padx=4, pady=4)
         self.server_radio = ttk.Radiobutton(
             left,
-            text="서버 추천 (검증됨)",
+            text="코레일 추천 환승",
             variable=self.transfer_mode,
             value=TRANSFER_SERVER,
             command=self._transfer_toggled,
@@ -1238,7 +1259,7 @@ class BookerApp:
         self.server_radio.pack(anchor="w")
         self.custom_radio = ttk.Radiobutton(
             left,
-            text="직접 지정 (서버 미검증)",
+            text="환승역 직접 선택",
             variable=self.transfer_mode,
             value=TRANSFER_CUSTOM,
             command=self._transfer_toggled,
@@ -1308,12 +1329,12 @@ class BookerApp:
         # 단추 넷이 한 줄입니다. 아랫줄로 떼면 이 묶음이 100px 높아지고, 그만큼
         # 아래 표들이 눌립니다 — 실제로 그랬습니다. 이름을 줄여 한 줄에 넣습니다.
         self.transfer_load_button = ttk.Button(
-            adder, text="후보 갱신", width=8,
+            adder, text="환승역 새로고침",
             command=self.on_load_transfer_stations
         )
         self.transfer_load_button.pack(side="left", padx=(4, 0))
-        # 갱신이 더는 지우지 않으므로, 처음부터 다시 하려면 지우는 단추가
-        # 따로 있어야 합니다.
+        # 비우는 단추가 따로 있어야 합니다 — [환승역 새로고침] 은 구간이
+        # 그대로면(방금 채운 그 구간이면) 더하기만 하고 지우지 않습니다.
         self.transfer_clear_button = ttk.Button(
             adder, text="비우기", width=6,
             command=self.clear_transfer_stations
@@ -1322,8 +1343,9 @@ class BookerApp:
         ttk.Label(
             right,
             text="코레일이 이 구간에 답한 역입니다(qry.chtnStn.do) — 목록에 "
-            "(검증) 이 붙습니다. [후보 갱신] 은 더하기만 하고 지우지 않습니다. "
-            "지우려면 [빼기]·[비우기].",
+            "(검증) 이 붙습니다. 구간(출발·도착)을 바꾸면 자동으로 새로 "
+            "불러옵니다. 같은 구간에서 [환승역 새로고침] 을 누르면 더하기만 "
+            "하고 지우지 않습니다 — 지우려면 [빼기]·[비우기].",
             foreground="#666666",
             wraplength=230,
             justify="left",
@@ -1459,11 +1481,14 @@ class BookerApp:
         칸을 바꾸는 것만으로 충분합니다 — ``self.departure``/``self.arrival``
         은 이미 :meth:`_watch_for_changes` 로 지켜보고 있어(``__init__``),
         여기서 따로 :meth:`mark_stale` 을 부르지 않아도 값이 바뀌는 순간
-        알아서 "조건이 바뀌었습니다" 로 표시됩니다.
+        알아서 "조건이 바뀌었습니다" 로 표시됩니다. 구간이 바뀌었으니
+        환승역 후보도 새 구간 것으로 다시 불러옵니다(단추라 포커스가
+        칸을 떠나지 않아, FocusOut 만으로는 이 경우를 못 잡습니다).
         """
         departure, arrival = self.departure.get(), self.arrival.get()
         self.departure.set(arrival)
         self.arrival.set(departure)
+        self._offer_transfer_candidates()
 
     def _clamp_return_date(self) -> None:
         """오는 날짜가 가는 날짜보다 앞서지 않게 합니다.
@@ -1603,6 +1628,15 @@ class BookerApp:
         ttk.Label(toolbar, textvariable=self.seat_pick_summary, foreground="#1f6feb").pack(
             side="left", padx=(4, 0)
         )
+        # 줄을 우클릭해도 열리지만(_show_train_schedule_menu), 우클릭으로
+        # 열리는 줄 안다는 보장이 없습니다 — 눈에 보이는 단추로도 같은
+        # 곳으로 가게 합니다.
+        ttk.Button(
+            toolbar, text="운행 일정 보기",
+            command=lambda: self.open_train_schedule_for(
+                self.tree if self.tree.selection() else self.return_tree
+            ),
+        ).pack(side="left", padx=(14, 0))
 
         self.outbound_title = ttk.Label(frame, text="가는 편", foreground="#1f6feb")
         self.outbound_title.grid(row=1, column=0, sticky="w", padx=6)
@@ -1770,6 +1804,10 @@ class BookerApp:
         # 옛 조건으로 계속 돕니다 — 이 단추가 멈추고 새 조건으로 다시 겁니다.
         ttk.Button(
             toolbar, text="조건 바꿔 재시작", command=self.restart_selected
+        ).pack(side="left", padx=(14, 0))
+        ttk.Button(
+            toolbar, text="운행 일정 보기",
+            command=lambda: self.open_train_schedule_for(self.target_list),
         ).pack(side="left", padx=(14, 0))
 
         # 목록이 아니라 표입니다. 줄마다 상태·주기·남은 시간을 따로 적어야
@@ -2279,6 +2317,10 @@ class BookerApp:
             toolbar, text="서버에서 불러오기", command=self.on_load_reservations
         )
         self.load_reservations_button.pack(side="left", padx=(14, 0))
+        ttk.Button(
+            toolbar, text="운행 일정 보기",
+            command=lambda: self.open_train_schedule_for(self.hold_tree),
+        ).pack(side="left", padx=(14, 0))
 
         self.hold_tree = ttk.Treeview(
             frame,
@@ -2908,40 +2950,52 @@ class BookerApp:
         self._offer_transfer_candidates()
 
     def _reset_transfer_load_button(self) -> None:
-        """[후보 갱신] 을 지금 상태에 맞춰 되돌립니다."""
+        """[환승역 새로고침] 을 지금 상태에 맞춰 되돌립니다."""
         self.transfer_load_button.configure(
             state="normal" if self.include_transfer.get() else "disabled"
         )
 
+    def _transfer_list_matches_route(self, route: tuple[str, str]) -> bool:
+        """지금 환승역 목록이 이 구간 것으로 확인된 적이 있는가.
+
+        :attr:`_transfer_list_route` 가 ``None`` 이면(이번 세션에서 이
+        구간으로 채운 적이 없음, 또는 지난 세션 설정에서 구간을 모른 채
+        불러온 목록) 모르는 것으로 치고 ``False`` 를 돌려줍니다 — 안다고
+        지어내지 않습니다.
+        """
+        return self._transfer_list_route == route
+
     def _offer_transfer_candidates(self) -> None:
-        """모드를 바꿨을 때 서버 후보를 **비어 있으면만** 채웁니다.
+        """환승을 켜거나, 모드를 바꾸거나, 구간(출발·도착)을 바꾸면 부릅니다.
 
         두 모드에서 이 목록의 뜻이 다릅니다 — 서버 추천에서는 결과를 거르는
-        필터, 직접 지정에서는 조회할 역 그 자체. 그래서 모드를 바꾸고 나면
-        대개 후보가 필요합니다.
+        필터, 직접 지정에서는 조회할 역 그 자체. 그래서 이 화면이 만들어지는
+        순간(또는 구간이 바뀌는 순간) 대개 후보가 새로 필요합니다.
 
-        그렇다고 **덮지는 않습니다.** 이 저장소가 이미 정한 규칙이 있습니다:
-        [조회] 는 목록이 비어 있을 때만 채우고, [후보 갱신] 은 더하기만 하며,
-        지우는 것은 [빼기]·[비우기] 뿐입니다. 모드 전환이 그 규칙을 뒤로
-        돌아 손으로 만든 목록을 지우면, 빼 둔 역이 조용히 되살아납니다 —
-        고쳐 놓은 버그가 새 경로로 되살아나는 것입니다.
+        **그 구간 것으로 이미 확인된 목록은 덮지 않습니다**
+        (:meth:`_transfer_list_matches_route`). [환승역 새로고침] 은 그때만
+        더하기만 하고, 지우는 것은 [빼기]·[비우기] 뿐입니다 — 사람이 그
+        구간에서 손으로 고친 것을 지우면 안 되기 때문입니다.
 
-        구간이 비어 있거나 불러오다 실패해도 조용히 넘어갑니다. 모드를 바꾸는
-        일이 네트워크 때문에 막히면 안 됩니다.
+        그런데 **목록이 다른 구간 것이면(또는 구간을 모르면) 새로 채웁니다.**
+        지난 구간에서 고른 역을 새 구간에 그대로 남겨 두면, "환승"을 처음
+        켜거나 구간을 바꿔도 목록이 안 바뀐 것처럼 보였습니다 — 실제로 그런
+        신고가 있었습니다(지난 세션 설정에서 불러온 목록은 구간을 몰라
+        늘 이 경우였습니다).
+
+        구간이 비어 있거나 불러오다 실패해도 조용히 넘어갑니다. 이 자리가
+        네트워크 때문에 막히면 안 됩니다.
         """
         if not self.include_transfer.get():
-            return
-        if self.transfer_names():
-            # 사람이 만든 목록이 있습니다. 표시만 다시 그리고 길을 알려 줍니다.
-            self._redraw_transfer_marks()
-            self._write_log(
-                "환승 모드를 바꿨습니다 — 환승역 목록은 그대로 둡니다. "
-                "서버 후보를 더하려면 [후보 갱신], 지우려면 [빼기]·[비우기]."
-            )
             return
         departure = self.departure.get().strip()
         arrival = self.arrival.get().strip()
         if not departure or not arrival:
+            return
+        route = (departure, arrival)
+        if self.transfer_names() and self._transfer_list_matches_route(route):
+            # 사람이 이 구간에서 손댄 목록입니다. 표시만 다시 그립니다.
+            self._redraw_transfer_marks()
             return
         self.transfer_load_button.configure(state="disabled")
 
@@ -2950,13 +3004,13 @@ class BookerApp:
                 client = self._ensure_client()
                 names = transfer_station_candidates(client, departure, arrival)
             except (KorailApiError, ValueError) as exc:
-                # 곁가지입니다. 모드 전환은 이미 끝났고, 목록은 손으로도
+                # 곁가지입니다. 환승 조건은 이미 켜졌고, 목록은 손으로도
                 # 채울 수 있습니다.
                 self.log(f"환승역 후보를 불러오지 못했습니다: {exc}")
                 self.events.put(self._reset_transfer_load_button)
                 return
-            self._transfer_route = (departure, arrival)
-            self.events.put(lambda: self._transfer_stations_loaded(names))
+            self._transfer_route = route
+            self.events.put(lambda: self._transfer_stations_loaded(route, names))
 
         self._in_thread(work, "korail-transfer-stations")
 
@@ -3019,29 +3073,31 @@ class BookerApp:
         return tuple(name for name in picked if name)
 
     def _server_candidates_loaded(self, route: tuple[str, str], names: list[str]) -> None:
-        """조회하면서 받아 온 서버 후보. **사람이 만든 목록을 덮지 않습니다.**
+        """조회하면서 받아 온 서버 후보. **이 구간에서 사람이 만든 목록은
+        덮지 않지만, 다른 구간 것이면 새로 채웁니다.**
 
         모드를 가리지 않습니다. 두 모드 모두에서 목록은 사람이 손댄 것입니다 —
         직접 지정에서는 고른 역이 곧 조회 대상이고, 서버 추천에서는 고른 역이
-        결과를 거르는 필터입니다. 어느 쪽이든 [조회] 를 눌렀다고 목록이 서버
-        후보 전체로 되돌아가면, 빼 둔 역이 조용히 되살아납니다 — 실제로
-        그랬습니다.
+        결과를 거르는 필터입니다. **이 구간에서** [조회] 를 다시 눌렀다고
+        목록이 서버 후보 전체로 되돌아가면, 빼 둔 역이 조용히 되살아납니다 —
+        실제로 그랬습니다.
 
-        그래도 받아 온 것은 버리지 않습니다. 어느 역이 서버도 인정하는
-        역인지를 목록에 ``(검증)`` 으로 붙여 주는 데 씁니다. 목록이 아직
-        비어 있을 때만 채웁니다 — 그때는 잃을 것이 없습니다.
+        그런데 구간을 바꿔 조회했는데 목록이 **지난 구간** 것 그대로면, 처음
+        보기엔 아무 일도 안 일어난 것 같습니다 — 그래서 목록이 다른 구간
+        것이면(또는 구간을 모르면) 새로 채웁니다(:meth:`_transfer_list_matches_route`).
         """
         self._server_stations = set(names)
-        if self.transfer_names():
-            # 이미 목록이 있으면 그대로 두고 표시만 다시 그립니다.
+        if self.transfer_names() and self._transfer_list_matches_route(route):
+            # 이 구간에서 이미 손댄 목록입니다. 그대로 두고 표시만 다시 그립니다.
             self._redraw_transfer_marks()
             self._write_log(
                 f"{route[0]}→{route[1]} 서버 환승역 후보 {len(names)}개를 "
                 "받아 (검증) 표시를 새로 달았습니다. 목록 자체는 그대로 "
-                "둡니다 — 서버 후보를 목록에 더하려면 [후보 갱신] 을 누르세요."
+                "둡니다 — 서버 후보를 목록에 더하려면 [환승역 새로고침] 을 "
+                "누르세요."
             )
             return
-        self._transfer_stations_loaded(names)
+        self._transfer_stations_loaded(route, names)
 
     def transfer_names(self) -> tuple[str, ...]:
         """목록에 있는 역 이름 전부. 붙어 있는 ``(검증)`` 은 뗍니다."""
@@ -3113,6 +3169,12 @@ class BookerApp:
         # 넣은 역은 골라 둡니다 — 직접 지정에서는 고른 것이 곧 조회 대상입니다.
         keep = set(self.selected_transfer_stations()) | {name}
         self._fill_transfer_stations(existing, select_all=False, keep=keep)
+        # 손으로 채운 이 목록은 지금 구간 것으로 칩니다 — 안 그러면 구간을
+        # 안 바꿨는데도(포커스만 옮겨도) 다른 구간 것으로 오인해 방금 넣은
+        # 역이 자동 새로고침에 지워질 수 있습니다.
+        self._transfer_list_route = (
+            self.departure.get().strip(), self.arrival.get().strip()
+        )
         self.transfer_query.set("")
         self.mark_stale()
         self._write_log(f"환승역 후보에 {name} 을 넣었습니다.")
@@ -3124,31 +3186,34 @@ class BookerApp:
         if not departure or not arrival:
             messagebox.showwarning("환승역", "출발역과 도착역을 먼저 입력하세요")
             return
+        route = (departure, arrival)
         self.transfer_load_button.configure(state="disabled")
 
         def work() -> None:
             client = self._ensure_client()
             names = transfer_station_candidates(client, departure, arrival)
-            self._transfer_route = (departure, arrival)
-            self.events.put(lambda: self._transfer_stations_loaded(names))
+            self._transfer_route = route
+            self.events.put(lambda: self._transfer_stations_loaded(route, names))
 
         self._in_thread(work, "korail-transfer-stations")
 
-    def _transfer_stations_loaded(self, names: list[str]) -> None:
-        """[구간 후보 갱신] 의 결과. **손으로 넣은 역을 지우지 않습니다.**
+    def _transfer_stations_loaded(self, route: tuple[str, str], names: list[str]) -> None:
+        """[환승역 새로고침] 의 결과.
 
-        예전에는 목록을 통째로 서버가 준 것으로 되돌렸습니다. 그런데 직접
-        지정 모드에서 그것은 사람이 방금 만든 목록을 지우는 일입니다 — 서버
-        후보에 없는 역을 넣을 수 있게 해 놓고, 후보를 한 번 더 불러오면
-        그 역이 사라졌습니다.
+        **이 구간에서 손으로 넣은 역은 지우지 않습니다** — 목록에 있던 것은
+        그대로 두고, 서버가 준 것 중 없던 것만 뒤에 붙입니다(합칩니다).
+        예전에는 통째로 서버가 준 것으로 되돌려서, 직접 지정 모드에서 서버
+        후보에 없는 역을 넣어 뒀다가 후보를 한 번 더 불러오면 그 역이
+        사라졌습니다.
 
-        그래서 **합칩니다**: 목록에 있던 것은 그대로 두고, 서버가 준 것 중
-        없던 것만 뒤에 붙입니다. 처음부터 다시 하고 싶으면 [목록 비우기] 가
-        있습니다 — 지우는 일은 지우는 단추가 합니다.
+        그런데 목록이 **다른 구간** 것이면(또는 구간을 모르면) 지난 구간의
+        역과 섞이면 안 되므로, 있던 것을 무시하고 이 구간 것으로 새로
+        채웁니다(:meth:`_transfer_list_matches_route`).
         """
         self.transfer_load_button.configure(state="normal")
         self._server_stations = set(names)
-        existing = list(self.transfer_names())
+        same_route = self._transfer_list_matches_route(route)
+        existing = list(self.transfer_names()) if same_route else []
         added = [name for name in names if name not in existing]
         merged = existing + added
         # 새로 붙은 것은 골라 둡니다. 직접 지정에서는 고른 것이 곧 조회
@@ -3156,18 +3221,29 @@ class BookerApp:
         # 방금 불러온 후보를 꺼 둔 채로 두면 불러온 뜻이 없습니다.
         keep = set(self.selected_transfer_stations()) | set(added)
         self._fill_transfer_stations(merged, select_all=not existing, keep=keep)
+        self._transfer_list_route = route
         if not names:
             self._write_log("이 구간에는 서버가 알려 주는 환승역이 없습니다.")
             return
-        self._write_log(
-            f"{self.departure.get()}→{self.arrival.get()} 서버 환승역 "
-            f"{len(names)}개를 불러왔습니다 — 새로 붙은 것 {len(added)}개, "
-            f"원래 있던 {len(existing)}개는 그대로입니다."
-        )
+        if same_route:
+            self._write_log(
+                f"{route[0]}→{route[1]} 서버 환승역 {len(names)}개를 "
+                f"불러왔습니다 — 새로 붙은 것 {len(added)}개, 원래 있던 "
+                f"{len(existing)}개는 그대로입니다."
+            )
+        else:
+            self._write_log(
+                f"구간이 바뀌어 환승역 목록을 {route[0]}→{route[1]} "
+                f"{len(names)}개로 새로 불러왔습니다."
+            )
 
     def clear_transfer_stations(self) -> None:
         """환승역 목록을 통째로 비웁니다. 지우는 일은 이 단추가 합니다."""
         self._fill_transfer_stations([], select_all=False, keep=set())
+        # 비었으니 더는 어느 구간 것도 아닙니다 — 그대로 두면 방금 지운
+        # 구간과 같은 구간에서는 자동 새로고침이 "그대로 둔다" 고 오판해
+        # 빈 목록을 다시 채우지 않습니다.
+        self._transfer_list_route = None
         self.mark_stale()
         self._write_log("환승역 목록을 비웠습니다.")
 
@@ -4176,7 +4252,13 @@ class BookerApp:
         return None
 
     def _show_train_schedule_menu(self, event: tk.Event) -> None:
-        """우클릭 메뉴 — 구간이 하나면 바로, 여럿이면 구간을 고르게 합니다."""
+        """우클릭 메뉴 — 구간이 하나면 바로, 여럿이면 구간을 고르게 합니다.
+
+        표에 있는 [운행 일정 보기] 단추(:meth:`open_train_schedule_for`)도
+        같은 구간 찾기(:meth:`_schedule_legs_for_row`)와 같은 메뉴 꾸미기
+        (:meth:`_schedule_menu_items`)를 씁니다 — 우클릭을 몰라도 같은
+        곳으로 가야 하기 때문입니다.
+        """
         tree = event.widget
         if not isinstance(tree, ttk.Treeview):
             return
@@ -4190,24 +4272,57 @@ class BookerApp:
         if not legs:
             return
         menu = tk.Menu(self.root, tearoff=0)
+        for label, leg in self._schedule_menu_items(legs):
+            menu.add_command(
+                label=label, command=lambda leg=leg: self.open_train_schedule(leg)
+            )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    @staticmethod
+    def _schedule_menu_items(
+        legs: tuple[TrainSummary, ...],
+    ) -> list[tuple[str, TrainSummary]]:
+        """운행 일정 메뉴에 올릴 (문구, 구간) 목록. 구간이 하나면 문구도 하나."""
         if len(legs) == 1:
             leg = legs[0]
             label = one_line(f"{(leg.train_class_name or '').strip()} {leg.train_no}")
+            return [(f"운행 일정 보기 ({label})", leg)]
+        items = []
+        for leg_index, leg in enumerate(legs):
+            label = one_line(f"{(leg.train_class_name or '').strip()} {leg.train_no}")
+            items.append((f"{leg_index + 1}구간 운행 일정 보기 ({label})", leg))
+        return items
+
+    def open_train_schedule_for(self, tree: ttk.Treeview) -> None:
+        """[운행 일정 보기] 단추. 우클릭을 몰라도 줄을 고르고 누르면 됩니다.
+
+        구간이 하나면 **곧장** 엽니다 — 우클릭 메뉴와 달리, 이 단추를
+        누른다는 것 자체가 이미 "운행 일정을 보겠다" 는 뜻이라 메뉴를 한
+        번 더 거칠 이유가 없습니다. 구간이 여럿(이어지는 여정)이면 어느
+        구간인지 골라야 하므로 메뉴를 띄웁니다.
+        """
+        selection = tree.selection()
+        if not selection:
+            messagebox.showinfo("운행 일정", "표에서 줄을 먼저 고르세요.")
+            return
+        legs = self._schedule_legs_for_row(tree, selection[0])
+        if not legs:
+            messagebox.showinfo("운행 일정", "이 줄에서는 운행 일정을 볼 수 없습니다.")
+            return
+        if len(legs) == 1:
+            self.open_train_schedule(legs[0])
+            return
+        menu = tk.Menu(self.root, tearoff=0)
+        for label, leg in self._schedule_menu_items(legs):
             menu.add_command(
-                label=f"운행 일정 보기 ({label})",
-                command=lambda leg=leg: self.open_train_schedule(leg),
+                label=label, command=lambda leg=leg: self.open_train_schedule(leg)
             )
-        else:
-            for leg_index, leg in enumerate(legs):
-                label = one_line(
-                    f"{(leg.train_class_name or '').strip()} {leg.train_no}"
-                )
-                menu.add_command(
-                    label=f"{leg_index + 1}구간 운행 일정 보기 ({label})",
-                    command=lambda leg=leg: self.open_train_schedule(leg),
-                )
+        x, y = tree.winfo_pointerx(), tree.winfo_pointery()
         try:
-            menu.tk_popup(event.x_root, event.y_root)
+            menu.tk_popup(x, y)
         finally:
             menu.grab_release()
 

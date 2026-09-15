@@ -1620,17 +1620,19 @@ def test_the_booker_waits_for_both_legs_instead_of_grabbing_one():
 
 
 def test_a_search_never_overwrites_hand_picked_transfer_stations():
-    """목록은 두 모드 모두에서 사람이 손댄 것입니다.
+    """목록은 두 모드 모두에서 사람이 손댄 것입니다 — **같은 구간이면.**
 
     직접 지정에서는 고른 역이 곧 조회 대상이고, 서버 추천에서는 고른 역이
-    결과를 거르는 필터입니다. 어느 쪽이든 [조회] 를 눌렀다고 목록이 서버 후보
-    전체로 되돌아가면 빼 둔 역이 조용히 되살아납니다 — 실제로 그랬습니다.
+    결과를 거르는 필터입니다. 같은 구간에서 [조회] 를 눌렀다고 목록이 서버
+    후보 전체로 되돌아가면 빼 둔 역이 조용히 되살아납니다 — 실제로
+    그랬습니다. 다만 구간이 바뀌면(:meth:`_transfer_list_matches_route`
+    가 아니라고 하면) 지난 구간 역이 섞이면 안 되므로 새로 채웁니다.
     """
     body = _ui_function("_server_candidates_loaded")
 
-    # 모드를 가리지 않습니다. 목록이 있으면 그것으로 끝입니다.
+    # 모드를 가리지 않습니다. 목록이 이 구간 것이면 그것으로 끝입니다.
     assert "TRANSFER_CUSTOM" not in body
-    assert "if self.transfer_names():" in body
+    assert "if self.transfer_names() and self._transfer_list_matches_route(route):" in body
     # 그래도 받아 온 것은 (검증) 표시에 씁니다.
     assert "self._server_stations = set(names)" in body
     assert "self._redraw_transfer_marks()" in body
@@ -4177,12 +4179,16 @@ def test_picking_a_bundle_head_opens_a_picker_instead_of_adding_everything():
 
 
 def test_switching_transfer_mode_never_overwrites_a_curated_list():
-    """모드 전환이 [조회]·[후보 갱신] 규칙을 뒤로 돌아가면 안 됩니다."""
+    """모드 전환이 [조회]·[환승역 새로고침] 규칙을 뒤로 돌아가면 안 됩니다 —
+    **단, 구간이 그대로일 때만.** 구간이 바뀌었으면(또는 처음이면) 새로
+    불러와야 "환승을 켜도/모드를 바꿔도 목록이 안 바뀐다" 는 신고가
+    다시 나지 않습니다.
+    """
     body = _ui_function("_offer_transfer_candidates")
-    # 사람이 만든 목록이 있으면 표시만 다시 그립니다.
-    assert "if self.transfer_names():" in body
+    # 이 구간에서 사람이 만든 목록이 있으면 표시만 다시 그립니다.
+    assert "if self.transfer_names() and self._transfer_list_matches_route(route):" in body
     assert "self._redraw_transfer_marks()" in body
-    # 비어 있을 때만 불러옵니다.
+    # 다른 구간이면(또는 처음이면) 불러옵니다.
     assert "transfer_station_candidates(client, departure, arrival)" in body
     # 구간이 없거나 실패해도 모드 전환을 막지 않습니다.
     assert "if not departure or not arrival:" in body
@@ -4512,13 +4518,42 @@ def test_schedule_row_lookup_never_invents_a_leg_it_cannot_find():
 
 
 def test_schedule_menu_offers_one_item_per_leg():
-    """구간이 하나면 바로 열고, 여럿이면 구간마다 골라 열게 합니다."""
+    """구간이 하나면 항목도 하나, 여럿이면 구간마다 하나 — 우클릭 메뉴와
+    [운행 일정 보기] 단추가 같은 꾸미기 함수(_schedule_menu_items)를 씁니다.
+    """
+    items_fn = _ui_function("_schedule_menu_items")
+    assert "if len(legs) == 1:" in items_fn
+    assert "return [(f'운행 일정 보기 ({label})', leg)]" in items_fn
+    assert "items.append((f'{leg_index + 1}구간 운행 일정 보기 ({label})', leg))" in items_fn
+
     body = _ui_function("_show_train_schedule_menu")
     assert "self._on_expander(tree, event)" in body
-    assert "if len(legs) == 1:" in body
+    assert "self._schedule_menu_items(legs)" in body
     assert "self.open_train_schedule(leg)" in body
     assert "menu.tk_popup(event.x_root, event.y_root)" in body
     assert "menu.grab_release()" in body
+
+
+def test_the_schedule_button_opens_directly_for_a_single_leg():
+    """단추는 우클릭과 다르게, 구간이 하나면 메뉴 없이 곧장 엽니다 — 단추를
+    누른다는 것 자체가 이미 "보겠다" 는 뜻이라 한 항목짜리 메뉴를 한 번 더
+    거칠 이유가 없습니다. 표에서 아무 줄도 안 골랐으면 지어내지 않고
+    고르라고 알립니다.
+    """
+    body = _ui_function("open_train_schedule_for")
+    assert "if not selection:" in body
+    assert "messagebox.showinfo('운행 일정', '표에서 줄을 먼저 고르세요.')" in body
+    assert "if len(legs) == 1:" in body
+    assert "self.open_train_schedule(legs[0])" in body
+    assert "self._schedule_menu_items(legs)" in body
+
+
+def test_the_schedule_button_is_on_all_three_tables():
+    source = _ui_source()
+    assert source.count('text="운행 일정 보기"') == 3
+    assert "self.tree if self.tree.selection() else self.return_tree" in source
+    assert "self.open_train_schedule_for(self.target_list)" in source
+    assert "self.open_train_schedule_for(self.hold_tree)" in source
 
 
 def test_opening_a_schedule_refuses_to_invent_a_missing_date_or_train_number():

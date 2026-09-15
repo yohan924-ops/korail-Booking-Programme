@@ -181,7 +181,13 @@ def main() -> int:
         check(f"단추가 있는 칸이 요구 높이({need})만큼 받는다", given >= need,
               f"minsize={given}")
 
-    # -- 손으로 넣은 환승역이 살아남는가 ------------------------------------
+    # -- 손으로 넣은 환승역이 살아남는가 (같은 구간일 때만) ------------------
+    #
+    # app.departure/app.arrival 은 아직 기본값("서울"/"부산")입니다 — 실제
+    # 검색 구간을 바꾸는 건 이 스크립트 뒤쪽(동탄→동대구, 맞바꾸기 시험)
+    # 뿐입니다. 그래서 여기서 같은 구간으로 넣는 시험은 그 route 를 그대로
+    # 씁니다.
+    same_route = (app.departure.get().strip(), app.arrival.get().strip())
     app.include_transfer.set(True)
     app.transfer_mode.set(TRANSFER_CUSTOM)
     app.sync_transfer_state()
@@ -190,19 +196,37 @@ def main() -> int:
         app.transfer_query.set(name)
         app.add_transfer_station()
     by_hand = app.transfer_names()
-    app._transfer_stations_loaded(["대전", "김천구미"])
-    check("[후보 갱신] 이 손으로 넣은 역을 지우지 않는다",
+    check("손으로 넣으면 그 구간이 '지금 목록의 구간' 으로 기록된다",
+          app._transfer_list_route == same_route, app._transfer_list_route)
+    app._transfer_stations_loaded(same_route, ["대전", "김천구미"])
+    check("같은 구간의 [환승역 새로고침] 은 손으로 넣은 역을 지우지 않는다",
           set(by_hand) <= set(app.transfer_names()), app.transfer_names())
     check("서버도 준 역에는 (검증) 이 붙는다",
           "대전 (검증)" in [app.transfer_list.get(i)
                           for i in range(app.transfer_list.size())])
     kept = app.transfer_names()
-    app._server_candidates_loaded(("동탄", "동대구"), ["부산"])
-    check("[조회] 가 목록을 덮지 않는다", app.transfer_names() == kept,
+    app._server_candidates_loaded(same_route, ["부산"])
+    check("같은 구간의 [조회] 가 목록을 덮지 않는다", app.transfer_names() == kept,
           app.transfer_names())
+
+    # -- 진짜 문제였던 것: 구간이 바뀌면 환승역 목록이 새로고침되는가 -------
+    #
+    # 실제로 있었던 문제: 설정에서 불러온 목록이든, 이전 구간에서 쓰던
+    # 목록이든 '목록에 뭔가 있다' 는 이유만으로 새 구간에서도 절대 안
+    # 바뀌었습니다 — _transfer_list_route 가 없던 시절엔 목록 내용이 지금
+    # 조회 중인 구간 것인지 전혀 몰랐기 때문입니다.
+    other_route = ("동탄", "동대구")
+    app._server_candidates_loaded(other_route, ["신경주"])
+    check("구간이 바뀌면 [조회] 가 이전 구간 목록을 지우고 새로 채운다",
+          app.transfer_names() == ("신경주",), app.transfer_names())
+    check("구간이 바뀌면 '지금 목록의 구간' 도 새 구간으로 바뀐다",
+          app._transfer_list_route == other_route, app._transfer_list_route)
+
     app.clear_transfer_stations()
     check("[비우기] 가 목록을 비운다", app.transfer_list.size() == 0)
-    app._server_candidates_loaded(("동탄", "동대구"), ["대전", "김천구미"])
+    check("[비우기] 는 '지금 목록의 구간' 도 모르는 상태로 되돌린다",
+          app._transfer_list_route is None, app._transfer_list_route)
+    app._server_candidates_loaded(other_route, ["대전", "김천구미"])
     check("비어 있으면 조회가 채운다",
           app.transfer_names() == ("대전", "김천구미"), app.transfer_names())
 
@@ -215,21 +239,21 @@ def main() -> int:
     # (별개의 메커니즘입니다) .instate(['disabled']) 로 확인해야 합니다.
     app._searching(True)
     root.update()
-    check("조회를 시작하면 서버 추천 라디오가 실제로 잠긴다(instate)",
+    check("조회를 시작하면 코레일 추천 라디오가 실제로 잠긴다(instate)",
           app.server_radio.instate(["disabled"]))
     check("환승역 목록도 잠긴다", app.transfer_list.cget("state") == "disabled")
-    app._server_candidates_loaded(("동탄", "동대구"), ["대전", "김천구미"])
+    app._server_candidates_loaded(other_route, ["대전", "김천구미"])
     root.update()
     check("조회 중 mid-search 갱신 뒤에도 라디오가 계속 잠겨 있다",
           app.server_radio.instate(["disabled"]))
     check("조회 중 mid-search 갱신 뒤에도 환승역 목록이 계속 잠겨 있다",
           app.transfer_list.cget("state") == "disabled",
           app.transfer_list.cget("state"))
-    check("조회 중 mid-search 갱신 뒤에도 [후보 갱신] 단추가 계속 잠겨 있다",
+    check("조회 중 mid-search 갱신 뒤에도 [환승역 새로고침] 단추가 계속 잠겨 있다",
           app.transfer_load_button.instate(["disabled"]))
-    app._transfer_stations_loaded(["대전", "오송"])
+    app._transfer_stations_loaded(other_route, ["대전", "오송"])
     root.update()
-    check("[구간 후보 갱신] 콜백 뒤에도 계속 잠겨 있다",
+    check("구간 새로고침 콜백 뒤에도 계속 잠겨 있다",
           app.transfer_load_button.instate(["disabled"])
           and app.transfer_list.cget("state") == "disabled")
     app._searching(False)
@@ -1134,6 +1158,90 @@ def main() -> int:
     app._ensure_client = real_ensure_client  # type: ignore[method-assign]
     app._in_thread = real_in_thread  # type: ignore[method-assign]
 
+    # -- 운행 일정 단추: 우클릭 말고 리스트에서 바로 누르는 길 ---------------
+    #
+    # 구간이 하나면 메뉴 없이 곧장 열리고, 여럿이면(이어지는 여정) 우클릭과
+    # 똑같은 메뉴가 뜹니다. add_command/tk_popup 을 다시 가로챕니다.
+    menu_labels.clear()
+    tk.Menu.add_command = _record_add_command  # type: ignore[method-assign]
+    tk.Menu.tk_popup = lambda self, x, y: None  # type: ignore[method-assign]
+
+    app._show_journeys(results)
+    root.update()
+    app.tree.selection_set(app.tree.get_children()[0])
+    before_windows = set(root.winfo_children())
+    app.open_train_schedule_for(app.tree)
+    root.update()
+    opened = [
+        w for w in root.winfo_children()
+        if w not in before_windows and isinstance(w, tk.Toplevel)
+    ]
+    check("운행 일정 단추(조회 결과): 구간 하나짜리는 메뉴 없이 곧장 연다",
+          len(opened) == 1 and not menu_labels, (opened, menu_labels))
+    for w in opened:
+        w.destroy()
+
+    app._show_journeys([Target(journey=lone_journey, request=request)])
+    root.update()
+    app.tree.selection_set(app.tree.get_children()[0])
+    menu_labels.clear()
+    before_windows = set(root.winfo_children())
+    app.open_train_schedule_for(app.tree)
+    root.update()
+    opened = [
+        w for w in root.winfo_children()
+        if w not in before_windows and isinstance(w, tk.Toplevel)
+    ]
+    check("운행 일정 단추(조회 결과): 이어지는 여정은 우클릭과 같은 메뉴를 연다",
+          not opened and menu_labels == [
+              f"1구간 운행 일정 보기 (KTX {lone_first.train_no})",
+              f"2구간 운행 일정 보기 (KTX {lone_second.train_no})",
+          ], (opened, menu_labels))
+
+    app.targets = list(results)
+    app.sync_target_list()
+    root.update()
+    app.target_list.selection_set(app.target_list.get_children()[0])
+    menu_labels.clear()
+    before_windows = set(root.winfo_children())
+    app.open_train_schedule_for(app.target_list)
+    root.update()
+    opened = [
+        w for w in root.winfo_children()
+        if w not in before_windows and isinstance(w, tk.Toplevel)
+    ]
+    check("운행 일정 단추(예매 대상): 구간 하나짜리는 메뉴 없이 곧장 연다",
+          len(opened) == 1 and not menu_labels, (opened, menu_labels))
+    for w in opened:
+        w.destroy()
+    app.targets = []
+    app.sync_target_list()
+
+    app.holds = [Held(
+        label="", summary="전체", pnr="P3001", fare="10000",
+        deadline=None, deadline_text="모름",
+        held_journey=first_target.journey,
+    )]
+    app.sync_holds()
+    root.update()
+    app.hold_tree.selection_set(app.hold_tree.get_children()[0])
+    menu_labels.clear()
+    app.open_train_schedule_for(app.hold_tree)
+    root.update()
+    check("운행 일정 단추(잡은 예약): 이어지는 구간은 우클릭과 같은 메뉴를 연다",
+          len(menu_labels) == 2, menu_labels)
+    app.holds = []
+    app.sync_holds()
+
+    app.tree.selection_remove(*app.tree.selection())
+    shown.clear()
+    app.open_train_schedule_for(app.tree)
+    check("운행 일정 단추: 고른 줄이 없으면 안내만 하고 조용히 넘어간다",
+          any("줄을 먼저 고르세요" in message for _t, message in shown), shown)
+
+    tk.Menu.add_command = real_add_command  # type: ignore[method-assign]
+    tk.Menu.tk_popup = real_tk_popup  # type: ignore[method-assign]
+
     # -- 로그인 팝업: 감시 중 잠금, 하이픈 안내, [비로그인] 목록 초기화 ------
     # find_widgets 는 위 "묶음과 담기" 절에서 이미 정의했습니다.
 
@@ -1226,6 +1334,36 @@ def main() -> int:
     check("⇄ 단추가 출발역·도착역을 서로 바꾼다",
           app.departure.get() == "동대구" and app.arrival.get() == "동탄",
           (app.departure.get(), app.arrival.get()))
+
+    # -- 환승역 목록이 구간을 따라 실제로 새로고침을 거는가 -------------------
+    #
+    # 실제 네트워크 조회는 기다리지 않습니다(느리고 이 컴퓨터엔 서버가 없어
+    # 실패합니다) — 대신 _in_thread 를 손으로 바꿔 끼워, [환승역 새로고침]
+    # 이 "새로 받아 오려 했는지"만 확인합니다. 그 판단(받아 올지 말지)이
+    # 바로 이번에 고친 부분이라, 그 판단까지만 보면 충분합니다.
+    fetch_calls: list[str] = []
+    real_in_thread = app._in_thread
+    app._in_thread = lambda work, name: fetch_calls.append(name)  # type: ignore[method-assign]
+    try:
+        app.include_transfer.set(True)
+        app.transfer_mode.set(TRANSFER_CUSTOM)
+        app.sync_transfer_state()
+        app._transfer_stations_loaded(("동대구", "동탄"), ["신경주"])
+        check("같은 구간에서 다시 부르면 새로 받아 오려 하지 않는다(재요청 없음)",
+              not fetch_calls, fetch_calls)
+        app.departure.set("부산")
+        app.arrival.set("서울")
+        app._offer_transfer_candidates()
+        check("구간이 바뀌면 [환승역 새로고침] 이 새로 받아 오려 한다(재요청 발생)",
+              bool(fetch_calls), fetch_calls)
+        check("아직 응답이 안 왔으니 단추는 눌러 둔 채로 기다린다",
+              app.transfer_load_button.instate(["disabled"]))
+    finally:
+        app._in_thread = real_in_thread  # type: ignore[method-assign]
+        app._reset_transfer_load_button()
+        app.clear_transfer_stations()
+        app.departure.set("동대구")
+        app.arrival.set("동탄")
 
     # -- 트레이: 창의 X 단추은 트레이가 있을 때만 숨긴다 ----------------------
     #
